@@ -1,0 +1,29 @@
+Define a class based on toga for the gui.
+
+Start with a combo box at the top to select the show labelled Show.
+
+Directly below the Show combo box have a radio button list of episode sorting types
+Sort types are date, episode number and episode title.
+
+Below this is a list box of the selected show's episodes sorted by the selected sort type.
+This list allows selecting multiple entries.
+
+Below the list box are a group of buttons.
+Download, Stream, Cancel
+
+Below the buttons are controls for the following settings
+
+twitcluburl
+    This is the url you received from TWIT.TV of your club twit membership. This is typically
+    https://twit.memberfulcontent.com/rss/9041?auth= followed by a unique key for your particular
+    membership. Only the unique key portion is editable.
+
+twitclubdestination
+    This is a folder where the episodes are downloaded.
+
+twitclubblocksize
+    This the size of each read from the stream while downloading. The default is 8192 (8kb)
+
+twitclubstreamer
+    This is the program to use to stream the show. The default will be vlc. The stream url is represented by %f.
+    The default string is "vlc %f"
