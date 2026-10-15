@@ -3,16 +3,16 @@ import sys
 
 # Redirect stderr to suppress GTK warnings
 class StderrRedirector:
-    def __init__(self, original_stderr):
+    def __init__(self, original_stderr) -> None:
         self.original_stderr = original_stderr
 
-    def write(self, message):
+    def write(self, message) -> None:
         # Filter out the specific xapp-gtk3-module warning
         if "Failed to load module" in message and "xapp-gtk3-module" in message:
             return
         self.original_stderr.write(message)
 
-    def flush(self):
+    def flush(self) -> None:
         self.original_stderr.flush()
 
 # Redirect stderr to filter out GTK warnings
@@ -29,6 +29,9 @@ os.environ['NO_AT_BRIDGE'] = '1'
 os.environ['GDK_BACKEND'] = 'x11'
 # Suppress GTK module loading warnings
 os.environ['G_MESSAGES_DEBUG'] = ''
+
+from dotenv import load_dotenv
+load_dotenv()
 
 from twittui_form import main
 
