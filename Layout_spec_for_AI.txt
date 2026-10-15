@@ -1,29 +1,51 @@
-Define a class based on toga for the gui.
+Define a class based on toga for the gui (inheriting from toga.App).
 
-Start with a combo box at the top to select the show labelled Show.
+Start with a horizontal box at the top for show selection:
+- Labelled "Show:"
+- A combo box (toga.Selection) to select the show
+- A "Fetch" button directly to the right to refresh the show catalog from the TWiT API or fallback feeds
 
-Directly below the Show combo box have a radio button list of episode sorting types
-Sort types are date, episode number and episode title.
+Directly below the Show section have a horizontal box of episode sorting types:
+- Labelled "Sort by:"
+- Simulated radio buttons for sort types: Date (default: selected "☑ Date"), Episode Number ("☐ Episode Number"), and Episode Title ("☐ Episode Title")
 
-Below this is a list box of the selected show's episodes sorted by the selected sort type.
-This list allows selecting multiple entries.
+Below this is a label "Episodes:" followed by a multi-column table (toga.Table) of the selected show's episodes sorted by the selected sort type:
+- Table columns/headings: "Episode", "Title", "Date"
+- Supports multiple selection for batch downloading
+- Activating/double-clicking an episode row triggers streaming
 
-Below the list box are a group of buttons.
-Download, Stream, Cancel
+Below the episodes table are a horizontal group of action buttons:
+- "Download" (initiates multi-threaded background download of selected episodes)
+- "Stream" (launches external player stream for the selected episode)
+- "Cancel" (cancels running downloads)
+- "Close" (exits the application window)
 
-Below the buttons are controls for the following settings
+Below the buttons is a vertical container with controls for the following settings:
 
-twitcluburl
-    This is the url you received from TWIT.TV of your club twit membership. This is typically
-    https://twit.memberfulcontent.com/rss/9041?auth= followed by a unique key for your particular
-    membership. Only the unique key portion is editable.
+API Application ID (TWITAPI_APPLICATIONID)
+    Horizontal row with label "API Application ID:" and a text input for the TWiT 3Scale Application ID.
 
-twitclubdestination
-    This is a folder where the episodes are downloaded.
+API Application Key (TWITAPI_APPLICATIONKEYS)
+    Horizontal row with label "API Application Key:" and a text input for the TWiT 3Scale secret Application Key.
 
-twitclubblocksize
-    This the size of each read from the stream while downloading. The default is 8192 (8kb)
+twitcluburl (TWITCLUBURL)
+    Horizontal row with label "TWIT Club URL:", a static label prefix showing
+    "https://twit.memberfulcontent.com/rss/9041?auth=", and a text input for the unique authentication key
+    portion of your Club TWiT membership feed.
 
-twitclubstreamer
-    This is the program to use to stream the show. The default will be vlc. The stream url is represented by %f.
-    The default string is "vlc %f"
+twitclubdestination (TWITCLUBDESTINATION)
+    Horizontal row with label "Download Destination:", a text input for the target download folder,
+    and a "Browse" button opening a native folder selection dialog.
+
+twitclubblocksize (TWITCLUBBLOCKSIZE)
+    Horizontal row with label "Block Size:" and a text input for the download stream chunk read size
+    (default: 8192).
+
+twitclubstreamer (TWITCLUBSTREAMER)
+    Horizontal row with label "Streamer:" and a text input for the command line media player.
+    The stream URL is represented by %f (default: "vlc %f").
+
+Application Menu Commands (under toga.Group.HELP):
+- "View README Documentation": Opens an integrated hybrid documentation viewer window (toga.WebView) with HTML sanitization, Table of Contents anchor navigation, floating return button, and fallback to default system browser.
+- "View API Specification (twittv.apib)": Opens the TWiT REST API Blueprint specification in the sanitized hybrid document viewer.
+- "Get TWiT API Key": Opens the official TWiT 3Scale Developer Portal (https://twit-tv.3scale.net) in the default web browser.
