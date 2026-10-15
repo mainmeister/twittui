@@ -9,9 +9,11 @@ import urllib.parse
 import email.utils
 import xml.etree.ElementTree as ET
 import tempfile
+import pathlib
 import webbrowser
 import html
 import requests
+import http.server
 from dotenv import load_dotenv, set_key
 
 # Ensure environment variables are loaded
@@ -105,6 +107,37 @@ DEFAULT_SHOWS = [
     ("iOS Today", "1660")
 ]
 
+class _LocalHTMLServer(http.server.HTTPServer):
+    def __init__(self, server_address, RequestHandlerClass):
+        super().__init__(server_address, RequestHandlerClass)
+        self.pages = {}
+        self.lock = threading.Lock()
+
+class _LocalHTMLHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path_key = parsed.path.lstrip('/') or 'index.html'
+
+        with self.server.lock:
+            content_bytes = self.server.pages.get(path_key) or self.server.pages.get('index.html')
+
+        if content_bytes:
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(content_bytes)))
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.end_headers()
+            self.wfile.write(content_bytes)
+        else:
+            self.send_response(404)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(b'404 Not Found')
+
+    def log_message(self, format, *args):
+        # Mute server request logging to preserve clean console output
+        pass
+
 class TwitTUIForm(toga.App):
     def __init__(self, formal_name=None, app_id=None, **kwargs):
         self.show_ids = {}
@@ -112,6 +145,7 @@ class TwitTUIForm(toga.App):
         self._club_rss_cache = None
         self._memberful_feeds_cache = {}
         self._show_rss_cache = {}
+        self._local_server = None
         self.app_id_input = None
         self.app_key_input = None
         self.audio_only_checkbox = None
@@ -591,8 +625,10 @@ class TwitTUIForm(toga.App):
         app_key_label = toga.Label('API Application Key:', style=Pack(margin=(0, 5)))
         initial_app_key = os.getenv('TWITAPI_APPLICATIONKEYS') or os.getenv('twitapi_applicationkeys') or ''
         self.app_key_input = toga.TextInput(value=initial_app_key, style=Pack(flex=1))
+        test_api_button = toga.Button('Test API', on_press=self.on_test_api_press, style=Pack(margin=5))
         app_key_box.add(app_key_label)
         app_key_box.add(self.app_key_input)
+        app_key_box.add(test_api_button)
 
         # TWIT Club URL setting
         url_box = toga.Box(style=Pack(direction=ROW, margin=5))
@@ -607,9 +643,11 @@ class TwitTUIForm(toga.App):
         else:
             initial_url_key = twit_club_url
         self.url_input = toga.TextInput(value=initial_url_key, style=Pack(flex=1))
+        show_url_button = toga.Button('Show', on_press=self.on_show_club_url_press, style=Pack(margin=5))
         url_box.add(url_label)
         url_box.add(url_prefix)
         url_box.add(self.url_input)
+        url_box.add(show_url_button)
 
         # Destination folder setting
         dest_box = toga.Box(style=Pack(direction=ROW, margin=5))
@@ -961,6 +999,51 @@ class TwitTUIForm(toga.App):
 </html>"""
         return styled_html
 
+    def get_app_cache_dir(self) -> str:
+        """Get or create user cache directory accessible by sandboxed web browsers."""
+        cache_dir = os.path.expanduser("~/.cache/twittui")
+        try:
+            os.makedirs(cache_dir, mode=0o755, exist_ok=True)
+            return cache_dir
+        except Exception:
+            return tempfile.gettempdir()
+
+    def _ensure_local_server(self) -> _LocalHTMLServer | None:
+        """Ensure local background HTTP server is running on 127.0.0.1 for displaying HTML in browsers."""
+        if not hasattr(self, '_local_server') or self._local_server is None:
+            try:
+                self._local_server = _LocalHTMLServer(('127.0.0.1', 0), _LocalHTMLHandler)
+                server_thread = threading.Thread(target=self._local_server.serve_forever, daemon=True)
+                server_thread.start()
+            except Exception as e:
+                print(f"Warning: Could not start local HTTP server ({e})")
+                self._local_server = None
+        return self._local_server
+
+    def open_html_in_browser(self, html_content: str, page_name: str = "index.html") -> None:
+        """Open rendered HTML in web browser via local HTTP server with file fallback."""
+        html_bytes = html_content.encode('utf-8')
+        server = self._ensure_local_server()
+        if server:
+            with server.lock:
+                server.pages[page_name] = html_bytes
+                server.pages['index.html'] = html_bytes
+            port = server.server_address[1]
+            webbrowser.open(f"http://127.0.0.1:{port}/{page_name}")
+            return
+
+        # Fallback to local HTML file in cache directory if local HTTP server unavailable
+        cache_dir = self.get_app_cache_dir()
+        temp_file = tempfile.NamedTemporaryFile("w", dir=cache_dir, delete=False, suffix=".html", encoding="utf-8")
+        temp_file.write(html_content)
+        temp_file.close()
+        try:
+            os.chmod(temp_file.name, 0o644)
+        except Exception:
+            pass
+        file_uri = pathlib.Path(os.path.abspath(temp_file.name)).as_uri()
+        webbrowser.open(file_uri)
+
     def show_document_viewer(self, filename: str, doc_title: str) -> None:
         """Display a Markdown/APIB document using the Hybrid Resilient Pattern (WebView with Browser fallback)."""
         candidate_paths = [
@@ -1013,10 +1096,8 @@ class TwitTUIForm(toga.App):
 
         # Fallback Tier: System default web browser
         try:
-            temp_file = tempfile.NamedTemporaryFile("w", delete=False, suffix=".html", encoding="utf-8")
-            temp_file.write(styled_html)
-            temp_file.close()
-            webbrowser.open(f"file://{os.path.abspath(temp_file.name)}")
+            doc_slug = os.path.splitext(filename)[0].lower().replace('_', '-').replace('.', '-')
+            self.open_html_in_browser(styled_html, page_name=f"{doc_slug}.html")
         except Exception as browser_err:
             err_msg = f"Unable to display documentation: {browser_err}"
             print(f"Error: {err_msg}")
@@ -1058,6 +1139,238 @@ class TwitTUIForm(toga.App):
     def on_open_api_key_url(self, widget=None) -> None:
         """Handler for Help menu command to open the TWiT API key registration URL."""
         self.open_api_key_url()
+
+    def get_full_club_twit_url(self) -> str:
+        """Construct or return the full Club TWiT URL from user input or environment."""
+        raw_val = self.url_input.value.strip() if hasattr(self, 'url_input') and self.url_input and self.url_input.value else ''
+        if raw_val.startswith('http://') or raw_val.startswith('https://'):
+            return raw_val
+        auth_key = self.get_club_twit_auth_key()
+        if auth_key:
+            return f"https://twit.memberfulcontent.com/rss/9041?auth={auth_key}"
+        return "https://twit.memberfulcontent.com/rss/9041"
+
+    def render_rss_feed_to_html(self, xml_content: str | bytes) -> str:
+        """Render RSS 2.0 XML podcast feed content into styled HTML using CSS/XSL styling."""
+        if isinstance(xml_content, str):
+            xml_bytes = xml_content.encode('utf-8', errors='replace')
+        else:
+            xml_bytes = xml_content
+
+        # Load CSS file if available
+        css_content = ""
+        candidate_css_paths = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "feed-style.css"),
+            os.path.join(os.getcwd(), "feed-style.css"),
+            os.path.abspath("feed-style.css")
+        ]
+        for cpath in candidate_css_paths:
+            if os.path.isfile(cpath):
+                try:
+                    with open(cpath, "r", encoding="utf-8") as f:
+                        css_content = f.read()
+                        break
+                except Exception:
+                    pass
+
+        # If lxml and feed-style.xsl are available, attempt XSLT transformation
+        candidate_xsl_paths = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "feed-style.xsl"),
+            os.path.join(os.getcwd(), "feed-style.xsl"),
+            os.path.abspath("feed-style.xsl")
+        ]
+        xsl_path = None
+        for xpath in candidate_xsl_paths:
+            if os.path.isfile(xpath):
+                xsl_path = xpath
+                break
+
+        if xsl_path:
+            try:
+                import lxml.etree as etree
+                with open(xsl_path, "rb") as xf:
+                    xslt_doc = etree.XML(xf.read())
+                transform = etree.XSLT(xslt_doc)
+                src_doc = etree.fromstring(xml_bytes)
+                result_tree = transform(src_doc)
+                html_out = str(result_tree)
+                if css_content and '<style>' in html_out and '</style>' in html_out:
+                    style_start = html_out.find('<style>') + 7
+                    style_end = html_out.find('</style>')
+                    html_out = html_out[:style_start] + "\n" + css_content + "\n" + html_out[style_end:]
+                return html_out
+            except Exception as xslt_err:
+                print(f"XSLT rendering fallback ({xslt_err}), using Python RSS renderer.")
+
+        # ElementTree parser fallback
+        try:
+            root = ET.fromstring(xml_bytes)
+            channel = root.find('channel')
+            if channel is None:
+                channel = root.find('.//channel')
+
+            ch_title = channel.findtext('title', 'Podcast RSS Feed') if channel is not None else 'Podcast RSS Feed'
+            ch_desc = channel.findtext('description', '') if channel is not None else ''
+            ch_link = channel.findtext('link', '') if channel is not None else ''
+            ch_author = ''
+            ch_lang = ''
+            ch_image = ''
+
+            if channel is not None:
+                for elem in channel:
+                    tag = elem.tag.lower()
+                    if tag.endswith('author'):
+                        ch_author = elem.text or ''
+                    elif tag.endswith('language'):
+                        ch_lang = elem.text or ''
+                    elif tag.endswith('image'):
+                        if elem.attrib.get('href'):
+                            ch_image = elem.attrib['href']
+                        else:
+                            url_sub = elem.find('url')
+                            if url_sub is not None and url_sub.text:
+                                ch_image = url_sub.text.strip()
+
+            items_html = []
+            raw_items = channel.findall('.//item') if channel is not None else root.findall('.//item')
+            for item in raw_items:
+                title = item.findtext('title', 'Untitled Episode')
+                link = item.findtext('link', '')
+                pub_date = item.findtext('pubDate', '')
+
+                desc = ''
+                duration = ''
+                episode_no = ''
+                for elem in item:
+                    tag = elem.tag.lower()
+                    if tag.endswith('encoded'):
+                        desc = elem.text or ''
+                    elif tag.endswith('description') and not desc:
+                        desc = elem.text or ''
+                    elif tag.endswith('summary') and not desc:
+                        desc = elem.text or ''
+                    elif tag.endswith('duration'):
+                        duration = elem.text or ''
+                    elif tag.endswith('episode'):
+                        episode_no = elem.text or ''
+
+                enclosure = item.find('enclosure')
+                enc_url = enclosure.attrib.get('url', '') if enclosure is not None else ''
+                enc_type = enclosure.attrib.get('type', '') if enclosure is not None else ''
+                enc_length = enclosure.attrib.get('length', '') if enclosure is not None else ''
+
+                size_str = ''
+                if enc_length:
+                    try:
+                        mb = round(int(enc_length) / 1048576)
+                        if mb > 0:
+                            size_str = f" • {mb} MB"
+                    except Exception:
+                        pass
+
+                title_html = f'<a href="{html.escape(link)}" target="_blank" rel="noopener noreferrer">{html.escape(title)}</a>' if link else html.escape(title)
+
+                meta_parts = []
+                if pub_date:
+                    meta_parts.append(f'<span>Published: {html.escape(pub_date)}</span>')
+                if duration:
+                    meta_parts.append(f'<span>Duration: {html.escape(duration)}</span>')
+                if episode_no:
+                    meta_parts.append(f'<span>Episode #{html.escape(episode_no)}</span>')
+                meta_html = f'<div class="episode-meta">{" ".join(meta_parts)}</div>' if meta_parts else ''
+
+                media_html = ''
+                if enc_url:
+                    media_html = f"""<div class="media-controls">
+  <a class="media-link" href="{html.escape(enc_url)}" target="_blank" rel="noopener noreferrer">&#9654; Stream / Download Media</a>
+  <span class="media-type">{html.escape(enc_type)}{size_str}</span>
+</div>"""
+
+                safe_desc = self.sanitize_html(desc) if hasattr(self, 'sanitize_html') else desc
+
+                card_html = f"""<div class="episode-card">
+  <h2 class="episode-title">{title_html}</h2>
+  {meta_html}
+  <div class="episode-description">{safe_desc}</div>
+  {media_html}
+</div>"""
+                items_html.append(card_html)
+
+            image_html = f'<img class="channel-image" src="{html.escape(ch_image)}" alt="Podcast Cover Art" />' if ch_image else ''
+            author_html = f'<span>Author: {html.escape(ch_author)}</span>' if ch_author else ''
+            lang_html = f'<span>Language: {html.escape(ch_lang)}</span>' if ch_lang else ''
+            link_html = f'<a href="{html.escape(ch_link)}" target="_blank" rel="noopener noreferrer">Visit Website</a>' if ch_link else ''
+
+            return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{html.escape(ch_title)} - RSS Feed</title>
+  <style>
+{css_content}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="notice-banner">
+      <strong>Podcast RSS Feed View:</strong> Formatted with <code>feed-style.css</code>. You can copy this URL into your podcast client.
+    </div>
+    <div class="header">
+      {image_html}
+      <div class="header-info">
+        <h1>{html.escape(ch_title)}</h1>
+        <p class="channel-desc">{html.escape(ch_desc)}</p>
+        <div class="header-meta">
+          {link_html}
+          {author_html}
+          {lang_html}
+        </div>
+      </div>
+    </div>
+    <div class="episodes-heading">
+      Episodes ({len(items_html)})
+    </div>
+    <div class="episodes-list">
+      {"".join(items_html)}
+    </div>
+  </div>
+</body>
+</html>"""
+        except Exception as parse_err:
+            print(f"Error parsing RSS XML: {parse_err}")
+            return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>RSS Feed Error</title><style>{css_content}</style></head>
+<body><div class="container"><h1>Unable to parse RSS feed</h1><p>{html.escape(str(parse_err))}</p></div></body></html>"""
+
+    def open_club_twit_url(self) -> None:
+        """Fetch and render the Club TWiT RSS feed with CSS styling and open in default web browser."""
+        target_url = self.get_full_club_twit_url()
+        try:
+            resp = requests.get(target_url, headers={'User-Agent': 'Mozilla/5.0 (compatible; TwitTUI/1.0)'}, timeout=15)
+            if resp.status_code == 200 and resp.content:
+                styled_html = self.render_rss_feed_to_html(resp.content)
+                self.open_html_in_browser(styled_html, page_name="club-twit-feed.html")
+                return
+            else:
+                print(f"Warning: HTTP {resp.status_code} while fetching Club TWiT feed, opening direct URL.")
+        except Exception as e:
+            print(f"Error fetching Club TWiT RSS feed ({e}), opening direct URL.")
+
+        try:
+            webbrowser.open(target_url)
+        except Exception as e:
+            err_msg = f"Failed to open Club TWiT URL: {e}"
+            print(f"Error: {err_msg}")
+            if hasattr(self, 'main_window') and self.main_window:
+                try:
+                    self.main_window.error_dialog("Browser Error", err_msg)
+                except Exception:
+                    pass
+
+    def on_show_club_url_press(self, widget=None) -> None:
+        """Handler for Show button press next to the Club TWiT URL field."""
+        threading.Thread(target=self.open_club_twit_url, daemon=True).start()
 
     def get_destination_folder(self) -> str:
         """Get the configured download destination directory."""
@@ -1695,6 +2008,71 @@ class TwitTUIForm(toga.App):
                 self.dest_input.value = str(selected_folder)
         except Exception as e:
             print(f"Error selecting folder: {e}")
+
+    def show_api_test_dialog(self, success: bool, message: str) -> None:
+        """Display a modal dialog indicating whether the TWiT API credentials test passed or failed."""
+        title = "TWiT API Test: Passed" if success else "TWiT API Test: Failed"
+
+        def _show():
+            try:
+                if hasattr(self, 'main_window') and self.main_window:
+                    if success:
+                        self.main_window.info_dialog(title, message)
+                    else:
+                        self.main_window.error_dialog(title, message)
+            except Exception as e:
+                print(f"Error displaying API test dialog: {e}")
+
+        if hasattr(self, 'loop') and self.loop and self.loop.is_running():
+            try:
+                self.loop.call_soon_threadsafe(_show)
+            except Exception:
+                _show()
+        else:
+            _show()
+
+    def test_api_credentials(self, app_id: str, app_key: str) -> tuple[bool, str]:
+        """Validate TWiT API Application ID and Key against TWiT REST API."""
+        app_id = (app_id or '').strip()
+        app_key = (app_key or '').strip()
+
+        if not app_id or not app_key:
+            return False, "Failed: Missing API Application ID or Application Key.\nPlease enter both credentials before testing."
+
+        headers = {
+            'Accept': 'application/json',
+            'app-id': app_id,
+            'app-key': app_key,
+            'User-Agent': 'Mozilla/5.0 (compatible; TwitTUI/1.0)'
+        }
+
+        try:
+            resp = requests.get('https://twit.tv/api/v1.0/shows', headers=headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                show_count = len(data.get('shows', [])) if isinstance(data, dict) and 'shows' in data else 0
+                return True, f"Passed: TWiT API credentials verified successfully!\nRetrieved {show_count} shows from the TWiT API."
+            elif resp.status_code in (401, 403):
+                return False, f"Failed: TWiT API authentication rejected (HTTP {resp.status_code}).\nPlease check that your Application ID and Key are correct."
+            else:
+                return False, f"Failed: TWiT API returned HTTP status {resp.status_code} ({resp.reason})."
+        except requests.exceptions.Timeout:
+            return False, "Failed: Connection to TWiT API timed out."
+        except requests.exceptions.RequestException as e:
+            return False, f"Failed: Network error communicating with TWiT API: {e}"
+        except Exception as e:
+            return False, f"Failed: Error testing TWiT API credentials: {e}"
+
+    def on_test_api_press(self, widget=None) -> None:
+        """Handler for Test API button press."""
+        app_id = self.get_api_app_id()
+        app_key = self.get_api_app_key()
+
+        def _worker():
+            success, msg = self.test_api_credentials(app_id, app_key)
+            self.show_api_test_dialog(success, msg)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def fetch_episode_detail(self, episode_id):
         """Fetch full details for a single episode ID."""

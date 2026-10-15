@@ -132,8 +132,8 @@ twitclubstreamer=vlc %f
 | [ Download ]  [ Stream ]  [ Cancel ]  [ Close ]                         |
 |                                                                         |
 | API Application ID:   [ 3edec74c                 ]                      |
-| API Application Key:  [ 36a22e422f0f8773e03b8... ]                      |
-| TWIT Club URL: https://twit.memberfulcontent.com/rss/9041?auth= [ KEY ] |
+| API Application Key:  [ 36a22e422f0f8773e03b8... ] [ Test API ]        |
+| TWIT Club URL: https://twit.memberfulcontent.com/rss/9041?auth= [ KEY ] [ Show ] |
 | Download Destination: [/home/user/Podcasts       ] [ Browse ]           |
 | Block Size:           [8192                      ]                      |
 | Streamer:             [vlc %f                    ]                      |
@@ -166,6 +166,7 @@ twitclubstreamer=vlc %f
 #### Club TWiT Member Features
 - Paste your unique Memberful key into the **TWIT Club URL** box.
 - When configured, TwitTUI automatically checks your Club TWiT feed for commercial-free and subscriber-exclusive episodes.
+- Click the **Show** button next to the URL input to fetch, format, and view your Club TWiT feed as a styled webpage directly in your default web browser (styled with `feed-style.css`).
 
 ---
 
@@ -179,6 +180,8 @@ twittui/
 ├── twittui_form.py          # Core application logic, Toga GUI/TUI layout, networking, and workers
 ├── twittv.apib              # Full API Blueprint documentation for TWiT.tv REST API v1.0
 ├── Layout_spec_for_AI.txt   # UI specification and control layout blueprint
+├── feed-style.css           # Modern, responsive CSS stylesheet for podcast RSS feeds
+├── feed-style.xsl           # Standalone XSLT 1.0 transformation template for podcast RSS feeds
 ├── .env                     # Local environment configuration file (ignored in VCS)
 └── README.md                # System documentation and technical manual
 ```
@@ -264,11 +267,13 @@ toga.MainWindow (title='TWIT.tv TUI')
         │   └── toga.TextInput (value=initial_app_id) [app_id_input]
         ├── toga.Box (direction=ROW) [app_key_box]
         │   ├── toga.Label ('API Application Key:')
-        │   └── toga.TextInput (value=initial_app_key) [app_key_input]
+        │   ├── toga.TextInput (value=initial_app_key) [app_key_input]
+        │   └── toga.Button ('Test API', on_press=on_test_api_press)
         ├── toga.Box (direction=ROW) [url_box]
         │   ├── toga.Label ('TWIT Club URL:')
         │   ├── toga.Label ('https://twit.memberfulcontent.com/rss/9041?auth=')
-        │   └── toga.TextInput (value=initial_url_key) [url_input]
+        │   ├── toga.TextInput (value=initial_url_key) [url_input]
+        │   └── toga.Button ('Show', on_press=on_show_club_url_press)
         ├── toga.Box (direction=ROW) [dest_box]
         │   ├── toga.Label ('Download Destination:')
         │   ├── toga.TextInput (value=initial_dest) [dest_input]

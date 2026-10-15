@@ -27,12 +27,13 @@ API Application ID (TWITAPI_APPLICATIONID)
     Horizontal row with label "API Application ID:" and a text input for the TWiT 3Scale Application ID.
 
 API Application Key (TWITAPI_APPLICATIONKEYS)
-    Horizontal row with label "API Application Key:" and a text input for the TWiT 3Scale secret Application Key.
+    Horizontal row with label "API Application Key:", a text input for the TWiT 3Scale secret Application Key,
+    and a "Test API" button that validates the API credentials against the TWiT REST API and displays a modal dialog with pass/fail status and a close button.
 
 twitcluburl (TWITCLUBURL)
     Horizontal row with label "TWIT Club URL:", a static label prefix showing
-    "https://twit.memberfulcontent.com/rss/9041?auth=", and a text input for the unique authentication key
-    portion of your Club TWiT membership feed.
+    "https://twit.memberfulcontent.com/rss/9041?auth=", a text input for the unique authentication key
+    portion of your Club TWiT membership feed, and a "Show" button that fetches and formats the Club TWiT feed with CSS styling (feed-style.css) and displays it in the default web browser.
 
 twitclubdestination (TWITCLUBDESTINATION)
     Horizontal row with label "Download Destination:", a text input for the target download folder,
