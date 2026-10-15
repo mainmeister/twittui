@@ -8,6 +8,7 @@ Start with a horizontal box at the top for show selection:
 Directly below the Show section have a horizontal box of episode sorting types:
 - Labelled "Sort by:"
 - Simulated radio buttons for sort types: Date (default: selected "☑ Date"), Episode Number ("☐ Episode Number"), and Episode Title ("☐ Episode Title")
+- Simulated checkbox for format selection: "☐ Audio Only" / "☑ Audio Only" (persists selection across executions via TWITAUDIOONLY)
 
 Below this is a label "Episodes:" followed by a multi-column table (toga.Table) of the selected show's episodes sorted by the selected sort type:
 - Table columns/headings: "Episode", "Title", "Date"
@@ -15,7 +16,7 @@ Below this is a label "Episodes:" followed by a multi-column table (toga.Table) 
 - Activating/double-clicking an episode row triggers streaming
 
 Below the episodes table are a horizontal group of action buttons:
-- "Download" (initiates multi-threaded background download of selected episodes)
+- "Download" (initiates multi-threaded background download of selected episodes; on completion, pops up a modal dialog displaying the destination folder at top and downloaded filenames, one per line, with a close button)
 - "Stream" (launches external player stream for the selected episode)
 - "Cancel" (cancels running downloads)
 - "Close" (exits the application window)
@@ -44,6 +45,9 @@ twitclubblocksize (TWITCLUBBLOCKSIZE)
 twitclubstreamer (TWITCLUBSTREAMER)
     Horizontal row with label "Streamer:" and a text input for the command line media player.
     The stream URL is represented by %f (default: "vlc %f").
+
+At the bottom of the form is a progress bar (toga.ProgressBar):
+- Displays real-time download progress for the batch when downloading episodes.
 
 Application Menu Commands (under toga.Group.HELP):
 - "View README Documentation": Opens an integrated hybrid documentation viewer window (toga.WebView) with HTML sanitization, Table of Contents anchor navigation, floating return button, and fallback to default system browser.

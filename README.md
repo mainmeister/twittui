@@ -161,6 +161,7 @@ twitclubstreamer=vlc %f
 2. Ensure **Download Destination** is set to your preferred folder (use **Browse** to select).
 3. Click **Download**. Downloads execute concurrently in the background without freezing the UI.
 4. Files are saved directly to your destination path with normalized, clean filenames (e.g., `This Week in Tech 1001 AI in the Fast Lane.mp4`).
+5. When the batch completes, a modal dialog appears displaying the target download folder at the top and the list of downloaded filenames (one per line) with a **Close** button.
 
 #### Club TWiT Member Features
 - Paste your unique Memberful key into the **TWIT Club URL** box.
@@ -248,7 +249,8 @@ toga.MainWindow (title='TWIT.tv TUI')
     │   ├── toga.Label ('Sort by:')
     │   ├── toga.Button ('☑ Date', on_press=on_sort_button_press) [date_radio]
     │   ├── toga.Button ('☐ Episode Number', on_press=on_sort_button_press) [episode_radio]
-    │   └── toga.Button ('☐ Episode Title', on_press=on_sort_button_press) [title_radio]
+    │   ├── toga.Button ('☐ Episode Title', on_press=on_sort_button_press) [title_radio]
+    │   └── toga.Button ('☐ Audio Only', on_press=on_audio_only_toggle) [audio_only_checkbox]
     ├── toga.Label ('Episodes:')
     ├── toga.Table (headings=['Episode', 'Title', 'Date'], multiple_select=True) [episodes_list]
     ├── toga.Box (direction=ROW, margin=5) [button_box]
@@ -277,6 +279,7 @@ toga.MainWindow (title='TWIT.tv TUI')
         └── toga.Box (direction=ROW) [streamer_box]
             ├── toga.Label ('Streamer:')
             └── toga.TextInput (value='vlc %f') [streamer_input]
+    └── toga.ProgressBar (max=100.0, value=0.0) [progress_bar]
 ```
 
 ---
@@ -324,18 +327,32 @@ To eliminate redundant HTTP traffic and improve responsiveness:
 
 ### Media Resolution Engine & Extraction Heuristics
 
-The `extract_media_url(episode_dict)` method inspects heterogeneous data schemas returned by the API and RSS parsers, prioritizing high-fidelity video streams:
+The `extract_media_url(episode_dict, audio_only=...)` and `resolve_media_url(episode_dict, show_name, audio_only=...)` methods inspect heterogeneous data schemas returned by the API and RSS parsers, prioritizing either high-fidelity video streams or audio-only streams based on the **Audio Only** setting:
 
 ```python
-# Video format priority order
+# Video format priority order (when Audio Only is unchecked)
 VIDEO_PREFERENCE = [
     'video_hd',       # 1080p / 720p HD Video
     'video_large',    # Large standard definition video
     'video_small',    # Mobile-optimized small video
-    'video_audio',    # Audio-only stream
+    'video_audio',    # Audio-only stream fallback
     'video_youtube'   # YouTube hosted video stream
 ]
+
+# Audio format priority order (when Audio Only is checked)
+AUDIO_PREFERENCE = [
+    'video_audio',    # Standard MP3 / M4A audio stream
+    'audio',          # Direct audio enclosure
+    'video_hd'        # Video fallback if no audio stream exists
+]
 ```
+
+When **Audio Only** is enabled:
+- Club TWiT RSS queries prioritize subscriber audio feeds (`9040`, `9066`, `9054`, etc.) before video feeds.
+- Public RSS queries check `.xml` audio feeds before `_video_hd.xml`.
+- Webpage scraping extracts `.mp3` and `.m4a` URLs before `.mp4`.
+- Download filenames automatically preserve `.mp3` / `.m4a` file extensions.
+- State is persisted persistently across restarts via the `TWITAUDIOONLY` environment setting in `.env`.
 
 #### Validation Filter (`is_valid_media_url`)
 Every candidate URL passes through `is_valid_media_url(url)` to prevent opening API metadata endpoints or HTML web pages as media streams:
@@ -369,12 +386,17 @@ Downloads run on background daemon threads (`threading.Thread`) to keep Toga's m
          ▼
  ┌────────────────────────────────────────────────────────┐
  │ download_episodes_batch loop:                          │
- │   1. Resolve Media URL via 5-tier cascade              │
- │   2. Determine sanitized target filename               │
- │   3. download_episode_file():                          │
- │      a. Stream via requests.get(url, stream=True)      │
- │      b. Write chunks (size=block_size) to .part file   │
- │      c. Atomic rename: dest.part -> dest               │
+ │   1. Initialize batch progress (0% to 100%)            │
+ │   2. For each episode:                                 │
+ │      a. Resolve Media URL via 5-tier cascade           │
+ │      b. Determine sanitized target filename            │
+ │      c. Stream via requests.get(url, stream=True)      │
+ │      d. Update progress bar with batch percentage      │
+ │      e. Write chunks (size=block_size) to .part file   │
+ │      f. Atomic rename: dest.part -> dest               │
+ │   3. On batch completion:                              │
+ │      Display modal dialog with destination folder &    │
+ │      downloaded files list (one per line) + Close btn  │
  └────────────────────────────────────────────────────────┘
 ```
 
@@ -430,6 +452,7 @@ The `determine_download_filename(target, media_url)` method sanitizes filenames 
 | `twitclubdestination` / `TWITCLUBDESTINATION` | String | `.` (Current dir) | Filesystem directory path for storing downloaded podcast files. |
 | `twitclubblocksize` / `TWITCLUBBLOCKSIZE` | Integer | `8192` (8 KB) | Buffer chunk size in bytes for network download streaming. |
 | `twitclubstreamer` / `TWITCLUBSTREAMER` | String | `vlc %f` | Command template string used to spawn the external streaming player. |
+| `TWITAUDIOONLY` / `twitaudioonly` | Integer / Boolean | `0` (False) | Flag (`1`/`0`) persisting the Audio Only streaming/download preference across sessions. |
 
 ---
 

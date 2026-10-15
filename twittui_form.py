@@ -12,7 +12,7 @@ import tempfile
 import webbrowser
 import html
 import requests
-from dotenv import load_dotenv
+from dotenv import load_dotenv, set_key
 
 # Ensure environment variables are loaded
 load_dotenv()
@@ -114,7 +114,121 @@ class TwitTUIForm(toga.App):
         self._show_rss_cache = {}
         self.app_id_input = None
         self.app_key_input = None
+        self.audio_only_checkbox = None
+        self.progress_bar = None
+        self._is_downloading = False
+        self._cancel_download = False
         super().__init__(formal_name=formal_name, app_id=app_id, **kwargs)
+
+    def is_audio_only(self) -> bool:
+        """Return True if Audio Only checkbox is enabled."""
+        if hasattr(self, 'audio_only_checkbox') and self.audio_only_checkbox:
+            if hasattr(self.audio_only_checkbox, 'text'):
+                return '☑' in self.audio_only_checkbox.text
+            if hasattr(self.audio_only_checkbox, 'value'):
+                return bool(self.audio_only_checkbox.value)
+        env_audio = os.getenv('TWITAUDIOONLY') or os.getenv('twitaudioonly') or os.getenv('TWIT_AUDIO_ONLY') or ''
+        return env_audio.strip().lower() in ('1', 'true', 'yes', 'on')
+
+    def save_env_setting(self, key: str, value: str) -> None:
+        """Persist a configuration setting key-value pair to the .env file."""
+        candidate_paths = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'),
+            os.path.join(os.getcwd(), '.env'),
+            os.path.abspath('.env')
+        ]
+        target_path = None
+        for path in candidate_paths:
+            if os.path.isfile(path):
+                target_path = path
+                break
+        if not target_path:
+            target_path = candidate_paths[0]
+
+        try:
+            set_key(target_path, key, str(value))
+        except Exception:
+            try:
+                lines = []
+                if os.path.exists(target_path):
+                    with open(target_path, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                found = False
+                for i, line in enumerate(lines):
+                    if line.strip().startswith(f"{key}=") or line.strip().startswith(f"{key.lower()}="):
+                        lines[i] = f"{key}={value}\n"
+                        found = True
+                        break
+                if not found:
+                    lines.append(f"{key}={value}\n")
+                with open(target_path, 'w', encoding='utf-8') as f:
+                    f.writelines(lines)
+            except Exception as e:
+                print(f"Warning: Could not save {key} to {target_path}: {e}")
+
+    def on_audio_only_toggle(self, widget=None) -> None:
+        """Toggle Audio Only checkbox state, persist preference, and refresh displayed episodes."""
+        if hasattr(self, 'audio_only_checkbox') and self.audio_only_checkbox:
+            if hasattr(self.audio_only_checkbox, 'text'):
+                if '☑' in self.audio_only_checkbox.text:
+                    self.audio_only_checkbox.text = self.audio_only_checkbox.text.replace('☑', '☐')
+                else:
+                    self.audio_only_checkbox.text = self.audio_only_checkbox.text.replace('☐', '☑')
+            elif hasattr(self.audio_only_checkbox, 'value'):
+                self.audio_only_checkbox.value = not self.audio_only_checkbox.value
+
+        is_audio = self.is_audio_only()
+        val_str = '1' if is_audio else '0'
+        os.environ['TWITAUDIOONLY'] = val_str
+        self.save_env_setting('TWITAUDIOONLY', val_str)
+
+        self.update_episodes_display()
+
+    @staticmethod
+    def is_audio_url(url: str) -> bool:
+        """Check if URL points to an audio stream or file format."""
+        if not url or not isinstance(url, str):
+            return False
+        clean = url.split('?')[0].split('#')[0].lower()
+        return clean.endswith(('.mp3', '.m4a', '.aac', '.ogg', '.opus', '.flac', '.wav')) or '/audio' in clean
+
+    @staticmethod
+    def is_video_url(url: str) -> bool:
+        """Check if URL points to a video stream or file format."""
+        if not url or not isinstance(url, str):
+            return False
+        clean = url.split('?')[0].split('#')[0].lower()
+        return clean.endswith(('.mp4', '.webm', '.m4v', '.mov', '.flv', '.m3u8', '.mkv')) or '/video' in clean or 'youtube.com' in clean or 'youtu.be' in clean
+
+    def update_progress(self, current: float, total: float | None = None) -> None:
+        """Thread-safe update of the progress bar value and maximum."""
+        if not hasattr(self, 'progress_bar') or self.progress_bar is None:
+            return
+
+        def _update():
+            try:
+                if total is not None and total > 0:
+                    if self.progress_bar.max != total:
+                        self.progress_bar.max = float(total)
+                    self.progress_bar.value = max(0.0, min(float(current), float(total)))
+                else:
+                    if self.progress_bar.max != 100.0:
+                        self.progress_bar.max = 100.0
+                    self.progress_bar.value = max(0.0, min(float(current), 100.0))
+            except Exception:
+                pass
+
+        if hasattr(self, 'loop') and self.loop and self.loop.is_running():
+            try:
+                self.loop.call_soon_threadsafe(_update)
+            except Exception:
+                _update()
+        else:
+            _update()
+
+    def reset_progress(self) -> None:
+        """Reset progress bar to 0."""
+        self.update_progress(0, 100)
 
     def get_api_app_id(self) -> str:
         """Get the configured TWiT API Application ID from input or environment variable."""
@@ -211,17 +325,23 @@ class TwitTUIForm(toga.App):
 
         return []
 
-    def fetch_club_twit_rss_items(self, show_name: str = None) -> list:
+    def fetch_club_twit_rss_items(self, show_name: str = None, audio_only: bool = None) -> list:
         """Fetch and cache episode items from the Club TWiT RSS feeds relevant to the show."""
+        if audio_only is None:
+            audio_only = self.is_audio_only()
+
         feed_ids_to_fetch = []
         if show_name:
             show_key = show_name.lower().strip()
             if show_key in MEMBERFUL_SHOW_FEEDS:
-                feed_ids_to_fetch.extend(MEMBERFUL_SHOW_FEEDS[show_key])
+                show_fids = list(MEMBERFUL_SHOW_FEEDS[show_key])
+                if audio_only:
+                    show_fids.reverse()
+                feed_ids_to_fetch.extend(show_fids)
 
         # Also include default network feed and host feeds
         configured_url = os.getenv('twitcluburl') or os.getenv('TWITCLUBURL') or os.getenv('TWIT_CLUB_URL') or ''
-        default_fid = 9041
+        default_fid = 9040 if audio_only else 9041
         if '/rss/' in configured_url:
             fid_match = re.search(r'/rss/(\d+)', configured_url)
             if fid_match:
@@ -246,19 +366,26 @@ class TwitTUIForm(toga.App):
 
         return all_items
 
-    def fetch_show_rss_items(self, show_name: str) -> list:
+    def fetch_show_rss_items(self, show_name: str, audio_only: bool = None) -> list:
         """Fetch public RSS feed items for a given show name."""
         if not show_name:
             return []
 
-        show_key = show_name.lower().strip()
-        if show_key in self._show_rss_cache:
-            return self._show_rss_cache[show_key]
+        if audio_only is None:
+            audio_only = self.is_audio_only()
 
-        feed_files = KNOWN_SHOW_FEEDS.get(show_key, [])
+        show_key = show_name.lower().strip()
+        cache_key = f"{show_key}_audio" if audio_only else f"{show_key}_video"
+        if cache_key in self._show_rss_cache:
+            return self._show_rss_cache[cache_key]
+
+        feed_files = list(KNOWN_SHOW_FEEDS.get(show_key, []))
         if not feed_files:
             slug = re.sub(r'[^a-zA-Z0-9]+', '', show_key)
-            feed_files = [f"{slug}_video_hd.xml", f"{slug}.xml"]
+            feed_files = [f"{slug}.xml", f"{slug}_video_hd.xml"] if audio_only else [f"{slug}_video_hd.xml", f"{slug}.xml"]
+        else:
+            if audio_only:
+                feed_files.reverse()
 
         items = []
         for feed_file in feed_files:
@@ -300,13 +427,16 @@ class TwitTUIForm(toga.App):
             except Exception as e:
                 print(f"Error fetching show feed {feed_file}: {e}")
 
-        self._show_rss_cache[show_key] = items
+        self._show_rss_cache[cache_key] = items
         return items
 
-    def fetch_media_from_webpage(self, clean_path_or_url: str) -> str | None:
+    def fetch_media_from_webpage(self, clean_path_or_url: str, audio_only: bool = None) -> str | None:
         """Scrape direct media stream URL from episode webpage."""
         if not clean_path_or_url or not isinstance(clean_path_or_url, str):
             return None
+
+        if audio_only is None:
+            audio_only = self.is_audio_only()
 
         clean_path = clean_path_or_url.strip()
         if clean_path.startswith('http://') or clean_path.startswith('https://'):
@@ -318,18 +448,24 @@ class TwitTUIForm(toga.App):
             resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)'}, timeout=8)
             if resp.status_code == 200:
                 html = resp.text
-                media_matches = re.findall(r'https?://[^\s\"\'<>]+\.(?:mp4|mp3|m4a|webm|ogg|m4v)', html)
-                for candidate in media_matches:
-                    if self.is_valid_media_url(candidate):
-                        if candidate.endswith('.mp4') or 'video' in candidate:
+                media_matches = re.findall(r'https?://[^\s\"\'<>]+\.(?:mp4|mp3|m4a|webm|ogg|m4v|aac)', html)
+                if audio_only:
+                    for candidate in media_matches:
+                        if self.is_valid_media_url(candidate) and self.is_audio_url(candidate):
+                            return candidate
+                    for candidate in media_matches:
+                        if self.is_valid_media_url(candidate):
+                            return candidate
+                else:
+                    for candidate in media_matches:
+                        if self.is_valid_media_url(candidate) and (candidate.endswith('.mp4') or 'video' in candidate or self.is_video_url(candidate)):
+                            return candidate
+                    for candidate in media_matches:
+                        if self.is_valid_media_url(candidate):
                             return candidate
 
-                for candidate in media_matches:
-                    if self.is_valid_media_url(candidate):
-                        return candidate
-
                 yt_matches = re.findall(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[a-zA-Z0-9_-]+', html)
-                if yt_matches:
+                if yt_matches and not audio_only:
                     return yt_matches[0]
         except Exception as e:
             print(f"Error scraping episode webpage {url}: {e}")
@@ -398,11 +534,17 @@ class TwitTUIForm(toga.App):
         self.episode_radio = toga.Button('☐ Episode Number', on_press=self.on_sort_button_press, style=Pack(margin=5))
         self.title_radio = toga.Button('☐ Episode Title', on_press=self.on_sort_button_press, style=Pack(margin=5))
 
+        env_audio = os.getenv('TWITAUDIOONLY') or os.getenv('twitaudioonly') or os.getenv('TWIT_AUDIO_ONLY') or ''
+        initial_audio_only = env_audio.strip().lower() in ('1', 'true', 'yes', 'on')
+        audio_symbol = '☑' if initial_audio_only else '☐'
+        self.audio_only_checkbox = toga.Button(f'{audio_symbol} Audio Only', on_press=self.on_audio_only_toggle, style=Pack(margin=5))
+
         sort_box = toga.Box(style=Pack(direction=ROW, margin=5))
         sort_box.add(sort_label)
         sort_box.add(self.date_radio)
         sort_box.add(self.episode_radio)
         sort_box.add(self.title_radio)
+        sort_box.add(self.audio_only_checkbox)
 
         # Episodes list section
         episodes_label = toga.Label('Episodes:', style=Pack(margin=(0, 5)))
@@ -503,6 +645,9 @@ class TwitTUIForm(toga.App):
         settings_box.add(block_box)
         settings_box.add(streamer_box)
 
+        # Progress bar section at the bottom of the form
+        self.progress_bar = toga.ProgressBar(max=100.0, value=0.0, style=Pack(flex=1, margin=5))
+
         # Add all components to main box
         main_box.add(show_box)
         main_box.add(sort_box)
@@ -510,6 +655,7 @@ class TwitTUIForm(toga.App):
         main_box.add(self.episodes_list)
         main_box.add(button_box)
         main_box.add(settings_box)
+        main_box.add(self.progress_bar)
 
         # Create main window
         self.main_window = toga.MainWindow(title='TWIT.tv TUI')
@@ -940,7 +1086,7 @@ class TwitTUIForm(toga.App):
         # Check if URL filename has a known media extension
         _, ext = os.path.splitext(url_filename)
         valid_extensions = {'.mp4', '.mp3', '.m4a', '.webm', '.ogg', '.m4v', '.mov', '.flv', '.aac', '.m3u8'}
-        file_ext = ext.lower() if ext and ext.lower() in valid_extensions else '.mp4'
+        file_ext = ext.lower() if ext and ext.lower() in valid_extensions else ('.mp3' if self.is_audio_only() else '.mp4')
 
         show = self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo and self.show_combo.value else ''
         ep_num = getattr(target, 'episode', '') or (target.get('number', '') if isinstance(target, dict) else '')
@@ -993,24 +1139,64 @@ class TwitTUIForm(toga.App):
 
         return f"{clean_base}{file_ext}"
 
-    def download_episode_file(self, url: str, dest_path: str, block_size: int = 8192) -> bool:
+    def download_episode_file(self, url: str, dest_path: str, block_size: int = 8192, progress_callback=None) -> bool:
         """Stream and save a media file in chunks using the specified block size."""
         temp_path = dest_path + '.part'
         try:
+            if progress_callback is None:
+                self.reset_progress()
             os.makedirs(os.path.dirname(dest_path) or '.', exist_ok=True)
             headers = {'User-Agent': 'Mozilla/5.0 (compatible; TwitTUI/1.0)'}
             with requests.get(url, stream=True, headers=headers, timeout=30) as r:
                 r.raise_for_status()
+                total_bytes = 0
+                content_length = r.headers.get('content-length')
+                if content_length and content_length.isdigit():
+                    total_bytes = int(content_length)
+
                 downloaded_bytes = 0
+                if progress_callback:
+                    progress_callback(0, total_bytes)
+                else:
+                    if total_bytes > 0:
+                        self.update_progress(0, total_bytes)
+                    else:
+                        self.update_progress(0, 100)
+
                 with open(temp_path, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=block_size):
+                        if getattr(self, '_cancel_download', False):
+                            print("Download cancelled by user")
+                            break
                         if chunk:
                             f.write(chunk)
                             downloaded_bytes += len(chunk)
+                            if progress_callback:
+                                progress_callback(downloaded_bytes, total_bytes)
+                            else:
+                                if total_bytes > 0:
+                                    self.update_progress(downloaded_bytes, total_bytes)
+                                else:
+                                    self.update_progress(min(downloaded_bytes / (1024 * 1024), 100), 100)
+
+            if getattr(self, '_cancel_download', False):
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+                if progress_callback is None:
+                    self.reset_progress()
+                return False
 
             if os.path.exists(dest_path):
                 os.remove(dest_path)
             os.rename(temp_path, dest_path)
+            if progress_callback:
+                progress_callback(total_bytes if total_bytes > 0 else downloaded_bytes, total_bytes)
+            else:
+                if total_bytes > 0:
+                    self.update_progress(total_bytes, total_bytes)
             print(f"Finished downloading: {dest_path} ({downloaded_bytes} bytes)")
             return True
         except Exception as e:
@@ -1020,78 +1206,148 @@ class TwitTUIForm(toga.App):
                     os.remove(temp_path)
                 except Exception:
                     pass
+            if progress_callback is None:
+                self.reset_progress()
             return False
 
-    def resolve_target_media_url(self, target) -> str | None:
+    def resolve_target_media_url(self, target, audio_only: bool = None) -> str | None:
         """Resolve the media stream/download URL for a selected table row or episode object."""
         if target is None:
             return None
 
+        if audio_only is None:
+            audio_only = self.is_audio_only()
+
         # Direct attribute on target
         media_url = getattr(target, 'media_url', None)
-        if not self.is_valid_media_url(media_url):
+        if self.is_valid_media_url(media_url):
+            if (audio_only and self.is_audio_url(media_url)) or (not audio_only and self.is_video_url(media_url)):
+                return media_url
+        else:
             media_url = None
 
         show_name = self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo else ''
 
         # Check target.episode_data
-        if not media_url and hasattr(target, 'episode_data'):
+        if hasattr(target, 'episode_data'):
             ep_data = target.episode_data
             if isinstance(ep_data, dict):
-                media_url = self.resolve_media_url(ep_data, show_name)
+                resolved = self.resolve_media_url(ep_data, show_name, audio_only=audio_only)
+                if resolved:
+                    return resolved
 
         # Check by matching in self.current_episodes
-        if not media_url:
-            target_num = getattr(target, 'episode', str(target[0] if isinstance(target, (tuple, list)) else ''))
-            target_title = getattr(target, 'title', str(target[1] if isinstance(target, (tuple, list)) and len(target) > 1 else ''))
+        target_num = getattr(target, 'episode', str(target[0] if isinstance(target, (tuple, list)) else ''))
+        target_title = getattr(target, 'title', str(target[1] if isinstance(target, (tuple, list)) and len(target) > 1 else ''))
+        if hasattr(self, 'current_episodes') and self.current_episodes:
             for ep in self.current_episodes:
                 if (target_num and str(ep.get('number', '')) == str(target_num)) or (target_title and ep.get('title') == target_title):
-                    media_url = ep.get('media_url') or self.resolve_media_url(ep, show_name)
-                    if media_url:
-                        break
+                    resolved = self.resolve_media_url(ep, show_name, audio_only=audio_only)
+                    if resolved:
+                        return resolved
 
         # Fallback candidate dictionary
-        if not media_url:
-            candidate_dict = {}
-            target_num = getattr(target, 'episode', str(target[0] if isinstance(target, (tuple, list)) else ''))
-            target_title = getattr(target, 'title', str(target[1] if isinstance(target, (tuple, list)) and len(target) > 1 else ''))
-            if target_num:
-                candidate_dict['number'] = target_num
-            if target_title:
-                candidate_dict['title'] = target_title
-            if hasattr(target, 'episode_data') and isinstance(target.episode_data, dict):
-                candidate_dict.update(target.episode_data)
-            elif isinstance(target, dict):
-                candidate_dict.update(target)
-            media_url = self.resolve_media_url(candidate_dict, show_name)
+        candidate_dict = {}
+        target_num = getattr(target, 'episode', str(target[0] if isinstance(target, (tuple, list)) else ''))
+        target_title = getattr(target, 'title', str(target[1] if isinstance(target, (tuple, list)) and len(target) > 1 else ''))
+        if target_num:
+            candidate_dict['number'] = target_num
+        if target_title:
+            candidate_dict['title'] = target_title
+        if hasattr(target, 'episode_data') and isinstance(target.episode_data, dict):
+            candidate_dict.update(target.episode_data)
+        elif isinstance(target, dict):
+            candidate_dict.update(target)
+        resolved = self.resolve_media_url(candidate_dict, show_name, audio_only=audio_only)
+
+        if resolved and self.is_valid_media_url(resolved):
+            return resolved
 
         return media_url if self.is_valid_media_url(media_url) else None
 
+    def show_download_complete_dialog(self, dest_dir: str, downloaded_files: list) -> None:
+        """Display a modal dialog listing the destination folder and all downloaded filenames."""
+        if not downloaded_files:
+            return
+
+        folder_line = f"Folder: {dest_dir}"
+        files_text = "\n".join(str(fn) for fn in downloaded_files)
+        message = f"{folder_line}\n\n{files_text}"
+        title = "Downloads Complete"
+
+        def _show():
+            try:
+                if hasattr(self, 'main_window') and self.main_window:
+                    self.main_window.info_dialog(title, message)
+            except Exception as e:
+                print(f"Error displaying download complete dialog: {e}")
+
+        if hasattr(self, 'loop') and self.loop and self.loop.is_running():
+            try:
+                self.loop.call_soon_threadsafe(_show)
+            except Exception:
+                _show()
+        else:
+            _show()
+
     def download_episodes_batch(self, targets: list) -> None:
         """Background worker to download multiple selected episodes."""
+        self._is_downloading = True
+        self._cancel_download = False
+        self.reset_progress()
         dest_dir = self.get_destination_folder()
         block_size = self.get_block_size()
+        downloaded_files = []
+        total_targets = len(targets) if targets else 1
 
         print(f"Starting batch download for {len(targets)} episode(s) to '{dest_dir}' (block size: {block_size})...")
         try:
             os.makedirs(dest_dir, exist_ok=True)
         except Exception as e:
             print(f"Error creating destination directory '{dest_dir}': {e}")
+            self._is_downloading = False
+            self.reset_progress()
             return
 
-        for idx, target in enumerate(targets, 1):
-            target_title = getattr(target, 'title', str(target))
-            target_num = getattr(target, 'episode', '')
-            media_url = self.resolve_target_media_url(target)
-            if not media_url:
-                print(f"[{idx}/{len(targets)}] No media URL found for episode: {target_num} {target_title}")
-                continue
+        try:
+            for idx_0, target in enumerate(targets):
+                if getattr(self, '_cancel_download', False):
+                    print("Batch download cancelled.")
+                    break
+                target_title = getattr(target, 'title', str(target))
+                target_num = getattr(target, 'episode', '')
+                media_url = self.resolve_target_media_url(target)
+                if not media_url:
+                    print(f"[{idx_0 + 1}/{total_targets}] No media URL found for episode: {target_num} {target_title}")
+                    batch_pct = ((idx_0 + 1) / total_targets) * 100.0
+                    self.update_progress(batch_pct, 100.0)
+                    continue
 
-            filename = self.determine_download_filename(target, media_url)
-            dest_filepath = os.path.join(dest_dir, filename)
+                filename = self.determine_download_filename(target, media_url)
+                dest_filepath = os.path.join(dest_dir, filename)
 
-            print(f"[{idx}/{len(targets)}] Downloading '{target_title}' -> {dest_filepath} from {media_url}")
-            self.download_episode_file(media_url, dest_filepath, block_size)
+                print(f"[{idx_0 + 1}/{total_targets}] Downloading '{target_title}' -> {dest_filepath} from {media_url}")
+
+                def _item_progress(downloaded_bytes: int, total_bytes: int, item_idx=idx_0):
+                    if total_bytes > 0:
+                        item_frac = min(1.0, max(0.0, downloaded_bytes / total_bytes))
+                    else:
+                        item_frac = 0.0
+                    batch_pct = ((item_idx + item_frac) / total_targets) * 100.0
+                    self.update_progress(batch_pct, 100.0)
+
+                success = self.download_episode_file(media_url, dest_filepath, block_size, progress_callback=_item_progress)
+                if success:
+                    downloaded_files.append(filename)
+
+                batch_pct = ((idx_0 + 1) / total_targets) * 100.0
+                self.update_progress(batch_pct, 100.0)
+        finally:
+            self._is_downloading = False
+            if getattr(self, '_cancel_download', False):
+                self.reset_progress()
+            if downloaded_files:
+                self.show_download_complete_dialog(dest_dir, downloaded_files)
 
     def on_download_press(self, widget=None) -> None:
         """Process selected episodes for batch download."""
@@ -1142,12 +1398,100 @@ class TwitTUIForm(toga.App):
                 return False
         return True
 
-    def extract_media_url(self, episode_dict: dict) -> str | None:
+    def extract_media_url(self, episode_dict: dict, audio_only: bool = None) -> str | None:
         """Extract the best available media/stream URL directly from an episode dict."""
         if not isinstance(episode_dict, dict):
             return None
 
-        # Check media objects in order of preference (HD video, large, small, audio, youtube)
+        if audio_only is None:
+            audio_only = self.is_audio_only()
+
+        # Determine priority field order based on audio_only setting
+        if audio_only:
+            media_fields = ['video_audio', 'audio', 'video_hd', 'video_large', 'video_small', 'video_youtube']
+            direct_fields = ['audioUrl', 'audio_url', 'mediaUrl', 'media_url', 'downloadUrl', 'streamUrl', 'fileUrl', 'enclosure_url', 'videoUrl', 'video_url', 'url']
+        else:
+            media_fields = ['video_hd', 'video_large', 'video_small', 'video_audio', 'video_youtube']
+            direct_fields = ['mediaUrl', 'media_url', 'videoUrl', 'video_url', 'audioUrl', 'audio_url', 'downloadUrl', 'streamUrl', 'fileUrl', 'enclosure_url', 'url']
+
+        # 1. Check media objects matching requested format
+        for field in media_fields:
+            val = episode_dict.get(field)
+            if isinstance(val, dict):
+                for subfield in ['mediaUrl', 'media_url', 'guid', 'url', 'href', 'streamUrl', 'downloadUrl']:
+                    url = val.get(subfield)
+                    if url and self.is_valid_media_url(str(url)):
+                        cand = str(url).strip()
+                        if audio_only:
+                            if self.is_audio_url(cand):
+                                return cand
+                        else:
+                            if self.is_video_url(cand):
+                                return cand
+            elif isinstance(val, str) and self.is_valid_media_url(val):
+                cand = val.strip()
+                if audio_only:
+                    if self.is_audio_url(cand):
+                        return cand
+                else:
+                    if self.is_video_url(cand):
+                        return cand
+
+        # 2. Check direct URL fields
+        for field in direct_fields:
+            val = episode_dict.get(field)
+            if isinstance(val, str) and self.is_valid_media_url(val):
+                cand = val.strip()
+                if audio_only and self.is_audio_url(cand):
+                    return cand
+                elif not audio_only and self.is_video_url(cand):
+                    return cand
+
+        # 3. Check files list or dict
+        files = episode_dict.get('files')
+        if isinstance(files, list):
+            for f in files:
+                if isinstance(f, dict):
+                    for subfield in ['mediaUrl', 'media_url', 'url', 'downloadUrl', 'fileUrl']:
+                        url = f.get(subfield)
+                        if url and self.is_valid_media_url(str(url)):
+                            cand = str(url).strip()
+                            if audio_only and self.is_audio_url(cand):
+                                return cand
+                            elif not audio_only and self.is_video_url(cand):
+                                return cand
+                elif isinstance(f, str) and self.is_valid_media_url(f):
+                    cand = f.strip()
+                    if audio_only and self.is_audio_url(cand):
+                        return cand
+                    elif not audio_only and self.is_video_url(cand):
+                        return cand
+        elif isinstance(files, dict):
+            for subfield in ['mediaUrl', 'media_url', 'url', 'downloadUrl', 'fileUrl']:
+                url = files.get(subfield)
+                if url and self.is_valid_media_url(str(url)):
+                    cand = str(url).strip()
+                    if audio_only and self.is_audio_url(cand):
+                        return cand
+                    elif not audio_only and self.is_video_url(cand):
+                        return cand
+
+        # 4. Check _links
+        links = episode_dict.get('_links')
+        if isinstance(links, dict):
+            link_keys = ['audio', 'enclosure', 'media', 'download', 'stream'] if audio_only else ['video', 'enclosure', 'media', 'download', 'stream']
+            for link_key in link_keys:
+                link_obj = links.get(link_key)
+                if isinstance(link_obj, dict):
+                    url = link_obj.get('href') or link_obj.get('url')
+                    if url and self.is_valid_media_url(str(url)):
+                        cand = str(url).strip()
+                        if audio_only and self.is_audio_url(cand):
+                            return cand
+                        elif not audio_only and self.is_video_url(cand):
+                            return cand
+
+        # Fallback to any valid media URL if preferred format not found
         for field in ['video_hd', 'video_large', 'video_small', 'video_audio', 'video_youtube']:
             val = episode_dict.get(field)
             if isinstance(val, dict):
@@ -1158,38 +1502,10 @@ class TwitTUIForm(toga.App):
             elif isinstance(val, str) and self.is_valid_media_url(val):
                 return val.strip()
 
-        # Check direct URL fields
         for field in ['mediaUrl', 'media_url', 'videoUrl', 'video_url', 'audioUrl', 'audio_url', 'downloadUrl', 'streamUrl', 'fileUrl', 'enclosure_url', 'url']:
             val = episode_dict.get(field)
             if isinstance(val, str) and self.is_valid_media_url(val):
                 return val.strip()
-
-        # Check files list or dict
-        files = episode_dict.get('files')
-        if isinstance(files, list):
-            for f in files:
-                if isinstance(f, dict):
-                    for subfield in ['mediaUrl', 'media_url', 'url', 'downloadUrl', 'fileUrl']:
-                        url = f.get(subfield)
-                        if url and self.is_valid_media_url(str(url)):
-                            return str(url).strip()
-                elif isinstance(f, str) and self.is_valid_media_url(f):
-                    return f.strip()
-        elif isinstance(files, dict):
-            for subfield in ['mediaUrl', 'media_url', 'url', 'downloadUrl', 'fileUrl']:
-                url = files.get(subfield)
-                if url and self.is_valid_media_url(str(url)):
-                    return str(url).strip()
-
-        # Check _links (only enclosure, media, download, stream - never 'self')
-        links = episode_dict.get('_links')
-        if isinstance(links, dict):
-            for link_key in ['enclosure', 'media', 'download', 'stream']:
-                link_obj = links.get(link_key)
-                if isinstance(link_obj, dict):
-                    url = link_obj.get('href') or link_obj.get('url')
-                    if url and self.is_valid_media_url(str(url)):
-                        return str(url).strip()
 
         return None
 
@@ -1228,15 +1544,22 @@ class TwitTUIForm(toga.App):
 
         return False
 
-    def resolve_media_url(self, episode_dict: dict, show_name: str = None) -> str | None:
+    def resolve_media_url(self, episode_dict: dict, show_name: str = None, audio_only: bool = None) -> str | None:
         """Resolve a streamable media URL for an episode through all available sources."""
         if not isinstance(episode_dict, dict):
             return None
 
+        if audio_only is None:
+            audio_only = self.is_audio_only()
+
+        fallback_candidate = None
+
         # 1. Direct fields in episode dict
-        url = self.extract_media_url(episode_dict)
+        url = self.extract_media_url(episode_dict, audio_only=audio_only)
         if url and self.is_valid_media_url(url):
-            return url
+            if (audio_only and self.is_audio_url(url)) or (not audio_only and self.is_video_url(url)):
+                return url
+            fallback_candidate = url
 
         # Extract identifiers from episode dict
         clean_path = str(episode_dict.get('cleanPath') or episode_dict.get('link') or '').strip()
@@ -1246,53 +1569,83 @@ class TwitTUIForm(toga.App):
         show = show_name or (self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo else '')
 
         # 2. Match in Club TWiT RSS feeds (show-specific feeds, network feeds, host feeds)
-        club_items = self.fetch_club_twit_rss_items(show)
+        club_items = self.fetch_club_twit_rss_items(show, audio_only=audio_only)
         if club_items:
             for item in club_items:
                 if self._match_rss_item(item, clean_path, ep_id, ep_num, ep_title, show):
-                    return item.get('enclosure_url')
+                    enc = item.get('enclosure_url')
+                    if enc and self.is_valid_media_url(enc):
+                        if (audio_only and self.is_audio_url(enc)) or (not audio_only and self.is_video_url(enc)):
+                            return enc
+                        if not fallback_candidate:
+                            fallback_candidate = enc
 
         # 3. Match in Show's public RSS feed on feeds.twit.tv
         if show:
-            show_items = self.fetch_show_rss_items(show)
+            show_items = self.fetch_show_rss_items(show, audio_only=audio_only)
             if show_items:
                 for item in show_items:
                     if self._match_rss_item(item, clean_path, ep_id, ep_num, ep_title, show):
-                        return item.get('enclosure_url')
+                        enc = item.get('enclosure_url')
+                        if enc and self.is_valid_media_url(enc):
+                            if (audio_only and self.is_audio_url(enc)) or (not audio_only and self.is_video_url(enc)):
+                                return enc
+                            if not fallback_candidate:
+                                fallback_candidate = enc
 
         # 4. Fetch Episode Webpage and extract media stream URL
         if clean_path:
-            web_url = self.fetch_media_from_webpage(clean_path)
+            web_url = self.fetch_media_from_webpage(clean_path, audio_only=audio_only)
             if web_url and self.is_valid_media_url(web_url):
-                return web_url
+                if (audio_only and self.is_audio_url(web_url)) or (not audio_only and self.is_video_url(web_url)):
+                    return web_url
+                if not fallback_candidate:
+                    fallback_candidate = web_url
         elif show and ep_num:
             show_slug = re.sub(r'[^a-zA-Z0-9]+', '-', show.lower()).strip('-')
             candidate_path = f"/shows/{show_slug}/episodes/{ep_num}"
-            web_url = self.fetch_media_from_webpage(candidate_path)
+            web_url = self.fetch_media_from_webpage(candidate_path, audio_only=audio_only)
             if web_url and self.is_valid_media_url(web_url):
-                return web_url
+                if (audio_only and self.is_audio_url(web_url)) or (not audio_only and self.is_video_url(web_url)):
+                    return web_url
+                if not fallback_candidate:
+                    fallback_candidate = web_url
 
         # 5. Fetch Episode Detail endpoint from REST API
         if ep_id:
             detail = self.fetch_episode_detail(ep_id)
             if detail:
-                detail_url = self.extract_media_url(detail)
+                detail_url = self.extract_media_url(detail, audio_only=audio_only)
                 if detail_url and self.is_valid_media_url(detail_url):
-                    return detail_url
+                    if (audio_only and self.is_audio_url(detail_url)) or (not audio_only and self.is_video_url(detail_url)):
+                        return detail_url
+                    if not fallback_candidate:
+                        fallback_candidate = detail_url
                 detail_clean_path = detail.get('cleanPath')
                 if detail_clean_path:
-                    web_url = self.fetch_media_from_webpage(detail_clean_path)
+                    web_url = self.fetch_media_from_webpage(detail_clean_path, audio_only=audio_only)
                     if web_url and self.is_valid_media_url(web_url):
-                        return web_url
+                        if (audio_only and self.is_audio_url(web_url)) or (not audio_only and self.is_video_url(web_url)):
+                            return web_url
+                        if not fallback_candidate:
+                            fallback_candidate = web_url
 
         # 6. Deep search across all Memberful host/network feeds
-        for host_fid in MEMBERFUL_HOST_FEEDS:
+        host_feeds = list(MEMBERFUL_HOST_FEEDS)
+        if audio_only:
+            host_feeds.reverse()
+        for host_fid in host_feeds:
             host_items = self.fetch_memberful_feed_items(host_fid)
             for item in host_items:
                 if self._match_rss_item(item, clean_path, ep_id, ep_num, ep_title, show):
-                    return item.get('enclosure_url')
+                    enc = item.get('enclosure_url')
+                    if enc and self.is_valid_media_url(enc):
+                        if (audio_only and self.is_audio_url(enc)) or (not audio_only and self.is_video_url(enc)):
+                            return enc
+                        if not fallback_candidate:
+                            fallback_candidate = enc
 
-        return None
+        return fallback_candidate
 
     def on_stream_press(self, widget=None) -> None:
         """Process selected episode for streaming."""
@@ -1318,7 +1671,12 @@ class TwitTUIForm(toga.App):
             print(f"Error launching stream: {e}")
 
     def on_cancel_press(self, widget) -> None:
-        self.exit()
+        if getattr(self, '_is_downloading', False):
+            print("Cancelling active download...")
+            self._cancel_download = True
+            self.reset_progress()
+        else:
+            self.exit()
 
     def on_close_press(self, widget) -> None:
         self.exit()
@@ -1418,7 +1776,7 @@ class TwitTUIForm(toga.App):
 
         # Fallback 1: Fetch episodes from Show's public RSS feed on feeds.twit.tv
         if selected_show:
-            rss_items = self.fetch_show_rss_items(selected_show)
+            rss_items = self.fetch_show_rss_items(selected_show, audio_only=self.is_audio_only())
             if rss_items:
                 episodes = []
                 for item in rss_items:
@@ -1433,7 +1791,7 @@ class TwitTUIForm(toga.App):
                     return episodes
 
         # Fallback 2: Fetch episodes from Club TWiT RSS feed
-        club_items = self.fetch_club_twit_rss_items(selected_show)
+        club_items = self.fetch_club_twit_rss_items(selected_show, audio_only=self.is_audio_only())
         if club_items:
             episodes = []
             for item in club_items:
@@ -1453,15 +1811,18 @@ class TwitTUIForm(toga.App):
 
     def update_episodes_display(self) -> None:
         """Format and display current episodes based on selected sort order."""
+        if not hasattr(self, 'episodes_list') or self.episodes_list is None:
+            return
+
         if not self.current_episodes:
             self.episodes_list.data = []
             return
 
         episodes = list(self.current_episodes)
         sort_by = 'date'
-        if '☑' in self.episode_radio.text:
+        if hasattr(self, 'episode_radio') and self.episode_radio and '☑' in self.episode_radio.text:
             sort_by = 'number'
-        elif '☑' in self.title_radio.text:
+        elif hasattr(self, 'title_radio') and self.title_radio and '☑' in self.title_radio.text:
             sort_by = 'title'
 
         if sort_by == 'date':
@@ -1482,7 +1843,7 @@ class TwitTUIForm(toga.App):
             title = episode.get('title', 'Unknown Title')
             date = episode.get('date', 'Unknown Date')
             number = episode.get('number', 'Unknown Number')
-            media_url = episode.get('media_url') or self.extract_media_url(episode) or ''
+            media_url = self.extract_media_url(episode) or episode.get('media_url') or ''
             table_data.append({
                 'episode': str(number),
                 'title': str(title),
