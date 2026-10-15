@@ -74,6 +74,9 @@ MEMBERFUL_SHOW_FEEDS = {
 # Host and network-wide Club TWiT feeds for deeper episode discovery
 MEMBERFUL_HOST_FEEDS = [9073, 9072, 9053, 9052, 9075, 9074, 9069, 9068, 9162, 9161]
 
+# TWiT API 3Scale Developer Portal URL for obtaining API credentials
+TWIT_API_KEY_URL = 'https://twit-tv.3scale.net'
+
 DEFAULT_SHOWS = [
     ("AI Inside", "846616"),
     ("Abby's Road", "1652"),
@@ -520,7 +523,23 @@ class TwitTUIForm(toga.App):
             section=0,
             order=1
         )
+        apib_cmd = toga.Command(
+            self.on_open_apib,
+            text='View API Specification (twittv.apib)',
+            group=toga.Group.HELP,
+            section=0,
+            order=2
+        )
+        api_key_cmd = toga.Command(
+            self.on_open_api_key_url,
+            text='Get TWiT API Key',
+            group=toga.Group.HELP,
+            section=0,
+            order=3
+        )
         self.commands.add(readme_cmd)
+        self.commands.add(apib_cmd)
+        self.commands.add(api_key_cmd)
 
         self.main_window.show()
 
@@ -623,7 +642,7 @@ class TwitTUIForm(toga.App):
 
         return re.sub(r'<h([1-6])([^>]*)>(.*?)</h\1>', replace_heading, html_content, flags=re.IGNORECASE | re.DOTALL)
 
-    def render_markdown_to_html(self, md_text: str) -> str:
+    def render_markdown_to_html(self, md_text: str, title: str = "TwitTUI Documentation") -> str:
         """Convert Markdown text to fully sanitized and styled HTML with anchor navigation."""
         body_html = ""
 
@@ -658,13 +677,19 @@ class TwitTUIForm(toga.App):
         # Enforce sanitization on the generated HTML
         safe_body_html = self.sanitize_html(body_html)
 
+        # Detect Table of Contents presence for navigation button
+        has_toc = 'id="table-of-contents"' in safe_body_html or 'id="toc"' in safe_body_html
+        toc_target = "#table-of-contents" if has_toc else "#top"
+        toc_label = "↑ Table of Contents" if has_toc else "↑ Top"
+        toc_title = "Jump to Table of Contents" if has_toc else "Return to top of document"
+
         # Wrap in clean, readable stylesheet
         styled_html = f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TwitTUI Documentation</title>
+<title>{html.escape(title)}</title>
 <style>
   html {{
     scroll-behavior: smooth;
@@ -783,28 +808,29 @@ class TwitTUIForm(toga.App):
 </style>
 </head>
 <body>
+<div id="top"></div>
 {safe_body_html}
-<a href="#table-of-contents" class="back-to-toc" title="Jump to Table of Contents" aria-label="Table of Contents">↑ Table of Contents</a>
+<a href="{toc_target}" class="back-to-toc" title="{toc_title}" aria-label="{toc_label}">{toc_label}</a>
 </body>
 </html>"""
         return styled_html
 
-    def show_readme_viewer(self) -> None:
-        """Display README.md using the Hybrid Resilient Pattern (WebView with Browser fallback)."""
+    def show_document_viewer(self, filename: str, doc_title: str) -> None:
+        """Display a Markdown/APIB document using the Hybrid Resilient Pattern (WebView with Browser fallback)."""
         candidate_paths = [
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "README.md"),
-            os.path.join(os.getcwd(), "README.md"),
-            os.path.abspath("README.md")
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), filename),
+            os.path.join(os.getcwd(), filename),
+            os.path.abspath(filename)
         ]
 
-        readme_path = None
+        doc_path = None
         for path in candidate_paths:
             if os.path.isfile(path):
-                readme_path = path
+                doc_path = path
                 break
 
-        if not readme_path:
-            err_msg = "Could not locate README.md file in the application directory."
+        if not doc_path:
+            err_msg = f"Could not locate {filename} file in the application directory."
             print(f"Error: {err_msg}")
             if hasattr(self, 'main_window') and self.main_window:
                 try:
@@ -814,10 +840,10 @@ class TwitTUIForm(toga.App):
             return
 
         try:
-            with open(readme_path, "r", encoding="utf-8", errors="replace") as f:
+            with open(doc_path, "r", encoding="utf-8", errors="replace") as f:
                 md_text = f.read()
         except Exception as e:
-            err_msg = f"Failed to read README.md: {e}"
+            err_msg = f"Failed to read {filename}: {e}"
             print(f"Error: {err_msg}")
             if hasattr(self, 'main_window') and self.main_window:
                 try:
@@ -826,13 +852,13 @@ class TwitTUIForm(toga.App):
                     pass
             return
 
-        styled_html = self.render_markdown_to_html(md_text)
+        styled_html = self.render_markdown_to_html(md_text, title=doc_title)
 
         # Primary Tier: In-App toga.WebView window
         try:
-            help_window = toga.Window(title="TwitTUI Documentation", size=(900, 700))
+            help_window = toga.Window(title=doc_title, size=(900, 700))
             web_view = toga.WebView(style=Pack(flex=1))
-            web_view.set_content(f"file://{readme_path}", styled_html)
+            web_view.set_content(f"file://{doc_path}", styled_html)
             help_window.content = web_view
             help_window.show()
             return
@@ -854,9 +880,38 @@ class TwitTUIForm(toga.App):
                 except Exception:
                     pass
 
+    def show_readme_viewer(self) -> None:
+        """Display README.md using the Hybrid Resilient Pattern (WebView with Browser fallback)."""
+        self.show_document_viewer("README.md", "TwitTUI Documentation")
+
+    def show_apib_viewer(self) -> None:
+        """Display twittv.apib using the Hybrid Resilient Pattern (WebView with Browser fallback)."""
+        self.show_document_viewer("twittv.apib", "TWiT API Specification (twittv.apib)")
+
     def on_open_readme(self, widget=None) -> None:
         """Handler for Help menu command to view README documentation."""
         self.show_readme_viewer()
+
+    def on_open_apib(self, widget=None) -> None:
+        """Handler for Help menu command to view twittv.apib API specification."""
+        self.show_apib_viewer()
+
+    def open_api_key_url(self) -> None:
+        """Open the TWiT API key registration URL (3Scale Developer Portal) in the default browser."""
+        try:
+            webbrowser.open(TWIT_API_KEY_URL)
+        except Exception as e:
+            err_msg = f"Failed to open API key registration URL: {e}"
+            print(f"Error: {err_msg}")
+            if hasattr(self, 'main_window') and self.main_window:
+                try:
+                    self.main_window.error_dialog("Browser Error", err_msg)
+                except Exception:
+                    pass
+
+    def on_open_api_key_url(self, widget=None) -> None:
+        """Handler for Help menu command to open the TWiT API key registration URL."""
+        self.open_api_key_url()
 
     def get_destination_folder(self) -> str:
         """Get the configured download destination directory."""
