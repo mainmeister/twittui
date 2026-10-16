@@ -17,6 +17,7 @@ This document serves two primary audiences:
   - [Configuration (.env & UI)](#configuration-env--ui)
   - [User Interface & Usage Walkthrough](#user-interface--usage-walkthrough)
     - [Show Selection & Episode Browsing](#show-selection--episode-browsing)
+    - [Searching Episodes](#searching-episodes)
     - [Sorting Episodes](#sorting-episodes)
     - [Streaming an Episode](#streaming-an-episode)
     - [Batch Downloading Episodes](#batch-downloading-episodes)
@@ -42,6 +43,7 @@ This document serves two primary audiences:
 ## Core Capabilities
 
 - **Show Catalog Navigation**: Browse active and legacy TWiT.tv productions with automatic fallback to static show catalogs when offline or unauthenticated.
+- **In-Show Episode & Topic Search**: Search episodes within the currently selected show by keywords or topics using the official TWiT REST API search endpoint (`/search/{keywords}`) with automatic fallback to Show and Club RSS feed matching.
 - **Episode Metadata Hover Preview**: Hovering over any episode row for 3 seconds triggers a detailed metadata modal revealing complete show notes, guest and host lists, topics, duration, and direct media stream links with clickable web links and media URLs that launch the default browser.
 - **Resilient Episode Ingestion**: Automatic multi-tier failover across the official TWiT REST API v1.0, public XML/RSS feeds (`feeds.twit.tv`), authenticated Club TWiT Memberful RSS feeds, and webpage media scrapers.
 - **Direct Video/Audio Streaming**: Spawn external media players (e.g., VLC, MPV) asynchronously using customizable command templates without stalling the UI.
@@ -123,6 +125,7 @@ twitclubstreamer=vlc %f
 ```
 +-------------------------------------------------------------------------+
 | Show: [ This Week in Tech                  v ] [ Fetch ] [ Next ]       |
+| Search: [ OpenAI                                ] [ Search ] [ Clear ]  |
 | Sort by: [X Date]  [  Episode Number]  [  Episode Title] [v Desc]       |
 | +---------------------------------------------------------------------+ |
 | | Episode | Title                        | Date       | Length        | |
@@ -147,6 +150,12 @@ twitclubstreamer=vlc %f
 - Click **Fetch** to force a catalog refresh against the TWiT API or fallback feeds.
 - Click **Next** to fetch and append the next page of episodes for the active show.
 - **Episode Metadata Inspection**: Hovering your mouse cursor over any episode row in the list for more than 3 seconds displays a modal dialog showing comprehensive episode metadata including show name, episode number, title, airing date, duration, episode ID, web links, media stream URLs, available formats, hosts/guests, topics, and complete show notes. Web links and media URLs are clickable to open directly in your system's default web browser.
+
+#### Searching Episodes
+- Enter keywords or topics (e.g., `OpenAI`, `Surface`, `Security`) into the **Search** text box.
+- Click **Search** or press `Enter` to query the TWiT REST API search endpoint and fallback RSS feeds scoped to the active show.
+- The table populates immediately with all matching episodes across the selected show.
+- Click **Clear** (or submit an empty search) to clear the search input and restore the complete episode list for the selected show.
 
 #### Sorting Episodes
 - Select one of the three sort mode buttons:
@@ -255,6 +264,11 @@ toga.MainWindow (title='TWIT.tv TUI')
     │   ├── toga.Selection (items=shows, on_change=on_show_select) [show_combo]
     │   ├── toga.Button ('Fetch', on_press=on_fetch_press)
     │   └── toga.Button ('Next', on_press=on_next_press)
+    ├── toga.Box (direction=ROW, margin=5) [search_box]
+    │   ├── toga.Label ('Search:')
+    │   ├── toga.TextInput (placeholder='Search episodes in selected show...', on_confirm=on_search_press) [search_input]
+    │   ├── toga.Button ('Search', on_press=on_search_press)
+    │   └── toga.Button ('Clear', on_press=on_clear_search_press)
     ├── toga.Box (direction=ROW, margin=5) [sort_box]
     │   ├── toga.Label ('Sort by:')
     │   ├── toga.Button ('☑ Date', on_press=on_sort_button_press) [date_radio]
@@ -445,6 +459,7 @@ The `determine_download_filename(target, media_url)` method sanitizes filenames 
 
 #### Key Endpoints Used by TwitTUI:
 - `GET /shows`: Fetches active show lists, identifiers, and media metadata.
+- `GET /search/{keywords}`: Executes scoped full-text queries for in-show episode discovery across TWiT indexed archives.
 - `GET /episodes?filter[shows]={show_id}`: Retrieves paginated episode lists for a specific show.
 - `GET /episodes/{episode_id}`: Fetches detailed episode records including nested `video_hd`, `video_large`, and audio download nodes.
 

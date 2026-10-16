@@ -6,7 +6,13 @@ Start with a horizontal box at the top for show selection:
 - A "Fetch" button directly to the right to refresh the show catalog from the TWiT API or fallback feeds
 - A "Next" button directly to the right of "Fetch" to grab and append the next page of episodes for the selected show
 
-Directly below the Show section have a horizontal box of episode sorting types:
+Directly below the Show section have a horizontal box for episode search:
+- Labelled "Search:"
+- A text input (toga.TextInput) for entering episode search keywords or topics scoped to the selected show
+- A "Search" button to execute search queries against the TWiT API search endpoint and fallback RSS feeds
+- A "Clear" button to clear the search input and restore the full episode catalog for the selected show
+
+Directly below the Search section have a horizontal box of episode sorting types:
 - Labelled "Sort by:"
 - Simulated radio buttons for sort types: Date (default: selected "☑ Date"), Episode Number ("☐ Episode Number"), and Episode Title ("☐ Episode Title")
 - Direction toggle button: "▼ Descending" / "▲ Ascending" (toggles server-side API sort order and table ordering)

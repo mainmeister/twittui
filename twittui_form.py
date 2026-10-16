@@ -152,6 +152,7 @@ class TwitTUIForm(toga.App):
         self.audio_only_checkbox = None
         self.sort_order_button = None
         self.next_button = None
+        self.search_input = None
         self.progress_bar = None
         self._is_downloading = False
         self._cancel_download = False
@@ -756,6 +757,17 @@ class TwitTUIForm(toga.App):
         show_box.add(fetch_button)
         show_box.add(self.next_button)
 
+        # Search section
+        search_label = toga.Label('Search:', style=Pack(margin=(0, 5)))
+        self.search_input = toga.TextInput(placeholder='Search episodes in selected show...', on_confirm=self.on_search_press, style=Pack(flex=1))
+        search_button = toga.Button('Search', on_press=self.on_search_press, style=Pack(margin=5))
+        clear_button = toga.Button('Clear', on_press=self.on_clear_search_press, style=Pack(margin=5))
+        search_box = toga.Box(style=Pack(direction=ROW, margin=5))
+        search_box.add(search_label)
+        search_box.add(self.search_input)
+        search_box.add(search_button)
+        search_box.add(clear_button)
+
         # Sort options section
         sort_label = toga.Label('Sort by:', style=Pack(margin=(0, 5)))
         self.date_radio = toga.Button('☑ Date', on_press=self.on_sort_button_press, style=Pack(margin=5))
@@ -886,6 +898,7 @@ class TwitTUIForm(toga.App):
 
         # Add all components to main box
         main_box.add(show_box)
+        main_box.add(search_box)
         main_box.add(sort_box)
         main_box.add(episodes_label)
         main_box.add(self.episodes_list)
@@ -2453,6 +2466,247 @@ class TwitTUIForm(toga.App):
 
         return []
 
+    def search_episodes(self, query: str, show_id: str = None, show_name: str = None) -> list:
+        """Search for episodes matching keywords within the selected show across API and fallback RSS feeds."""
+        if not query or not query.strip():
+            return []
+
+        query_str = query.strip()
+        query_lower = query_str.lower()
+        query_words = [w for w in re.split(r'\s+', query_lower) if w]
+
+        selected_show = show_name or (self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo and self.show_combo.value else '')
+        if not selected_show and hasattr(self, 'show_ids') and show_id:
+            for name, sid in self.show_ids.items():
+                if str(sid) == str(show_id):
+                    selected_show = name
+                    break
+
+        is_all_shows = not selected_show or selected_show.lower().strip() == 'all twit.tv shows'
+        results = []
+        seen_keys = set()
+
+        def add_result(ep):
+            if not ep:
+                return
+            ep_id = ep.get('id')
+            clean_path = ep.get('cleanPath')
+            num = ep.get('number')
+            title = ep.get('title')
+            key = None
+            if ep_id:
+                key = f"id:{ep_id}"
+            elif clean_path:
+                key = f"path:{clean_path}"
+            elif num or title:
+                key = f"nt:{num}:{title}"
+
+            if key and key in seen_keys:
+                return
+            if key:
+                seen_keys.add(key)
+            results.append(ep)
+
+        # Show slug helpers for checking cleanPath or body
+        slug_candidates = set()
+        if selected_show:
+            show_clean = selected_show.lower().strip()
+            slug_candidates.add(re.sub(r'[^a-z0-9]+', '-', show_clean).strip('-'))
+            slug_candidates.add(re.sub(r'[^a-z0-9]+', '', show_clean))
+            # Known abbreviations and aliases
+            abbrevs = {
+                'this week in tech': ['twit', 'this-week-in-tech'],
+                'security now': ['sn', 'security-now'],
+                'macbreak weekly': ['mbw', 'macbreak-weekly'],
+                'windows weekly': ['ww', 'windows-weekly'],
+                'tech news weekly': ['tnw', 'tech-news-weekly'],
+                'hands-on tech': ['hot', 'hands-on-tech'],
+                'hands-on ai': ['hoa', 'hands-on-ai'],
+                'hands-on mac': ['hom', 'hands-on-mac'],
+                'hands-on windows': ['how', 'hands-on-windows'],
+                'this week in space': ['twis', 'this-week-in-space'],
+                'untitled linux show': ['uls', 'untitled-linux-show'],
+                'ios today': ['iost', 'ios-today'],
+                'intelligent machines': ['im', 'intelligent-machines'],
+                'ask the tech guys': ['attg', 'ask-the-tech-guys', 'ask-the-tech-guy'],
+                'ask the tech guy': ['attg', 'ask-the-tech-guys', 'ask-the-tech-guy'],
+                'the tech guy': ['ttg', 'the-tech-guy'],
+                'home theater geeks': ['htg', 'home-theater-geeks'],
+                'all about android': ['aaa', 'all-about-android'],
+                'twit+ news': ['twit-news', 'twit-plus-news', 'twit_news'],
+                'twit news': ['twit-news'],
+                'twit+ clips': ['twit-clips'],
+                'twit+ club shows': ['twit-club-shows'],
+                'ai inside': ['ai-inside'],
+                'total leo': ['total-leo'],
+                'total mikah': ['total-mikah'],
+                'total jason': ['total-jason'],
+                'total ant': ['total-ant']
+            }
+            if show_clean in abbrevs:
+                slug_candidates.update(abbrevs[show_clean])
+
+        def show_matches_cleanpath(cp: str, body: str = '') -> bool:
+            if is_all_shows:
+                return True
+            if not cp and not body:
+                return True
+            cp_lower = (cp or '').lower()
+            for cand in slug_candidates:
+                if f"/shows/{cand}/" in cp_lower or f"/shows/{cand}" in cp_lower or f"/{cand}/" in cp_lower:
+                    return True
+            if selected_show and selected_show.lower() in (body or '').lower():
+                return True
+            return False
+
+        # Load show RSS items to help enrich and match
+        rss_items_map = {}
+        show_rss_list = []
+        if selected_show:
+            try:
+                show_rss_list = self.fetch_show_rss_items(selected_show, audio_only=self.is_audio_only())
+                for r_item in (show_rss_list or []):
+                    r_num = str(r_item.get('number', '')).strip()
+                    if r_num:
+                        rss_items_map[r_num] = r_item
+                    r_title = r_item.get('title', '').strip().lower()
+                    if r_title:
+                        rss_items_map[r_title] = r_item
+            except Exception:
+                pass
+
+        # Tier 1: TWiT REST API Search Endpoint
+        try:
+            load_dotenv()
+            app_id = self.get_api_app_id()
+            app_key = self.get_api_app_key()
+
+            if app_id and app_key:
+                headers = {
+                    'Accept': 'application/json',
+                    'app-id': app_id,
+                    'app-key': app_key
+                }
+                encoded_query = urllib.parse.quote(query_str)
+                url = f'https://twit.tv/api/v1.0/search/{encoded_query}?range=100'
+                resp = requests.get(url, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    search_items = data.get('search', [])
+                    if isinstance(search_items, list):
+                        for item in search_items:
+                            item_type = item.get('type')
+                            if item_type and item_type != 'episode':
+                                continue
+                            clean_path = item.get('cleanPath', '')
+                            body = item.get('body', '')
+                            if not show_matches_cleanpath(clean_path, body):
+                                continue
+
+                            ep_id = item.get('id')
+                            title = item.get('label') or item.get('title') or ''
+                            ep_num = ''
+                            if clean_path:
+                                num_match = re.search(r'/episodes/(\d+)', clean_path)
+                                if num_match:
+                                    ep_num = num_match.group(1)
+                            if not ep_num and title:
+                                num_match = re.search(r'\b(\d+)\b', title)
+                                if num_match:
+                                    ep_num = num_match.group(1)
+
+                            matched_rss = rss_items_map.get(str(ep_num).strip()) or rss_items_map.get(title.strip().lower())
+                            date_val = matched_rss.get('date', '') if matched_rss else ''
+                            dur_val = (matched_rss.get('length') or matched_rss.get('duration', '')) if matched_rss else ''
+                            media_url_val = matched_rss.get('enclosure_url', '') if matched_rss else ''
+
+                            ep_info = {
+                                'id': str(ep_id) if ep_id is not None else '',
+                                'title': title,
+                                'number': ep_num,
+                                'cleanPath': clean_path,
+                                'description': body,
+                                'summary': body,
+                                'date': date_val,
+                                'length': dur_val,
+                                'duration': dur_val,
+                                'media_url': media_url_val
+                            }
+                            add_result(ep_info)
+        except Exception as e:
+            print(f"Error searching API: {e}")
+
+        # Tier 2: Public Show RSS Feeds (feeds.twit.tv)
+        if show_rss_list:
+            try:
+                for item in show_rss_list:
+                    t = item.get('title', '')
+                    d = item.get('description', '')
+                    s = item.get('summary', '')
+                    num = str(item.get('number', ''))
+                    combined = f"{t} {d} {s} {num}".lower()
+                    if all(word in combined for word in query_words):
+                        ep = {
+                            'title': t,
+                            'number': num,
+                            'date': item.get('date', ''),
+                            'length': item.get('length') or item.get('duration', ''),
+                            'duration': item.get('duration') or item.get('length', ''),
+                            'media_url': item.get('enclosure_url', ''),
+                            'cleanPath': item.get('link', ''),
+                            'description': d,
+                            'summary': s,
+                            'guid': item.get('guid', ''),
+                            'pubDate': item.get('pubDate', '')
+                        }
+                        add_result(ep)
+            except Exception as e:
+                print(f"Error searching show RSS: {e}")
+
+        # Tier 3: Club TWiT RSS Feed
+        try:
+            club_items = self.fetch_club_twit_rss_items(selected_show, audio_only=self.is_audio_only())
+            if club_items:
+                for item in club_items:
+                    t = item.get('title', '')
+                    d = item.get('description', '')
+                    s = item.get('summary', '')
+                    num = str(item.get('number', ''))
+                    if not is_all_shows and selected_show:
+                        if selected_show.lower() not in t.lower() and not any(w.lower() in t.lower() for w in selected_show.split() if len(w) > 3):
+                            continue
+                    combined = f"{t} {d} {s} {num}".lower()
+                    if all(word in combined for word in query_words):
+                        ep = {
+                            'title': t,
+                            'number': num,
+                            'date': item.get('date', ''),
+                            'length': item.get('length') or item.get('duration', ''),
+                            'duration': item.get('duration') or item.get('length', ''),
+                            'media_url': item.get('enclosure_url', ''),
+                            'cleanPath': item.get('link', ''),
+                            'description': d,
+                            'summary': s,
+                            'guid': item.get('guid', ''),
+                            'pubDate': item.get('pubDate', '')
+                        }
+                        add_result(ep)
+        except Exception as e:
+            print(f"Error searching Club TWiT RSS: {e}")
+
+        # Tier 4: Search across currently loaded episodes if any
+        if hasattr(self, 'current_episodes') and self.current_episodes:
+            for ep in self.current_episodes:
+                t = str(ep.get('title', ''))
+                d = str(ep.get('description', ''))
+                s = str(ep.get('summary', ''))
+                num = str(ep.get('number', ''))
+                combined = f"{t} {d} {s} {num}".lower()
+                if all(word in combined for word in query_words):
+                    add_result(ep)
+
+        return results
+
     def _enable_table_horizontal_scroll(self) -> None:
         """Enable horizontal scrolling on the episodes table when titles or columns exceed available width."""
         if not hasattr(self, 'episodes_list') or not self.episodes_list:
@@ -2981,6 +3235,28 @@ class TwitTUIForm(toga.App):
         self._enable_table_horizontal_scroll()
         self._setup_table_hover_events()
 
+    def on_search_press(self, widget=None) -> None:
+        """Execute search query against selected show episodes and populate table with matches."""
+        self._cancel_hover_timer()
+        query = self.search_input.value.strip() if hasattr(self, 'search_input') and self.search_input and self.search_input.value else ''
+        if not query:
+            self.load_episodes_for_selected_show()
+            return
+
+        selected_show = self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo else ''
+        show_id = self.show_ids.get(selected_show) if hasattr(self, 'show_ids') and selected_show in self.show_ids else None
+
+        results = self.search_episodes(query, show_id=show_id, show_name=selected_show)
+        self.current_episodes = results
+        self.update_episodes_display()
+
+    def on_clear_search_press(self, widget=None) -> None:
+        """Clear search input text and restore full episode catalog for selected show."""
+        self._cancel_hover_timer()
+        if hasattr(self, 'search_input') and self.search_input:
+            self.search_input.value = ''
+        self.load_episodes_for_selected_show()
+
     def load_episodes_for_selected_show(self) -> None:
         """Fetch and display episodes for currently selected show in the combo box."""
         self._cancel_hover_timer()
@@ -2997,7 +3273,10 @@ class TwitTUIForm(toga.App):
     def on_show_select(self, widget) -> None:
         """Handle show selection change."""
         self.current_page = 1
-        self.load_episodes_for_selected_show()
+        if hasattr(self, 'search_input') and self.search_input and self.search_input.value and self.search_input.value.strip():
+            self.on_search_press()
+        else:
+            self.load_episodes_for_selected_show()
 
     def on_fetch_press(self, widget) -> None:
         """Fetch episodes for the selected show and refresh the show list."""
@@ -3009,7 +3288,10 @@ class TwitTUIForm(toga.App):
             if current_selection in shows:
                 self.show_combo.value = current_selection
 
-        self.load_episodes_for_selected_show()
+        if hasattr(self, 'search_input') and self.search_input and self.search_input.value and self.search_input.value.strip():
+            self.on_search_press()
+        else:
+            self.load_episodes_for_selected_show()
 
     def on_next_press(self, widget) -> None:
         """Fetch the next page of episodes for the currently selected show."""
