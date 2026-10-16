@@ -42,6 +42,7 @@ This document serves two primary audiences:
 ## Core Capabilities
 
 - **Show Catalog Navigation**: Browse active and legacy TWiT.tv productions with automatic fallback to static show catalogs when offline or unauthenticated.
+- **Episode Metadata Hover Preview**: Hovering over any episode row for 3 seconds triggers a detailed metadata modal revealing complete show notes, guest and host lists, topics, duration, and direct media stream links.
 - **Resilient Episode Ingestion**: Automatic multi-tier failover across the official TWiT REST API v1.0, public XML/RSS feeds (`feeds.twit.tv`), authenticated Club TWiT Memberful RSS feeds, and webpage media scrapers.
 - **Direct Video/Audio Streaming**: Spawn external media players (e.g., VLC, MPV) asynchronously using customizable command templates without stalling the UI.
 - **Concurrent Batch Downloader**: Download single or multiple episodes in non-blocking background daemon threads with configurable byte buffers and atomic file writes.
@@ -145,6 +146,7 @@ twitclubstreamer=vlc %f
 - The episode list refreshes automatically upon selection.
 - Click **Fetch** to force a catalog refresh against the TWiT API or fallback feeds.
 - Click **Next** to fetch and append the next page of episodes for the active show.
+- **Episode Metadata Inspection**: Hovering your mouse cursor over any episode row in the list for more than 3 seconds displays a modal dialog showing comprehensive episode metadata including show name, episode number, title, airing date, duration, episode ID, web links, media stream URLs, available formats, hosts/guests, topics, and complete show notes.
 
 #### Sorting Episodes
 - Select one of the three sort mode buttons:
@@ -261,7 +263,7 @@ toga.MainWindow (title='TWIT.tv TUI')
     │   ├── toga.Button ('▼ Descending', on_press=on_sort_order_toggle) [sort_order_button]
     │   └── toga.Button ('☐ Audio Only', on_press=on_audio_only_toggle) [audio_only_checkbox]
     ├── toga.Label ('Episodes:')
-    ├── toga.Table (headings=['Episode', 'Title', 'Date', 'Length'], multiple_select=True) [episodes_list with horizontal scrollbar]
+    ├── toga.Table (headings=['Episode', 'Title', 'Date', 'Length'], multiple_select=True) [episodes_list with horizontal scrollbar & 3s hover metadata modal]
     ├── toga.Box (direction=ROW, margin=5) [button_box]
     │   ├── toga.Button ('Download', on_press=on_download_press)
     │   ├── toga.Button ('Stream', on_press=on_stream_press)

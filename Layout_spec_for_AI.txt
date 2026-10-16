@@ -18,6 +18,7 @@ Below this is a label "Episodes:" followed by a multi-column table (toga.Table) 
 - Supports multiple selection for batch downloading
 - Activating/double-clicking an episode row triggers streaming
 - Enables automatic horizontal and vertical scrollbars when episode titles or column contents exceed visible horizontal space
+- Hovering the mouse pointer over any episode entry in the table for more than 3 seconds displays a modal dialog with all metadata about that episode (show, episode number, title, airing date, duration, ID, link, media URL, available formats, hosts/guests, and full description/show notes)
 
 Below the episodes table are a horizontal group of action buttons:
 - "Download" (initiates multi-threaded background download of selected episodes; on completion, pops up a modal dialog displaying the destination folder at top and downloaded filenames, one per line, with a close button)

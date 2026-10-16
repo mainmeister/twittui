@@ -470,6 +470,16 @@ class TwitTUIForm(toga.App):
                     if dur_elem is not None and dur_elem.text:
                         duration_str = self.format_duration(dur_elem.text.strip())
 
+                    desc_elem = item.find('description')
+                    summary_elem = item.find('{http://www.itunes.com/dtds/podcast-1.0.dtd}summary')
+                    if summary_elem is None:
+                        summary_elem = item.find('summary')
+                    desc_str = ''
+                    if desc_elem is not None and desc_elem.text:
+                        desc_str = desc_elem.text.strip()
+                    elif summary_elem is not None and summary_elem.text:
+                        desc_str = summary_elem.text.strip()
+
                     pub_str = pubdate_elem.text.strip() if pubdate_elem is not None and pubdate_elem.text else ''
                     date_str = ''
                     if pub_str:
@@ -491,6 +501,8 @@ class TwitTUIForm(toga.App):
                         'date': date_str,
                         'length': duration_str,
                         'duration': duration_str,
+                        'description': desc_str,
+                        'summary': desc_str,
                         'link': link_elem.text.strip() if link_elem is not None and link_elem.text else '',
                         'guid': guid_elem.text.strip() if guid_elem is not None and guid_elem.text else '',
                         'pubDate': pub_str,
@@ -592,6 +604,16 @@ class TwitTUIForm(toga.App):
                         if dur_elem is not None and dur_elem.text:
                             duration_str = self.format_duration(dur_elem.text.strip())
 
+                        desc_elem = item.find('description')
+                        summary_elem = item.find('{http://www.itunes.com/dtds/podcast-1.0.dtd}summary')
+                        if summary_elem is None:
+                            summary_elem = item.find('summary')
+                        desc_str = ''
+                        if desc_elem is not None and desc_elem.text:
+                            desc_str = desc_elem.text.strip()
+                        elif summary_elem is not None and summary_elem.text:
+                            desc_str = summary_elem.text.strip()
+
                         pub_str = pubdate_elem.text.strip() if pubdate_elem is not None and pubdate_elem.text else ''
                         date_str = ''
                         if pub_str:
@@ -613,6 +635,8 @@ class TwitTUIForm(toga.App):
                                 'date': date_str,
                                 'length': duration_str,
                                 'duration': duration_str,
+                                'description': desc_str,
+                                'summary': desc_str,
                                 'link': link_elem.text.strip() if link_elem is not None and link_elem.text else '',
                                 'enclosure_url': enc_url
                             })
@@ -710,6 +734,13 @@ class TwitTUIForm(toga.App):
             return sorted(list(self.show_ids.keys()))
 
     def startup(self) -> None:
+        # Hover tracking state for episode metadata popup
+        self._hover_timer = None
+        self._hover_row_index = None
+        self._dialog_open = False
+        self._hover_lock = threading.Lock()
+        self._table_hover_connected = False
+
         # Main box with vertical layout
         main_box = toga.Box(style=Pack(direction=COLUMN, margin=5))
 
@@ -753,6 +784,7 @@ class TwitTUIForm(toga.App):
             style=Pack(flex=1, margin=5, height=200)
         )
         self._enable_table_horizontal_scroll()
+        self._setup_table_hover_events()
 
         # Populate the show combo with show names and load initial episodes
         shows = self.fetch_shows()
@@ -1830,6 +1862,7 @@ class TwitTUIForm(toga.App):
     def on_download_press(self, widget=None) -> None:
         """Process selected episodes for batch download."""
         try:
+            self._cancel_hover_timer()
             selected = self.episodes_list.selection
             if not selected:
                 print("No episode selected for download")
@@ -2128,6 +2161,7 @@ class TwitTUIForm(toga.App):
     def on_stream_press(self, widget=None) -> None:
         """Process selected episode for streaming."""
         try:
+            self._cancel_hover_timer()
             selected = self.episodes_list.selection
             if not selected:
                 print("No episode selected for streaming")
@@ -2149,6 +2183,7 @@ class TwitTUIForm(toga.App):
             print(f"Error launching stream: {e}")
 
     def on_cancel_press(self, widget) -> None:
+        self._cancel_hover_timer()
         if getattr(self, '_is_downloading', False):
             print("Cancelling active download...")
             self._cancel_download = True
@@ -2157,6 +2192,7 @@ class TwitTUIForm(toga.App):
             self.exit()
 
     def on_close_press(self, widget) -> None:
+        self._cancel_hover_timer()
         self.exit()
 
     async def on_browse_press(self, widget) -> None:
@@ -2354,7 +2390,11 @@ class TwitTUIForm(toga.App):
                         'length': item.get('length') or item.get('duration', ''),
                         'duration': item.get('duration') or item.get('length', ''),
                         'media_url': item.get('enclosure_url', ''),
-                        'cleanPath': item.get('link', '')
+                        'cleanPath': item.get('link', ''),
+                        'description': item.get('description', ''),
+                        'summary': item.get('summary', ''),
+                        'guid': item.get('guid', ''),
+                        'pubDate': item.get('pubDate', '')
                     })
                 if episodes:
                     return episodes
@@ -2389,7 +2429,11 @@ class TwitTUIForm(toga.App):
                     'length': item.get('length') or item.get('duration', ''),
                     'duration': item.get('duration') or item.get('length', ''),
                     'media_url': item.get('enclosure_url', ''),
-                    'cleanPath': item.get('link', '')
+                    'cleanPath': item.get('link', ''),
+                    'description': item.get('description', ''),
+                    'summary': item.get('summary', ''),
+                    'guid': item.get('guid', ''),
+                    'pubDate': item.get('pubDate', '')
                 })
             if episodes:
                 return episodes
@@ -2426,14 +2470,298 @@ class TwitTUIForm(toga.App):
             except Exception:
                 pass
 
+    @staticmethod
+    def clean_html_text(text: str) -> str:
+        """Strip HTML tags and unescape HTML entities into clean plain text."""
+        if not text:
+            return ''
+        s = str(text)
+        s = re.sub(r'<\s*br\s*/?>', '\n', s, flags=re.I)
+        s = re.sub(r'</\s*p\s*>', '\n\n', s, flags=re.I)
+        s = re.sub(r'</\s*li\s*>', '\n', s, flags=re.I)
+        s = re.sub(r'<[^>]+>', '', s)
+        s = html.unescape(s)
+        s = re.sub(r'\n{3,}', '\n\n', s)
+        return s.strip()
+
+    def format_episode_metadata(self, target, show_name: str = '') -> tuple[str, str]:
+        """Format all available metadata for an episode into a human-readable title and description."""
+        ep_data = {}
+        if hasattr(target, 'episode_data') and isinstance(target.episode_data, dict):
+            ep_data.update(target.episode_data)
+        elif isinstance(target, dict):
+            if 'episode_data' in target and isinstance(target['episode_data'], dict):
+                ep_data.update(target['episode_data'])
+            else:
+                ep_data.update(target)
+
+        # Collect show name
+        show = show_name or getattr(target, 'show', '') or ep_data.get('show_name') or ep_data.get('show')
+        if not show and hasattr(self, 'show_combo') and self.show_combo:
+            show = self.show_combo.value or ''
+        if isinstance(show, dict):
+            show = show.get('label') or show.get('title') or ''
+
+        # Collect episode number
+        ep_num = getattr(target, 'episode', '') or ep_data.get('number') or ep_data.get('episodeNumber') or ''
+
+        # Collect episode title
+        ep_title = getattr(target, 'title', '') or ep_data.get('title') or ep_data.get('label') or ''
+
+        # Collect date
+        ep_date = getattr(target, 'date', '') or ep_data.get('date') or ep_data.get('airingDate') or ep_data.get('publishDate') or ep_data.get('pubDate') or ''
+
+        # Collect duration / length
+        ep_dur = getattr(target, 'length', '') or getattr(target, 'duration', '') or ep_data.get('length') or ep_data.get('duration') or ep_data.get('runningTime') or ''
+        if ep_dur:
+            ep_dur = self.format_duration(ep_dur)
+
+        # Collect ID / GUID / Node ID
+        ep_id = ep_data.get('id') or ep_data.get('guid') or ep_data.get('node_id') or ''
+
+        # Collect Web Link / CleanPath
+        ep_link = ep_data.get('cleanPath') or ep_data.get('link') or ep_data.get('url') or ''
+        if ep_link and not str(ep_link).startswith('http'):
+            ep_link = f"https://twit.tv/{str(ep_link).lstrip('/')}"
+
+        # Collect Media URL
+        media_url = getattr(target, 'media_url', '') or ep_data.get('media_url') or ep_data.get('enclosure_url') or ''
+        if not media_url:
+            try:
+                media_url = self.resolve_target_media_url(target) or ''
+            except Exception:
+                media_url = ''
+
+        # Available formats
+        formats = []
+        for fmt_key, fmt_label in [
+            ('video_hd', 'HD Video (1080p/720p)'),
+            ('video_large', 'Large Video'),
+            ('video_small', 'Small/Mobile Video'),
+            ('video_audio', 'Audio (MP3/M4A)'),
+            ('audio', 'Audio'),
+            ('video_youtube', 'YouTube Stream')
+        ]:
+            if fmt_key in ep_data and ep_data[fmt_key]:
+                formats.append(fmt_label)
+
+        # Hosts / Guests / People
+        people_list = []
+        for p_key in ['hosts', 'guests', 'people', 'staff']:
+            val = ep_data.get(p_key)
+            if isinstance(val, list):
+                for p in val:
+                    if isinstance(p, dict):
+                        name = p.get('label') or p.get('name') or p.get('title')
+                        if name:
+                            people_list.append(str(name))
+                    elif isinstance(p, str) and p.strip():
+                        people_list.append(p.strip())
+            elif isinstance(val, str) and val.strip():
+                people_list.append(val.strip())
+
+        # Topics / Categories / Tags
+        topics_list = []
+        for t_key in ['topics', 'tags', 'categories']:
+            val = ep_data.get(t_key)
+            if isinstance(val, list):
+                for t in val:
+                    if isinstance(t, dict):
+                        name = t.get('label') or t.get('name') or t.get('title')
+                        if name:
+                            topics_list.append(str(name))
+                    elif isinstance(t, str) and t.strip():
+                        topics_list.append(t.strip())
+            elif isinstance(val, str) and val.strip():
+                topics_list.append(val.strip())
+
+        # Description / Show notes
+        desc_raw = ep_data.get('description') or ep_data.get('summary') or ep_data.get('body') or ep_data.get('teaser') or ep_data.get('snippet') or ''
+        desc_clean = self.clean_html_text(desc_raw)
+
+        lines = []
+        if show:
+            lines.append(f"Show: {show}")
+        if ep_num and str(ep_num) != 'Unknown Number':
+            lines.append(f"Episode: {ep_num}")
+        if ep_title and str(ep_title) != 'Unknown Title':
+            lines.append(f"Title: {ep_title}")
+        if ep_date and str(ep_date) != 'Unknown Date':
+            lines.append(f"Date: {ep_date}")
+        if ep_dur:
+            lines.append(f"Duration: {ep_dur}")
+        if ep_id:
+            lines.append(f"ID / GUID: {ep_id}")
+        if ep_link:
+            lines.append(f"Web Link: {ep_link}")
+        if media_url:
+            lines.append(f"Media URL: {media_url}")
+        if formats:
+            lines.append(f"Available Formats: {', '.join(formats)}")
+        if people_list:
+            lines.append(f"Hosts / Guests: {', '.join(people_list)}")
+        if topics_list:
+            lines.append(f"Topics: {', '.join(topics_list)}")
+
+        if desc_clean:
+            lines.append("")
+            lines.append("Description / Show Notes:")
+            lines.append(desc_clean)
+
+        header_title = f"Episode Details: {ep_title}" if ep_title else "Episode Details"
+        if len(header_title) > 60:
+            header_title = header_title[:57] + "..."
+
+        return header_title, "\n".join(lines)
+
+    def show_episode_metadata_dialog(self, target) -> None:
+        """Display a modal dialog with all metadata for the specified episode."""
+        if not target:
+            return
+
+        title, message = self.format_episode_metadata(target)
+        if not message:
+            message = "No metadata available for this episode."
+
+        def _on_closed(window=None, result=None):
+            self._dialog_open = False
+            self._hover_row_index = None
+
+        def _show():
+            try:
+                if hasattr(self, 'main_window') and self.main_window:
+                    self._dialog_open = True
+                    self._cancel_hover_timer()
+                    self.main_window.info_dialog(title, message, on_result=_on_closed)
+            except Exception as e:
+                print(f"Error displaying episode metadata dialog: {e}")
+                self._dialog_open = False
+                self._hover_row_index = None
+
+        if hasattr(self, 'loop') and self.loop and self.loop.is_running():
+            try:
+                self.loop.call_soon_threadsafe(_show)
+            except Exception:
+                _show()
+        else:
+            _show()
+
+    def _cancel_hover_timer_locked(self) -> None:
+        """Cancel active hover timer while holding lock."""
+        if getattr(self, '_hover_timer', None) is not None:
+            try:
+                self._hover_timer.cancel()
+            except Exception:
+                pass
+            self._hover_timer = None
+
+    def _cancel_hover_timer(self) -> None:
+        """Cancel active hover timer and clear hovered row index."""
+        if not hasattr(self, '_hover_lock'):
+            self._hover_lock = threading.Lock()
+        with self._hover_lock:
+            self._cancel_hover_timer_locked()
+            self._hover_row_index = None
+
+    def _trigger_hover_metadata(self, row_idx: int) -> None:
+        """Triggered after 3 seconds of continuous hover over an episode row."""
+        with self._hover_lock:
+            if getattr(self, '_dialog_open', False):
+                return
+            if self._hover_row_index != row_idx:
+                return
+            self._hover_timer = None
+
+        def _show():
+            try:
+                if not hasattr(self, 'episodes_list') or not self.episodes_list or not self.episodes_list.data:
+                    return
+                if row_idx < 0 or row_idx >= len(self.episodes_list.data):
+                    return
+                row_item = self.episodes_list.data[row_idx]
+                self.show_episode_metadata_dialog(row_item)
+            except Exception as e:
+                print(f"Error displaying episode metadata dialog: {e}")
+
+        if hasattr(self, 'loop') and self.loop and self.loop.is_running():
+            try:
+                self.loop.call_soon_threadsafe(_show)
+            except Exception:
+                _show()
+        else:
+            _show()
+
+    def _on_table_motion_notify(self, widget, event) -> bool:
+        """Handle mouse motion over episodes table and track 3-second hover dwell time."""
+        if getattr(self, '_dialog_open', False):
+            self._cancel_hover_timer()
+            return False
+
+        try:
+            x, y = int(event.x), int(event.y)
+            path_info = widget.get_path_at_pos(x, y)
+            if path_info:
+                path = path_info[0]
+                indices = path.get_indices()
+                if indices and len(indices) > 0:
+                    row_idx = indices[0]
+                    with self._hover_lock:
+                        if self._hover_row_index != row_idx:
+                            self._cancel_hover_timer_locked()
+                            self._hover_row_index = row_idx
+                            self._hover_timer = threading.Timer(3.0, self._trigger_hover_metadata, args=(row_idx,))
+                            self._hover_timer.daemon = True
+                            self._hover_timer.start()
+                    return False
+        except Exception:
+            pass
+
+        self._cancel_hover_timer()
+        return False
+
+    def _on_table_leave_notify(self, widget, event) -> bool:
+        """Cancel hover timer when mouse pointer leaves the episodes table."""
+        self._cancel_hover_timer()
+        return False
+
+    def _setup_table_hover_events(self) -> None:
+        """Set up hover tracking on the episodes table to show metadata dialog after 3 seconds."""
+        if not hasattr(self, 'episodes_list') or not self.episodes_list:
+            return
+
+        impl = getattr(self.episodes_list, '_impl', None)
+        if not impl:
+            return
+
+        native_table = getattr(impl, 'native_table', None)
+        if native_table and hasattr(native_table, 'connect'):
+            if getattr(self, '_table_hover_connected', False):
+                return
+            try:
+                from gi.repository import Gdk
+                native_table.add_events(Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+                native_table.connect('motion-notify-event', self._on_table_motion_notify)
+                native_table.connect('leave-notify-event', self._on_table_leave_notify)
+                self._table_hover_connected = True
+            except Exception:
+                try:
+                    native_table.connect('motion-notify-event', self._on_table_motion_notify)
+                    native_table.connect('leave-notify-event', self._on_table_leave_notify)
+                    self._table_hover_connected = True
+                except Exception:
+                    pass
+
     def update_episodes_display(self) -> None:
         """Format and display current episodes based on selected sort order."""
         if not hasattr(self, 'episodes_list') or self.episodes_list is None:
             return
 
+        self._cancel_hover_timer()
+
         if not self.current_episodes:
             self.episodes_list.data = []
             self._enable_table_horizontal_scroll()
+            self._setup_table_hover_events()
             return
 
         episodes = list(self.current_episodes)
@@ -2477,9 +2805,11 @@ class TwitTUIForm(toga.App):
 
         self.episodes_list.data = table_data
         self._enable_table_horizontal_scroll()
+        self._setup_table_hover_events()
 
     def load_episodes_for_selected_show(self) -> None:
         """Fetch and display episodes for currently selected show in the combo box."""
+        self._cancel_hover_timer()
         self.current_page = 1
         selected_show = self.show_combo.value
         if selected_show and hasattr(self, 'show_ids') and selected_show in self.show_ids:
