@@ -353,6 +353,84 @@ class TwitTUIForm(toga.App):
         return ''
 
     @staticmethod
+    def format_file_size(val) -> str:
+        """Format file size in bytes into a human-readable string (bytes, KB, MB, GB)."""
+        if val is None or val == '':
+            return ''
+
+        try:
+            if isinstance(val, str):
+                val_clean = val.strip().replace(',', '')
+                if not val_clean:
+                    return ''
+                if any(u in val_clean.upper() for u in ['GB', 'MB', 'KB', 'BYTES', 'BYTE']) and not val_clean.isdigit():
+                    return val_clean
+                num = float(val_clean)
+            elif isinstance(val, (int, float)):
+                num = float(val)
+            elif isinstance(val, dict):
+                for k in ['file_size', 'fileSize', 'size', 'length', 'enclosure_length', 'bytes']:
+                    if k in val and val[k]:
+                        res = TwitTUIForm.format_file_size(val[k])
+                        if res:
+                            return res
+                return ''
+            else:
+                return ''
+
+            if num < 0:
+                return ''
+            if num == 0:
+                return '0 B'
+            if num < 1024:
+                return f"{int(num)} B"
+            elif num < 1024 * 1024:
+                kb = num / 1024.0
+                return f"{kb:.1f} KB" if kb < 100 else f"{round(kb)} KB"
+            elif num < 1024 * 1024 * 1024:
+                mb = num / (1024.0 * 1024.0)
+                return f"{mb:.1f} MB"
+            else:
+                gb = num / (1024.0 * 1024.0 * 1024.0)
+                return f"{gb:.2f} GB"
+        except Exception:
+            return ''
+
+    def extract_size(self, episode_dict: dict, audio_only: bool = None) -> int | str | None:
+        """Extract file size in bytes from an episode data dictionary."""
+        if not isinstance(episode_dict, dict):
+            return None
+
+        if audio_only is None:
+            audio_only = self.is_audio_only()
+
+        # Direct top-level size keys
+        for k in ['file_size', 'fileSize', 'enclosure_length', 'bytes', 'content_length', 'size']:
+            val = episode_dict.get(k)
+            if val is not None and str(val).strip():
+                val_str = str(val).strip()
+                if val_str.isdigit() and int(val_str) > 0:
+                    return int(val_str)
+                elif not val_str.isdigit() and any(u in val_str.upper() for u in ['B', 'KB', 'MB', 'GB']):
+                    return val_str
+
+        # Format sub-dictionaries
+        formats = ['video_audio', 'audio', 'video_hd', 'video_large', 'video_small'] if audio_only else ['video_hd', 'video_large', 'video_small', 'video_audio', 'audio']
+        for fmt in formats:
+            fmt_val = episode_dict.get(fmt)
+            if isinstance(fmt_val, dict):
+                for k in ['file_size', 'fileSize', 'size', 'length', 'bytes']:
+                    v = fmt_val.get(k)
+                    if v is not None and str(v).strip():
+                        v_str = str(v).strip()
+                        if v_str.isdigit() and int(v_str) > 0:
+                            return int(v_str)
+                        elif not v_str.isdigit() and any(u in v_str.upper() for u in ['B', 'KB', 'MB', 'GB']):
+                            return v_str
+
+        return None
+
+    @staticmethod
     def is_audio_url(url: str) -> bool:
         """Check if URL points to an audio stream or file format."""
         if not url or not isinstance(url, str):
@@ -496,6 +574,7 @@ class TwitTUIForm(toga.App):
                     ep_num = num_match.group(1) if num_match else ''
 
                     enc_url = enclosure_elem.attrib.get('url', '').strip() if enclosure_elem is not None else ''
+                    enc_len = enclosure_elem.attrib.get('length', '').strip() if enclosure_elem is not None else ''
 
                     item_data = {
                         'title': title_str,
@@ -503,6 +582,9 @@ class TwitTUIForm(toga.App):
                         'date': date_str,
                         'length': duration_str,
                         'duration': duration_str,
+                        'size': enc_len,
+                        'file_size': enc_len,
+                        'enclosure_length': enc_len,
                         'description': desc_str,
                         'summary': desc_str,
                         'link': link_elem.text.strip() if link_elem is not None and link_elem.text else '',
@@ -630,6 +712,7 @@ class TwitTUIForm(toga.App):
                         ep_num = num_match.group(1) if num_match else ''
 
                         enc_url = enclosure_elem.attrib.get('url', '').strip() if enclosure_elem is not None else ''
+                        enc_len = enclosure_elem.attrib.get('length', '').strip() if enclosure_elem is not None else ''
                         if enc_url and self.is_valid_media_url(enc_url):
                             items.append({
                                 'title': title_str,
@@ -637,6 +720,9 @@ class TwitTUIForm(toga.App):
                                 'date': date_str,
                                 'length': duration_str,
                                 'duration': duration_str,
+                                'size': enc_len,
+                                'file_size': enc_len,
+                                'enclosure_length': enc_len,
                                 'description': desc_str,
                                 'summary': desc_str,
                                 'link': link_elem.text.strip() if link_elem is not None and link_elem.text else '',
@@ -792,7 +878,7 @@ class TwitTUIForm(toga.App):
         # Episodes list section
         episodes_label = toga.Label('Episodes:', style=Pack(margin=(0, 5)))
         self.episodes_list = toga.Table(
-            headings=['Episode', 'Title', 'Date', 'Length'],
+            headings=['Episode', 'Title', 'Date', 'Length', 'Size'],
             multiple_select=True,
             on_activate=lambda widget, row: self.on_stream_press(widget),
             style=Pack(flex=1, margin=5, height=200)
@@ -2489,6 +2575,12 @@ class TwitTUIForm(toga.App):
                                 episode_info['length'] = length
                                 episode_info['duration'] = length
 
+                            size_val = self.extract_size(episode)
+                            if size_val:
+                                episode_info['size'] = size_val
+                                episode_info['file_size'] = size_val
+                                episode_info['enclosure_length'] = size_val
+
                             media_url = self.extract_media_url(episode)
                             if media_url:
                                 episode_info['media_url'] = media_url
@@ -2524,6 +2616,9 @@ class TwitTUIForm(toga.App):
                         'date': item.get('date', ''),
                         'length': item.get('length') or item.get('duration', ''),
                         'duration': item.get('duration') or item.get('length', ''),
+                        'size': item.get('size') or item.get('file_size') or item.get('enclosure_length', ''),
+                        'file_size': item.get('file_size') or item.get('size') or item.get('enclosure_length', ''),
+                        'enclosure_length': item.get('enclosure_length', ''),
                         'media_url': item.get('enclosure_url', ''),
                         'cleanPath': item.get('link', ''),
                         'description': item.get('description', ''),
@@ -2563,6 +2658,9 @@ class TwitTUIForm(toga.App):
                     'date': item.get('date', ''),
                     'length': item.get('length') or item.get('duration', ''),
                     'duration': item.get('duration') or item.get('length', ''),
+                    'size': item.get('size') or item.get('file_size') or item.get('enclosure_length', ''),
+                    'file_size': item.get('file_size') or item.get('size') or item.get('enclosure_length', ''),
+                    'enclosure_length': item.get('enclosure_length', ''),
                     'media_url': item.get('enclosure_url', ''),
                     'cleanPath': item.get('link', ''),
                     'description': item.get('description', ''),
@@ -2727,6 +2825,7 @@ class TwitTUIForm(toga.App):
                             matched_rss = rss_items_map.get(str(ep_num).strip()) or rss_items_map.get(title.strip().lower())
                             date_val = matched_rss.get('date', '') if matched_rss else ''
                             dur_val = (matched_rss.get('length') or matched_rss.get('duration', '')) if matched_rss else ''
+                            size_val = (matched_rss.get('size') or matched_rss.get('file_size') or matched_rss.get('enclosure_length', '')) if matched_rss else ''
                             media_url_val = matched_rss.get('enclosure_url', '') if matched_rss else ''
 
                             ep_info = {
@@ -2739,6 +2838,9 @@ class TwitTUIForm(toga.App):
                                 'date': date_val,
                                 'length': dur_val,
                                 'duration': dur_val,
+                                'size': size_val,
+                                'file_size': size_val,
+                                'enclosure_length': size_val,
                                 'media_url': media_url_val
                             }
                             add_result(ep_info)
@@ -2761,6 +2863,9 @@ class TwitTUIForm(toga.App):
                             'date': item.get('date', ''),
                             'length': item.get('length') or item.get('duration', ''),
                             'duration': item.get('duration') or item.get('length', ''),
+                            'size': item.get('size') or item.get('file_size') or item.get('enclosure_length', ''),
+                            'file_size': item.get('file_size') or item.get('size') or item.get('enclosure_length', ''),
+                            'enclosure_length': item.get('enclosure_length', ''),
                             'media_url': item.get('enclosure_url', ''),
                             'cleanPath': item.get('link', ''),
                             'description': d,
@@ -2792,6 +2897,9 @@ class TwitTUIForm(toga.App):
                             'date': item.get('date', ''),
                             'length': item.get('length') or item.get('duration', ''),
                             'duration': item.get('duration') or item.get('length', ''),
+                            'size': item.get('size') or item.get('file_size') or item.get('enclosure_length', ''),
+                            'file_size': item.get('file_size') or item.get('size') or item.get('enclosure_length', ''),
+                            'enclosure_length': item.get('enclosure_length', ''),
                             'media_url': item.get('enclosure_url', ''),
                             'cleanPath': item.get('link', ''),
                             'description': d,
@@ -2910,6 +3018,12 @@ class TwitTUIForm(toga.App):
         if ep_dur:
             ep_dur = self.format_duration(ep_dur)
 
+        # Collect file size
+        ep_size = getattr(target, 'size', '') or getattr(target, 'file_size', '') or ep_data.get('size') or ep_data.get('file_size') or ep_data.get('enclosure_length') or ''
+        if not ep_size:
+            ep_size = self.extract_size(ep_data) or ''
+        ep_size_formatted = self.format_file_size(ep_size) if ep_size else ''
+
         # Collect ID / GUID / Node ID
         ep_id = ep_data.get('id') or ep_data.get('guid') or ep_data.get('node_id') or ''
 
@@ -2984,6 +3098,8 @@ class TwitTUIForm(toga.App):
             'title': ep_title,
             'date': ep_date,
             'duration': ep_dur,
+            'size': ep_size_formatted,
+            'file_size': ep_size_formatted,
             'id': ep_id,
             'link': ep_link,
             'media_url': media_url,
@@ -3002,6 +3118,7 @@ class TwitTUIForm(toga.App):
         ep_title = meta['title']
         ep_date = meta['date']
         ep_dur = meta['duration']
+        ep_size = meta.get('size')
         ep_id = meta['id']
         ep_link = meta['link']
         media_url = meta['media_url']
@@ -3021,6 +3138,8 @@ class TwitTUIForm(toga.App):
             lines.append(f"Date: {ep_date}")
         if ep_dur:
             lines.append(f"Duration: {ep_dur}")
+        if ep_size:
+            lines.append(f"Size: {ep_size}")
         if ep_id:
             lines.append(f"ID / GUID: {ep_id}")
         if ep_link:
@@ -3100,6 +3219,8 @@ class TwitTUIForm(toga.App):
                     meta_rows.append(f"Date: {meta['date']}")
                 if meta.get('duration'):
                     meta_rows.append(f"Duration: {meta['duration']}")
+                if meta.get('size'):
+                    meta_rows.append(f"Size: {meta['size']}")
                 if meta.get('id'):
                     meta_rows.append(f"ID / GUID: {meta['id']}")
 
@@ -3329,6 +3450,8 @@ class TwitTUIForm(toga.App):
             number = episode.get('number', 'Unknown Number')
             length = episode.get('length') or episode.get('duration') or self.extract_duration(episode) or ''
             formatted_length = self.format_duration(length) if length else ''
+            size_val = episode.get('size') or episode.get('file_size') or episode.get('enclosure_length') or self.extract_size(episode) or ''
+            formatted_size = self.format_file_size(size_val) if size_val else ''
             media_url = self.extract_media_url(episode) or episode.get('media_url') or ''
             table_data.append({
                 'episode': str(number),
@@ -3336,6 +3459,8 @@ class TwitTUIForm(toga.App):
                 'date': str(date),
                 'length': str(formatted_length),
                 'duration': str(formatted_length),
+                'size': str(formatted_size),
+                'file_size': str(formatted_size),
                 'media_url': media_url,
                 'episode_data': episode
             })

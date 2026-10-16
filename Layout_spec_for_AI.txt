@@ -19,8 +19,9 @@ Directly below the Search section have a horizontal box of episode sorting types
 - Simulated checkbox for format selection: "☐ Audio Only" / "☑ Audio Only" (persists selection across executions via TWITAUDIOONLY)
 
 Below this is a label "Episodes:" followed by a multi-column table (toga.Table) of the selected show's episodes sorted by the selected sort type:
-- Table columns/headings: "Episode", "Title", "Date", "Length"
+- Table columns/headings: "Episode", "Title", "Date", "Length", "Size"
 - Displays episode length formatted in hour:minutes:seconds (HH:MM:SS)
+- Displays episode media file size formatted in human-readable units (bytes, KB, MB, GB)
 - Supports multiple selection for batch downloading
 - Activating/double-clicking an episode row triggers streaming
 - Enables automatic horizontal and vertical scrollbars when episode titles or column contents exceed visible horizontal space

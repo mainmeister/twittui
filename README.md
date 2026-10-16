@@ -124,25 +124,25 @@ twitclubstreamer=vlc %f
 ### User Interface & Usage Walkthrough
 
 ```
-+-------------------------------------------------------------------------+
-| Show: [ This Week in Tech                  v ] [ Fetch ] [ Next ]       |
-| Search: [ OpenAI                                ] [ Search ] [ Clear ]  |
-| Sort by: [X Date]  [  Episode Number]  [  Episode Title] [v Desc]       |
-| +---------------------------------------------------------------------+ |
-| | Episode | Title                        | Date       | Length        | |
-| |---------|------------------------------|------------|---------------| |
-| | 1001    | TWiT 1001: AI in Fast Lane   | 2024-10-13 | 02:15:40      | |
-| | 1000    | TWiT 1000: The Milestone     | 2024-10-06 | 02:08:15      | |
-| +---------------------------------------------------------------------+ |
-| [ Download ]  [ Stream ]  [ Cancel ]  [ Close ]                         |
-|                                                                         |
-| API Application ID:   [ 3edec74c                 ]                      |
-| API Application Key:  [ 36a22e422f0f8773e03b8... ] [ Test API ]        |
-| TWIT Club URL: https://twit.memberfulcontent.com/rss/9041?auth= [ KEY ] [ Show ] |
-| Download Destination: [/home/user/Podcasts       ] [ Browse ]           |
-| Block Size:           [8192                      ]                      |
-| Streamer:             [vlc %f                    ]                      |
-+-------------------------------------------------------------------------+
++---------------------------------------------------------------------------------+
+| Show: [ This Week in Tech                  v ] [ Fetch ] [ Next ]               |
+| Search: [ OpenAI                                ] [ Search ] [ Clear ]          |
+| Sort by: [X Date]  [  Episode Number]  [  Episode Title] [v Desc]               |
+| +-----------------------------------------------------------------------------+ |
+| | Episode | Title                        | Date       | Length   | Size       | |
+| |---------|------------------------------|------------|----------|------------| |
+| | 1001    | TWiT 1001: AI in Fast Lane   | 2024-10-13 | 02:15:40 | 642.5 MB   | |
+| | 1000    | TWiT 1000: The Milestone     | 2024-10-06 | 02:08:15 | 618.2 MB   | |
+| +-----------------------------------------------------------------------------+ |
+| [ Download ]  [ Stream ]  [ Cancel ]  [ Close ]                                 |
+|                                                                                 |
+| API Application ID:   [ 3edec74c                 ]                              |
+| API Application Key:  [ 36a22e422f0f8773e03b8... ] [ Test API ]                |
+| TWIT Club URL: https://twit.memberfulcontent.com/rss/9041?auth= [ KEY ] [ Show ]|
+| Download Destination: [/home/user/Podcasts       ] [ Browse ]                   |
+| Block Size:           [8192                      ]                              |
+| Streamer:             [vlc %f                    ]                              |
++---------------------------------------------------------------------------------+
 ```
 
 #### Show Selection & Episode Browsing
@@ -278,7 +278,7 @@ toga.MainWindow (title='TWIT.tv TUI')
     │   ├── toga.Button ('▼ Descending', on_press=on_sort_order_toggle) [sort_order_button]
     │   └── toga.Button ('☐ Audio Only', on_press=on_audio_only_toggle) [audio_only_checkbox]
     ├── toga.Label ('Episodes:')
-    ├── toga.Table (headings=['Episode', 'Title', 'Date', 'Length'], multiple_select=True) [episodes_list with horizontal scrollbar & 3s hover metadata modal]
+    ├── toga.Table (headings=['Episode', 'Title', 'Date', 'Length', 'Size'], multiple_select=True) [episodes_list with horizontal scrollbar & 3s hover metadata modal]
     ├── toga.Box (direction=ROW, margin=5) [button_box]
     │   ├── toga.Button ('Download', on_press=on_download_press)
     │   ├── toga.Button ('Stream', on_press=on_stream_press)
