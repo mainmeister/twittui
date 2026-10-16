@@ -13,6 +13,7 @@ import pathlib
 import webbrowser
 import html
 import requests
+import hashlib
 import http.server
 from dotenv import load_dotenv, set_key
 
@@ -1663,8 +1664,73 @@ class TwitTUIForm(toga.App):
 
         return f"{clean_base}{file_ext}"
 
-    def download_episode_file(self, url: str, dest_path: str, block_size: int = 8192, progress_callback=None) -> bool:
-        """Stream and save a media file in chunks using the specified block size."""
+    def is_existing_file_identical(self, dest_path: str, url: str, expected_size: int = None) -> bool:
+        """Check whether an existing local file is confirmed to be identical to the remote media file."""
+        if not dest_path or not os.path.exists(dest_path):
+            return False
+
+        try:
+            local_size = os.path.getsize(dest_path)
+        except Exception:
+            return False
+
+        if local_size <= 0:
+            return False
+
+        if expected_size is not None and expected_size > 0 and local_size != expected_size:
+            return False
+
+        # Verify against remote server headers via HTTP HEAD
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0 (compatible; TwitTUI/1.0)'}
+            head_resp = requests.head(url, headers=headers, timeout=10, allow_redirects=True)
+            if head_resp.status_code == 200:
+                remote_length = head_resp.headers.get('content-length')
+                etag = head_resp.headers.get('etag', '').strip('"').strip('W/').strip('"')
+
+                if remote_length and remote_length.isdigit():
+                    remote_size = int(remote_length)
+                    if remote_size > 0 and local_size != remote_size:
+                        return False
+
+                # If remote server provides an MD5 hex ETag, verify cryptographic checksum
+                if len(etag) == 32 and all(c in '0123456789abcdefABCDEF' for c in etag):
+                    try:
+                        hasher = hashlib.md5()
+                        with open(dest_path, 'rb') as f:
+                            for chunk in iter(lambda: f.read(65536), b''):
+                                hasher.update(chunk)
+                        if hasher.hexdigest().lower() == etag.lower():
+                            return True
+                        else:
+                            return False
+                    except Exception as e:
+                        print(f"Error calculating MD5 checksum for {dest_path}: {e}")
+
+                if remote_length and remote_length.isdigit() and int(remote_length) == local_size:
+                    return True
+
+            elif head_resp.status_code == 304:
+                return True
+        except Exception as e:
+            print(f"Could not verify existing file headers via HEAD request: {e}")
+            if expected_size is not None and expected_size > 0 and local_size == expected_size:
+                return True
+
+        return False
+
+    def download_episode_file(self, url: str, dest_path: str, block_size: int = 8192, progress_callback=None, expected_size: int = None) -> bool:
+        """Stream and save a media file in chunks using the specified block size, skipping identical existing files."""
+        # Check if identical file already exists on disk
+        if self.is_existing_file_identical(dest_path, url, expected_size=expected_size):
+            local_size = os.path.getsize(dest_path)
+            print(f"Skipping download: '{dest_path}' already exists and is confirmed identical ({local_size} bytes).")
+            if progress_callback:
+                progress_callback(local_size, local_size)
+            else:
+                self.update_progress(local_size, local_size)
+            return True
+
         temp_path = dest_path + '.part'
         try:
             if progress_callback is None:
@@ -1677,6 +1743,34 @@ class TwitTUIForm(toga.App):
                 content_length = r.headers.get('content-length')
                 if content_length and content_length.isdigit():
                     total_bytes = int(content_length)
+
+                # Check if destination file exists and matches GET response headers
+                if os.path.exists(dest_path) and total_bytes > 0:
+                    local_size = os.path.getsize(dest_path)
+                    if local_size == total_bytes:
+                        etag = r.headers.get('etag', '').strip('"').strip('W/').strip('"')
+                        if len(etag) == 32 and all(c in '0123456789abcdefABCDEF' for c in etag):
+                            try:
+                                hasher = hashlib.md5()
+                                with open(dest_path, 'rb') as f:
+                                    for chunk in iter(lambda: f.read(65536), b''):
+                                        hasher.update(chunk)
+                                if hasher.hexdigest().lower() == etag.lower():
+                                    print(f"Skipping download: '{dest_path}' already exists and matches MD5 checksum ({etag}).")
+                                    if progress_callback:
+                                        progress_callback(total_bytes, total_bytes)
+                                    else:
+                                        self.update_progress(total_bytes, total_bytes)
+                                    return True
+                            except Exception:
+                                pass
+                        else:
+                            print(f"Skipping download: '{dest_path}' already exists with matching size ({local_size} bytes).")
+                            if progress_callback:
+                                progress_callback(total_bytes, total_bytes)
+                            else:
+                                self.update_progress(total_bytes, total_bytes)
+                            return True
 
                 downloaded_bytes = 0
                 if progress_callback:
@@ -1850,6 +1944,21 @@ class TwitTUIForm(toga.App):
                 filename = self.determine_download_filename(target, media_url)
                 dest_filepath = os.path.join(dest_dir, filename)
 
+                # Attempt to extract known expected enclosure size
+                expected_size = None
+                if hasattr(target, 'episode_data') and isinstance(target.episode_data, dict):
+                    for k in ['file_size', 'enclosure_length', 'length', 'size', 'bytes', 'content_length']:
+                        v = target.episode_data.get(k)
+                        if v and str(v).isdigit() and int(v) > 1000:
+                            expected_size = int(v)
+                            break
+                elif isinstance(target, dict):
+                    for k in ['file_size', 'enclosure_length', 'length', 'size', 'bytes', 'content_length']:
+                        v = target.get(k)
+                        if v and str(v).isdigit() and int(v) > 1000:
+                            expected_size = int(v)
+                            break
+
                 print(f"[{idx_0 + 1}/{total_targets}] Downloading '{target_title}' -> {dest_filepath} from {media_url}")
 
                 def _item_progress(downloaded_bytes: int, total_bytes: int, item_idx=idx_0):
@@ -1860,7 +1969,7 @@ class TwitTUIForm(toga.App):
                     batch_pct = ((item_idx + item_frac) / total_targets) * 100.0
                     self.update_progress(batch_pct, 100.0)
 
-                success = self.download_episode_file(media_url, dest_filepath, block_size, progress_callback=_item_progress)
+                success = self.download_episode_file(media_url, dest_filepath, block_size, progress_callback=_item_progress, expected_size=expected_size)
                 if success:
                     downloaded_files.append(filename)
 

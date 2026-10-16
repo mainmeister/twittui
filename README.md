@@ -47,7 +47,8 @@ This document serves two primary audiences:
 - **Episode Metadata Hover Preview**: Hovering over any episode row for 3 seconds triggers a detailed metadata modal revealing complete show notes, guest and host lists, topics, duration, and direct media stream links with clickable web links and media URLs that launch the default browser.
 - **Resilient Episode Ingestion**: Automatic multi-tier failover across the official TWiT REST API v1.0, public XML/RSS feeds (`feeds.twit.tv`), authenticated Club TWiT Memberful RSS feeds, and webpage media scrapers.
 - **Direct Video/Audio Streaming**: Spawn external media players (e.g., VLC, MPV) asynchronously using customizable command templates without stalling the UI.
-- **Concurrent Batch Downloader**: Download single or multiple episodes in non-blocking background daemon threads with configurable byte buffers and atomic file writes.
+- **Concurrent Batch Downloader**: Download single or multiple episodes in non-blocking background daemon threads with configurable byte buffers, duplicate file confirmation, and atomic file writes.
+- **Smart Download Deduplication**: Automatically skips re-downloading files if a complete local copy already exists and is confirmed identical via HTTP HEAD `Content-Length` and MD5 cryptographic checksum verification (`ETag`).
 - **Club TWiT Integration**: Native support for subscriber Memberful authentication keys, giving direct access to ad-free streams and subscriber-exclusive shows.
 - **Cross-Platform Portability**: Developed on BeeWare's Toga widget toolkit, supporting terminal execution (`toga-textual`) and native desktop GUI backends (`toga-gtk`, `toga-cocoa`, `toga-winforms`).
 
@@ -417,15 +418,25 @@ Downloads run on background daemon threads (`threading.Thread`) to keep Toga's m
  │   2. For each episode:                                 │
  │      a. Resolve Media URL via 5-tier cascade           │
  │      b. Determine sanitized target filename            │
- │      c. Stream via requests.get(url, stream=True)      │
- │      d. Update progress bar with batch percentage      │
- │      e. Write chunks (size=block_size) to .part file   │
- │      f. Atomic rename: dest.part -> dest               │
+ │      c. Verify existing file (is_existing_file_same): │
+ │         • Compare local size against RSS / Content-Len │
+ │         • Verify MD5 hash against remote ETag          │
+ │         • If confirmed identical: SKIP download!       │
+ │      d. Stream via requests.get(url, stream=True)      │
+ │      e. Update progress bar with batch percentage      │
+ │      f. Write chunks (size=block_size) to .part file   │
+ │      g. Atomic rename: dest.part -> dest               │
  │   3. On batch completion:                              │
  │      Display modal dialog with destination folder &    │
  │      downloaded files list (one per line) + Close btn  │
  └────────────────────────────────────────────────────────┘
 ```
+
+#### Smart File Verification & Deduplication
+To conserve network bandwidth, prevent unnecessary disk wear, and avoid redundant transfers:
+1. **Metadata & Size Check**: Verifies if the local target file exists and non-empty, matching expected RSS enclosure length or HTTP `Content-Length`.
+2. **HTTP HEAD / Conditional Request**: Issues a lightweight `HEAD` request to inspect remote file size and `ETag`.
+3. **Cryptographic MD5 Checksum**: When the remote server returns a hex `ETag`, computes the local file's MD5 checksum. If they match bit-for-bit, download is safely skipped.
 
 #### Atomic Write Guarantee
 To prevent corrupt files when a download is aborted or interrupted:
