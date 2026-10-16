@@ -738,6 +738,7 @@ class TwitTUIForm(toga.App):
         self._hover_timer = None
         self._hover_row_index = None
         self._dialog_open = False
+        self._metadata_window = None
         self._hover_lock = threading.Lock()
         self._table_hover_connected = False
 
@@ -2184,6 +2185,12 @@ class TwitTUIForm(toga.App):
 
     def on_cancel_press(self, widget) -> None:
         self._cancel_hover_timer()
+        if getattr(self, '_metadata_window', None) is not None:
+            try:
+                self._metadata_window.close()
+            except Exception:
+                pass
+            self._metadata_window = None
         if getattr(self, '_is_downloading', False):
             print("Cancelling active download...")
             self._cancel_download = True
@@ -2193,6 +2200,12 @@ class TwitTUIForm(toga.App):
 
     def on_close_press(self, widget) -> None:
         self._cancel_hover_timer()
+        if getattr(self, '_metadata_window', None) is not None:
+            try:
+                self._metadata_window.close()
+            except Exception:
+                pass
+            self._metadata_window = None
         self.exit()
 
     async def on_browse_press(self, widget) -> None:
@@ -2484,8 +2497,26 @@ class TwitTUIForm(toga.App):
         s = re.sub(r'\n{3,}', '\n\n', s)
         return s.strip()
 
-    def format_episode_metadata(self, target, show_name: str = '') -> tuple[str, str]:
-        """Format all available metadata for an episode into a human-readable title and description."""
+    def open_url_in_browser(self, url: str) -> None:
+        """Open the specified URL in the system default web browser."""
+        if not url:
+            return
+        target_url = str(url).strip()
+        if not target_url.startswith('http://') and not target_url.startswith('https://'):
+            target_url = f"https://{target_url}"
+        try:
+            webbrowser.open(target_url)
+        except Exception as e:
+            err_msg = f"Failed to open URL in browser: {e}"
+            print(f"Error: {err_msg}")
+            if hasattr(self, 'main_window') and self.main_window:
+                try:
+                    self.main_window.error_dialog("Browser Error", err_msg)
+                except Exception:
+                    pass
+
+    def extract_episode_metadata_fields(self, target, show_name: str = '') -> dict:
+        """Extract all structured metadata fields for an episode."""
         ep_data = {}
         if hasattr(target, 'episode_data') and isinstance(target.episode_data, dict):
             ep_data.update(target.episode_data)
@@ -2579,6 +2610,43 @@ class TwitTUIForm(toga.App):
         desc_raw = ep_data.get('description') or ep_data.get('summary') or ep_data.get('body') or ep_data.get('teaser') or ep_data.get('snippet') or ''
         desc_clean = self.clean_html_text(desc_raw)
 
+        header_title = f"Episode Details: {ep_title}" if ep_title else "Episode Details"
+        if len(header_title) > 60:
+            header_title = header_title[:57] + "..."
+
+        return {
+            'header_title': header_title,
+            'show': show,
+            'episode': ep_num,
+            'title': ep_title,
+            'date': ep_date,
+            'duration': ep_dur,
+            'id': ep_id,
+            'link': ep_link,
+            'media_url': media_url,
+            'formats': formats,
+            'people': people_list,
+            'topics': topics_list,
+            'description': desc_clean,
+            'raw_data': ep_data
+        }
+
+    def format_episode_metadata(self, target, show_name: str = '') -> tuple[str, str]:
+        """Format all available metadata for an episode into a human-readable title and description."""
+        meta = self.extract_episode_metadata_fields(target, show_name=show_name)
+        show = meta['show']
+        ep_num = meta['episode']
+        ep_title = meta['title']
+        ep_date = meta['date']
+        ep_dur = meta['duration']
+        ep_id = meta['id']
+        ep_link = meta['link']
+        media_url = meta['media_url']
+        formats = meta['formats']
+        people_list = meta['people']
+        topics_list = meta['topics']
+        desc_clean = meta['description']
+
         lines = []
         if show:
             lines.append(f"Show: {show}")
@@ -2608,17 +2676,14 @@ class TwitTUIForm(toga.App):
             lines.append("Description / Show Notes:")
             lines.append(desc_clean)
 
-        header_title = f"Episode Details: {ep_title}" if ep_title else "Episode Details"
-        if len(header_title) > 60:
-            header_title = header_title[:57] + "..."
-
-        return header_title, "\n".join(lines)
+        return meta['header_title'], "\n".join(lines)
 
     def show_episode_metadata_dialog(self, target) -> None:
-        """Display a modal dialog with all metadata for the specified episode."""
+        """Display a popup dialog/window with all metadata for the specified episode, featuring clickable Web and Media URLs."""
         if not target:
             return
 
+        meta = self.extract_episode_metadata_fields(target)
         title, message = self.format_episode_metadata(target)
         if not message:
             message = "No metadata available for this episode."
@@ -2626,17 +2691,126 @@ class TwitTUIForm(toga.App):
         def _on_closed(window=None, result=None):
             self._dialog_open = False
             self._hover_row_index = None
+            self._metadata_window = None
+            return True
+
+        def _close_meta_window(widget=None):
+            try:
+                if getattr(self, '_metadata_window', None) is not None:
+                    self._metadata_window.close()
+            except Exception:
+                pass
+            _on_closed()
 
         def _show():
             try:
-                if hasattr(self, 'main_window') and self.main_window:
-                    self._dialog_open = True
-                    self._cancel_hover_timer()
-                    self.main_window.info_dialog(title, message, on_result=_on_closed)
+                self._dialog_open = True
+                self._cancel_hover_timer()
+
+                # If an existing metadata window is open, close it first
+                if getattr(self, '_metadata_window', None) is not None:
+                    try:
+                        self._metadata_window.close()
+                    except Exception:
+                        pass
+                    self._metadata_window = None
+
+                # Build rich custom dialog window with clickable URLs
+                win_title = meta.get('header_title') or title or "Episode Details"
+                win = toga.Window(title=win_title, size=(750, 620), on_close=_on_closed)
+                self._metadata_window = win
+
+                content_box = toga.Box(style=Pack(direction=COLUMN, margin=10))
+
+                # Title
+                ep_title = meta.get('title') or ''
+                if ep_title:
+                    content_box.add(toga.Label(ep_title, style=Pack(font_size=13, font_weight='bold', margin_bottom=6)))
+
+                # Metadata Key-Values
+                meta_rows = []
+                if meta.get('show'):
+                    meta_rows.append(f"Show: {meta['show']}")
+                if meta.get('episode') and str(meta['episode']) != 'Unknown Number':
+                    meta_rows.append(f"Episode: {meta['episode']}")
+                if meta.get('date') and str(meta['date']) != 'Unknown Date':
+                    meta_rows.append(f"Date: {meta['date']}")
+                if meta.get('duration'):
+                    meta_rows.append(f"Duration: {meta['duration']}")
+                if meta.get('id'):
+                    meta_rows.append(f"ID / GUID: {meta['id']}")
+
+                for row_text in meta_rows:
+                    content_box.add(toga.Label(row_text, style=Pack(margin_bottom=3)))
+
+                # Web Link (Clickable)
+                ep_link = meta.get('link') or ''
+                if ep_link:
+                    link_box = toga.Box(style=Pack(direction=ROW, margin_top=4, margin_bottom=4, align_items='center'))
+                    link_box.add(toga.Label("Web Link:", style=Pack(width=90, font_weight='bold', margin_right=4)))
+                    link_btn = toga.Button(
+                        ep_link,
+                        on_press=lambda w, u=ep_link: self.open_url_in_browser(u),
+                        style=Pack(flex=1)
+                    )
+                    link_box.add(link_btn)
+                    content_box.add(link_box)
+
+                # Media URL (Clickable)
+                media_url = meta.get('media_url') or ''
+                if media_url:
+                    media_box = toga.Box(style=Pack(direction=ROW, margin_top=4, margin_bottom=4, align_items='center'))
+                    media_box.add(toga.Label("Media URL:", style=Pack(width=90, font_weight='bold', margin_right=4)))
+                    media_btn = toga.Button(
+                        media_url,
+                        on_press=lambda w, u=media_url: self.open_url_in_browser(u),
+                        style=Pack(flex=1)
+                    )
+                    media_box.add(media_btn)
+                    content_box.add(media_box)
+
+                # Available Formats
+                if meta.get('formats'):
+                    content_box.add(toga.Label(f"Available Formats: {', '.join(meta['formats'])}", style=Pack(margin_top=3, margin_bottom=3)))
+
+                # Hosts / Guests
+                if meta.get('people'):
+                    content_box.add(toga.Label(f"Hosts / Guests: {', '.join(meta['people'])}", style=Pack(margin_top=3, margin_bottom=3)))
+
+                # Topics
+                if meta.get('topics'):
+                    content_box.add(toga.Label(f"Topics: {', '.join(meta['topics'])}", style=Pack(margin_top=3, margin_bottom=3)))
+
+                # Description / Show notes
+                desc_text = meta.get('description') or ''
+                if desc_text:
+                    content_box.add(toga.Label("Description / Show Notes:", style=Pack(font_weight='bold', margin_top=6, margin_bottom=4)))
+                    desc_input = toga.MultilineTextInput(
+                        value=desc_text,
+                        readonly=True,
+                        style=Pack(flex=1, height=220, margin_bottom=6)
+                    )
+                    content_box.add(desc_input)
+
+                # Bottom Action Bar
+                btn_box = toga.Box(style=Pack(direction=ROW, margin_top=6, align_items='center'))
+                btn_box.add(toga.Box(style=Pack(flex=1)))
+                close_btn = toga.Button('Close', on_press=_close_meta_window, style=Pack(width=100))
+                btn_box.add(close_btn)
+                content_box.add(btn_box)
+
+                # Top-level window layout container
+                win.content = content_box
+                win.show()
+
             except Exception as e:
-                print(f"Error displaying episode metadata dialog: {e}")
-                self._dialog_open = False
-                self._hover_row_index = None
+                print(f"Error displaying custom episode metadata window ({e}), falling back to info_dialog.")
+                try:
+                    if hasattr(self, 'main_window') and self.main_window:
+                        self.main_window.info_dialog(title, message, on_result=_on_closed)
+                except Exception as inner_e:
+                    print(f"Error displaying fallback info_dialog: {inner_e}")
+                    _on_closed()
 
         if hasattr(self, 'loop') and self.loop and self.loop.is_running():
             try:
