@@ -142,6 +142,7 @@ class TwitTUIForm(toga.App):
     def __init__(self, formal_name=None, app_id=None, **kwargs):
         self.show_ids = {}
         self.current_episodes = []
+        self.current_page = 1
         self._club_rss_cache = None
         self._memberful_feeds_cache = {}
         self._show_rss_cache = {}
@@ -149,6 +150,8 @@ class TwitTUIForm(toga.App):
         self.app_id_input = None
         self.app_key_input = None
         self.audio_only_checkbox = None
+        self.sort_order_button = None
+        self.next_button = None
         self.progress_bar = None
         self._is_downloading = False
         self._cancel_download = False
@@ -217,6 +220,135 @@ class TwitTUIForm(toga.App):
         self.save_env_setting('TWITAUDIOONLY', val_str)
 
         self.update_episodes_display()
+
+    def is_sort_ascending(self) -> bool:
+        """Return True if Ascending sort order is selected, False if Descending."""
+        if hasattr(self, 'sort_order_button') and self.sort_order_button:
+            if hasattr(self.sort_order_button, 'text'):
+                return 'Ascending' in self.sort_order_button.text or '▲' in self.sort_order_button.text
+        return False
+
+    def on_sort_order_toggle(self, widget=None) -> None:
+        """Toggle between Descending and Ascending sort order and reload episodes from API."""
+        if self.is_sort_ascending():
+            self.sort_order_button.text = '▼ Descending'
+        else:
+            self.sort_order_button.text = '▲ Ascending'
+
+        self.load_episodes_for_selected_show()
+
+    def get_current_sort_param(self) -> str:
+        """Determine API sort query parameter based on UI sort selection and direction."""
+        is_asc = self.is_sort_ascending()
+        sort_by = 'date'
+        if hasattr(self, 'episode_radio') and self.episode_radio and '☑' in self.episode_radio.text:
+            sort_by = 'number'
+        elif hasattr(self, 'title_radio') and self.title_radio and '☑' in self.title_radio.text:
+            sort_by = 'title'
+
+        if sort_by == 'date':
+            field = 'airingDate'
+        elif sort_by == 'number':
+            field = 'episodeNumber'
+        elif sort_by == 'title':
+            field = 'label'
+        else:
+            field = 'airingDate'
+
+        return field if is_asc else f"-{field}"
+
+    @staticmethod
+    def format_duration(val) -> str:
+        """Format duration into hour:minutes:seconds (HH:MM:SS) string."""
+        if val is None or val == '':
+            return ''
+
+        if isinstance(val, (int, float)):
+            tot = int(val)
+            if tot < 0:
+                return ''
+            h = tot // 3600
+            m = (tot % 3600) // 60
+            s = tot % 60
+            return f"{h:02d}:{m:02d}:{s:02d}"
+
+        if isinstance(val, dict):
+            if 'runningTime' in val and val['runningTime']:
+                return TwitTUIForm.format_duration(val['runningTime'])
+            if 'duration' in val and val['duration']:
+                return TwitTUIForm.format_duration(val['duration'])
+            if 'hours' in val or 'minutes' in val or 'seconds' in val:
+                try:
+                    h = int(val.get('hours') or 0)
+                    m = int(val.get('minutes') or 0)
+                    s = int(val.get('seconds') or 0)
+                    return f"{h:02d}:{m:02d}:{s:02d}"
+                except Exception:
+                    pass
+            return ''
+
+        s_val = str(val).strip()
+        if not s_val:
+            return ''
+
+        # Check if purely digits or float seconds
+        if re.match(r'^\d+(\.\d+)?$', s_val):
+            tot = int(float(s_val))
+            h = tot // 3600
+            m = (tot % 3600) // 60
+            s = tot % 60
+            return f"{h:02d}:{m:02d}:{s:02d}"
+
+        # Colon-separated string: HH:MM:SS, MM:SS, or D:HH:MM:SS
+        if ':' in s_val:
+            parts = s_val.split(':')
+            try:
+                if len(parts) == 3:
+                    h = int(parts[0])
+                    m = int(parts[1])
+                    s = int(float(parts[2]))
+                    return f"{h:02d}:{m:02d}:{s:02d}"
+                elif len(parts) == 2:
+                    m = int(parts[0])
+                    s = int(float(parts[1]))
+                    h = m // 60
+                    m = m % 60
+                    return f"{h:02d}:{m:02d}:{s:02d}"
+                elif len(parts) == 4:
+                    d = int(parts[0])
+                    h = int(parts[1]) + d * 24
+                    m = int(parts[2])
+                    s = int(float(parts[3]))
+                    return f"{h:02d}:{m:02d}:{s:02d}"
+            except Exception:
+                return s_val
+
+        return s_val
+
+    def extract_duration(self, episode_dict: dict) -> str:
+        """Extract and format running time/duration from an episode data dictionary."""
+        if not isinstance(episode_dict, dict):
+            return ''
+
+        for direct_key in ['runningTime', 'duration', 'length', 'running_time']:
+            if direct_key in episode_dict and episode_dict[direct_key]:
+                formatted = self.format_duration(episode_dict[direct_key])
+                if formatted:
+                    return formatted
+
+        for fmt in ['video_hd', 'video_large', 'video_small', 'video_audio', 'video_youtube', 'audio']:
+            val = episode_dict.get(fmt)
+            if isinstance(val, dict):
+                formatted = self.format_duration(val)
+                if formatted:
+                    return formatted
+
+        if 'hours' in episode_dict or 'minutes' in episode_dict:
+            formatted = self.format_duration(episode_dict)
+            if formatted:
+                return formatted
+
+        return ''
 
     @staticmethod
     def is_audio_url(url: str) -> bool:
@@ -326,6 +458,18 @@ class TwitTUIForm(toga.App):
                     enclosure_elem = item.find('enclosure')
                     pubdate_elem = item.find('pubDate')
 
+                    duration_str = ''
+                    dur_elem = item.find('{http://www.itunes.com/dtds/podcast-1.0.dtd}duration')
+                    if dur_elem is None:
+                        dur_elem = item.find('duration')
+                    if dur_elem is None:
+                        for elem in item:
+                            if elem.tag.endswith('duration'):
+                                dur_elem = elem
+                                break
+                    if dur_elem is not None and dur_elem.text:
+                        duration_str = self.format_duration(dur_elem.text.strip())
+
                     pub_str = pubdate_elem.text.strip() if pubdate_elem is not None and pubdate_elem.text else ''
                     date_str = ''
                     if pub_str:
@@ -345,6 +489,8 @@ class TwitTUIForm(toga.App):
                         'title': title_str,
                         'number': ep_num,
                         'date': date_str,
+                        'length': duration_str,
+                        'duration': duration_str,
                         'link': link_elem.text.strip() if link_elem is not None and link_elem.text else '',
                         'guid': guid_elem.text.strip() if guid_elem is not None and guid_elem.text else '',
                         'pubDate': pub_str,
@@ -434,6 +580,18 @@ class TwitTUIForm(toga.App):
                         enclosure_elem = item.find('enclosure')
                         pubdate_elem = item.find('pubDate')
 
+                        duration_str = ''
+                        dur_elem = item.find('{http://www.itunes.com/dtds/podcast-1.0.dtd}duration')
+                        if dur_elem is None:
+                            dur_elem = item.find('duration')
+                        if dur_elem is None:
+                            for elem in item:
+                                if elem.tag.endswith('duration'):
+                                    dur_elem = elem
+                                    break
+                        if dur_elem is not None and dur_elem.text:
+                            duration_str = self.format_duration(dur_elem.text.strip())
+
                         pub_str = pubdate_elem.text.strip() if pubdate_elem is not None and pubdate_elem.text else ''
                         date_str = ''
                         if pub_str:
@@ -453,6 +611,8 @@ class TwitTUIForm(toga.App):
                                 'title': title_str,
                                 'number': ep_num,
                                 'date': date_str,
+                                'length': duration_str,
+                                'duration': duration_str,
                                 'link': link_elem.text.strip() if link_elem is not None and link_elem.text else '',
                                 'enclosure_url': enc_url
                             })
@@ -557,16 +717,19 @@ class TwitTUIForm(toga.App):
         show_label = toga.Label('Show:', style=Pack(margin=(0, 5)))
         self.show_combo = toga.Selection(on_change=self.on_show_select, style=Pack(flex=1))
         fetch_button = toga.Button('Fetch', on_press=self.on_fetch_press, style=Pack(margin=5))
+        self.next_button = toga.Button('Next', on_press=self.on_next_press, style=Pack(margin=5))
         show_box = toga.Box(style=Pack(direction=ROW, margin=5))
         show_box.add(show_label)
         show_box.add(self.show_combo)
         show_box.add(fetch_button)
+        show_box.add(self.next_button)
 
         # Sort options section
         sort_label = toga.Label('Sort by:', style=Pack(margin=(0, 5)))
         self.date_radio = toga.Button('☑ Date', on_press=self.on_sort_button_press, style=Pack(margin=5))
         self.episode_radio = toga.Button('☐ Episode Number', on_press=self.on_sort_button_press, style=Pack(margin=5))
         self.title_radio = toga.Button('☐ Episode Title', on_press=self.on_sort_button_press, style=Pack(margin=5))
+        self.sort_order_button = toga.Button('▼ Descending', on_press=self.on_sort_order_toggle, style=Pack(margin=5))
 
         env_audio = os.getenv('TWITAUDIOONLY') or os.getenv('twitaudioonly') or os.getenv('TWIT_AUDIO_ONLY') or ''
         initial_audio_only = env_audio.strip().lower() in ('1', 'true', 'yes', 'on')
@@ -578,16 +741,18 @@ class TwitTUIForm(toga.App):
         sort_box.add(self.date_radio)
         sort_box.add(self.episode_radio)
         sort_box.add(self.title_radio)
+        sort_box.add(self.sort_order_button)
         sort_box.add(self.audio_only_checkbox)
 
         # Episodes list section
         episodes_label = toga.Label('Episodes:', style=Pack(margin=(0, 5)))
         self.episodes_list = toga.Table(
-            headings=['Episode', 'Title', 'Date'],
+            headings=['Episode', 'Title', 'Date', 'Length'],
             multiple_select=True,
             on_activate=lambda widget, row: self.on_stream_press(widget),
             style=Pack(flex=1, margin=5, height=200)
         )
+        self._enable_table_horizontal_scroll()
 
         # Populate the show combo with show names and load initial episodes
         shows = self.fetch_shows()
@@ -2102,7 +2267,7 @@ class TwitTUIForm(toga.App):
             print(f"Error fetching episode details: {e}")
             return None
 
-    def fetch_episodes(self, show_id):
+    def fetch_episodes(self, show_id, page=1, sort=None):
         """Fetch episodes for a specific show ID, with fallback to Show and Club RSS feeds."""
         selected_show = self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo and self.show_combo.value else ''
         if not selected_show and hasattr(self, 'show_ids'):
@@ -2122,7 +2287,14 @@ class TwitTUIForm(toga.App):
                     'app-key': app_key
                 }
 
+                if sort is None:
+                    sort = self.get_current_sort_param()
+
                 url = f'https://twit.tv/api/v1.0/episodes?filter[shows]={show_id}'
+                if sort:
+                    url += f'&sort={sort}'
+                if page and int(page) > 1:
+                    url += f'&page={int(page)}'
                 response = requests.get(url, headers=headers, timeout=10)
 
                 if response.status_code == 200:
@@ -2141,6 +2313,11 @@ class TwitTUIForm(toga.App):
                             if number is not None:
                                 episode_info['number'] = number
 
+                            length = self.extract_duration(episode)
+                            if length:
+                                episode_info['length'] = length
+                                episode_info['duration'] = length
+
                             media_url = self.extract_media_url(episode)
                             if media_url:
                                 episode_info['media_url'] = media_url
@@ -2156,12 +2333,26 @@ class TwitTUIForm(toga.App):
         if selected_show:
             rss_items = self.fetch_show_rss_items(selected_show, audio_only=self.is_audio_only())
             if rss_items:
+                is_asc = self.is_sort_ascending()
+                if is_asc:
+                    rss_items = list(reversed(rss_items))
+
+                page_size = 25
+                if page and int(page) >= 1:
+                    start_idx = (int(page) - 1) * page_size
+                    end_idx = start_idx + page_size
+                    page_items = rss_items[start_idx:end_idx]
+                else:
+                    page_items = rss_items
+
                 episodes = []
-                for item in rss_items:
+                for item in page_items:
                     episodes.append({
                         'title': item.get('title', ''),
                         'number': item.get('number', ''),
                         'date': item.get('date', ''),
+                        'length': item.get('length') or item.get('duration', ''),
+                        'duration': item.get('duration') or item.get('length', ''),
                         'media_url': item.get('enclosure_url', ''),
                         'cleanPath': item.get('link', '')
                     })
@@ -2171,21 +2362,69 @@ class TwitTUIForm(toga.App):
         # Fallback 2: Fetch episodes from Club TWiT RSS feed
         club_items = self.fetch_club_twit_rss_items(selected_show, audio_only=self.is_audio_only())
         if club_items:
-            episodes = []
+            matching_items = []
             for item in club_items:
                 title = item.get('title', '')
                 if not selected_show or selected_show.lower() in title.lower() or any(w.lower() in title.lower() for w in selected_show.split() if len(w) > 3):
-                    episodes.append({
-                        'title': title,
-                        'number': item.get('number', ''),
-                        'date': item.get('date', ''),
-                        'media_url': item.get('enclosure_url', ''),
-                        'cleanPath': item.get('link', '')
-                    })
+                    matching_items.append(item)
+
+            is_asc = self.is_sort_ascending()
+            if is_asc:
+                matching_items = list(reversed(matching_items))
+
+            page_size = 25
+            if page and int(page) >= 1:
+                start_idx = (int(page) - 1) * page_size
+                end_idx = start_idx + page_size
+                page_items = matching_items[start_idx:end_idx]
+            else:
+                page_items = matching_items
+
+            episodes = []
+            for item in page_items:
+                episodes.append({
+                    'title': item.get('title', ''),
+                    'number': item.get('number', ''),
+                    'date': item.get('date', ''),
+                    'length': item.get('length') or item.get('duration', ''),
+                    'duration': item.get('duration') or item.get('length', ''),
+                    'media_url': item.get('enclosure_url', ''),
+                    'cleanPath': item.get('link', '')
+                })
             if episodes:
                 return episodes
 
         return []
+
+    def _enable_table_horizontal_scroll(self) -> None:
+        """Enable horizontal scrolling on the episodes table when titles or columns exceed available width."""
+        if not hasattr(self, 'episodes_list') or not self.episodes_list:
+            return
+
+        impl = getattr(self.episodes_list, '_impl', None)
+        if not impl:
+            return
+
+        # GTK backend: Configure Gtk.ScrolledWindow horizontal scrollbar policy to AUTOMATIC
+        native = getattr(impl, 'native', None)
+        if native and hasattr(native, 'set_policy'):
+            try:
+                from toga_gtk.libs import Gtk
+                native.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            except Exception:
+                try:
+                    native.set_policy(1, 1)  # 1 corresponds to PolicyType.AUTOMATIC in GTK3/4
+                except Exception:
+                    pass
+
+        # Cocoa / macOS backend
+        if hasattr(impl, 'native') and hasattr(impl.native, 'setHasHorizontalScroller_'):
+            try:
+                impl.native.setHasHorizontalScroller_(True)
+                if hasattr(impl.native, 'setAutohidesScrollers_'):
+                    impl.native.setAutohidesScrollers_(True)
+            except Exception:
+                pass
 
     def update_episodes_display(self) -> None:
         """Format and display current episodes based on selected sort order."""
@@ -2194,6 +2433,7 @@ class TwitTUIForm(toga.App):
 
         if not self.current_episodes:
             self.episodes_list.data = []
+            self._enable_table_horizontal_scroll()
             return
 
         episodes = list(self.current_episodes)
@@ -2203,8 +2443,9 @@ class TwitTUIForm(toga.App):
         elif hasattr(self, 'title_radio') and self.title_radio and '☑' in self.title_radio.text:
             sort_by = 'title'
 
+        is_asc = self.is_sort_ascending()
         if sort_by == 'date':
-            episodes.sort(key=lambda x: str(x.get('date', '')), reverse=True)
+            episodes.sort(key=lambda x: str(x.get('date', '')), reverse=not is_asc)
         elif sort_by == 'number':
             def parse_num(val):
                 num = val.get('number', 0)
@@ -2212,32 +2453,38 @@ class TwitTUIForm(toga.App):
                     return (0, int(num))
                 except (ValueError, TypeError):
                     return (1, str(num))
-            episodes.sort(key=parse_num, reverse=True)
+            episodes.sort(key=parse_num, reverse=not is_asc)
         elif sort_by == 'title':
-            episodes.sort(key=lambda x: str(x.get('title', '')))
+            episodes.sort(key=lambda x: str(x.get('title', '')), reverse=not is_asc)
 
         table_data = []
         for episode in episodes:
             title = episode.get('title', 'Unknown Title')
             date = episode.get('date', 'Unknown Date')
             number = episode.get('number', 'Unknown Number')
+            length = episode.get('length') or episode.get('duration') or self.extract_duration(episode) or ''
+            formatted_length = self.format_duration(length) if length else ''
             media_url = self.extract_media_url(episode) or episode.get('media_url') or ''
             table_data.append({
                 'episode': str(number),
                 'title': str(title),
                 'date': str(date),
+                'length': str(formatted_length),
+                'duration': str(formatted_length),
                 'media_url': media_url,
                 'episode_data': episode
             })
 
         self.episodes_list.data = table_data
+        self._enable_table_horizontal_scroll()
 
     def load_episodes_for_selected_show(self) -> None:
         """Fetch and display episodes for currently selected show in the combo box."""
+        self.current_page = 1
         selected_show = self.show_combo.value
         if selected_show and hasattr(self, 'show_ids') and selected_show in self.show_ids:
             show_id = self.show_ids[selected_show]
-            self.current_episodes = self.fetch_episodes(show_id)
+            self.current_episodes = self.fetch_episodes(show_id, page=1)
             self.update_episodes_display()
         else:
             self.current_episodes = []
@@ -2245,10 +2492,12 @@ class TwitTUIForm(toga.App):
 
     def on_show_select(self, widget) -> None:
         """Handle show selection change."""
+        self.current_page = 1
         self.load_episodes_for_selected_show()
 
     def on_fetch_press(self, widget) -> None:
         """Fetch episodes for the selected show and refresh the show list."""
+        self.current_page = 1
         shows = self.fetch_shows()
         if shows:
             current_selection = self.show_combo.value
@@ -2258,8 +2507,63 @@ class TwitTUIForm(toga.App):
 
         self.load_episodes_for_selected_show()
 
+    def on_next_press(self, widget) -> None:
+        """Fetch the next page of episodes for the currently selected show."""
+        selected_show = self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo else ''
+        if not selected_show or not hasattr(self, 'show_ids') or selected_show not in self.show_ids:
+            return
+
+        show_id = self.show_ids[selected_show]
+        next_page = getattr(self, 'current_page', 1) + 1
+        new_episodes = self.fetch_episodes(show_id, page=next_page)
+
+        if new_episodes:
+            self.current_page = next_page
+            existing_keys = set()
+            for ep in (self.current_episodes or []):
+                ep_id = ep.get('id')
+                clean_path = ep.get('cleanPath')
+                num = ep.get('number')
+                title = ep.get('title')
+                if ep_id:
+                    existing_keys.add(f"id:{ep_id}")
+                if clean_path:
+                    existing_keys.add(f"path:{clean_path}")
+                if num or title:
+                    existing_keys.add(f"nt:{num}:{title}")
+
+            if self.current_episodes is None:
+                self.current_episodes = []
+
+            added_count = 0
+            for ep in new_episodes:
+                ep_id = ep.get('id')
+                clean_path = ep.get('cleanPath')
+                num = ep.get('number')
+                title = ep.get('title')
+
+                is_dup = False
+                if ep_id and f"id:{ep_id}" in existing_keys:
+                    is_dup = True
+                elif clean_path and f"path:{clean_path}" in existing_keys:
+                    is_dup = True
+                elif (num or title) and f"nt:{num}:{title}" in existing_keys:
+                    is_dup = True
+
+                if not is_dup:
+                    self.current_episodes.append(ep)
+                    if ep_id:
+                        existing_keys.add(f"id:{ep_id}")
+                    if clean_path:
+                        existing_keys.add(f"path:{clean_path}")
+                    if num or title:
+                        existing_keys.add(f"nt:{num}:{title}")
+                    added_count += 1
+
+            self.update_episodes_display()
+
     def on_sort_button_press(self, widget) -> None:
-        """Handle radio button behavior for checkbox-like buttons."""
+        """Handle radio button behavior for checkbox-like sort type buttons and reload from API."""
         self.date_radio.text = self.date_radio.text.replace('☑', '☐')
         self.episode_radio.text = self.episode_radio.text.replace('☑', '☐')
         self.title_radio.text = self.title_radio.text.replace('☑', '☐')
@@ -2271,7 +2575,7 @@ class TwitTUIForm(toga.App):
         elif widget == self.title_radio:
             self.title_radio.text = self.title_radio.text.replace('☐', '☑')
 
-        self.update_episodes_display()
+        self.load_episodes_for_selected_show()
 
 def main():
     return TwitTUIForm('TWIT.tv TUI', 'org.beeware.twittui')

@@ -121,13 +121,13 @@ twitclubstreamer=vlc %f
 
 ```
 +-------------------------------------------------------------------------+
-| Show: [ This Week in Tech                  v ] [ Fetch ]                |
-| Sort by: [X Date]  [  Episode Number]  [  Episode Title]                |
+| Show: [ This Week in Tech                  v ] [ Fetch ] [ Next ]       |
+| Sort by: [X Date]  [  Episode Number]  [  Episode Title] [v Desc]       |
 | +---------------------------------------------------------------------+ |
-| | Episode | Title                              | Date                 | |
-| |---------|------------------------------------|----------------------| |
-| | 1001    | TWiT 1001: AI in the Fast Lane     | 2024-10-13           | |
-| | 1000    | TWiT 1000: The Milestone Show      | 2024-10-06           | |
+| | Episode | Title                        | Date       | Length        | |
+| |---------|------------------------------|------------|---------------| |
+| | 1001    | TWiT 1001: AI in Fast Lane   | 2024-10-13 | 02:15:40      | |
+| | 1000    | TWiT 1000: The Milestone     | 2024-10-06 | 02:08:15      | |
 | +---------------------------------------------------------------------+ |
 | [ Download ]  [ Stream ]  [ Cancel ]  [ Close ]                         |
 |                                                                         |
@@ -144,12 +144,16 @@ twitclubstreamer=vlc %f
 - Click the **Show** dropdown menu to select a show.
 - The episode list refreshes automatically upon selection.
 - Click **Fetch** to force a catalog refresh against the TWiT API or fallback feeds.
+- Click **Next** to fetch and append the next page of episodes for the active show.
 
 #### Sorting Episodes
 - Select one of the three sort mode buttons:
-  - **☑ Date**: Sorts episodes by airing/publication date (newest first).
-  - **☑ Episode Number**: Sorts numerically by episode number (highest first).
-  - **☑ Episode Title**: Sorts alphabetically by episode title (A to Z).
+  - **☑ Date**: Sorts episodes by airing/publication date.
+  - **☑ Episode Number**: Sorts numerically by episode number.
+  - **☑ Episode Title**: Sorts alphabetically by episode title.
+- Toggle the sort direction button:
+  - **▼ Descending**: Queries the TWiT REST API with descending sort (`-airingDate`, `-episodeNumber`, `-label`) to display newest/highest first.
+  - **▲ Ascending**: Queries the TWiT REST API with ascending sort (`airingDate`, `episodeNumber`, `label`) to fetch and display oldest/lowest first (e.g., Episode 1 forward).
 
 #### Streaming an Episode
 1. Click on an episode in the list table to highlight it.
@@ -247,15 +251,17 @@ toga.MainWindow (title='TWIT.tv TUI')
     ├── toga.Box (direction=ROW, margin=5) [show_box]
     │   ├── toga.Label ('Show:')
     │   ├── toga.Selection (items=shows, on_change=on_show_select) [show_combo]
-    │   └── toga.Button ('Fetch', on_press=on_fetch_press)
+    │   ├── toga.Button ('Fetch', on_press=on_fetch_press)
+    │   └── toga.Button ('Next', on_press=on_next_press)
     ├── toga.Box (direction=ROW, margin=5) [sort_box]
     │   ├── toga.Label ('Sort by:')
     │   ├── toga.Button ('☑ Date', on_press=on_sort_button_press) [date_radio]
     │   ├── toga.Button ('☐ Episode Number', on_press=on_sort_button_press) [episode_radio]
     │   ├── toga.Button ('☐ Episode Title', on_press=on_sort_button_press) [title_radio]
+    │   ├── toga.Button ('▼ Descending', on_press=on_sort_order_toggle) [sort_order_button]
     │   └── toga.Button ('☐ Audio Only', on_press=on_audio_only_toggle) [audio_only_checkbox]
     ├── toga.Label ('Episodes:')
-    ├── toga.Table (headings=['Episode', 'Title', 'Date'], multiple_select=True) [episodes_list]
+    ├── toga.Table (headings=['Episode', 'Title', 'Date', 'Length'], multiple_select=True) [episodes_list with horizontal scrollbar]
     ├── toga.Box (direction=ROW, margin=5) [button_box]
     │   ├── toga.Button ('Download', on_press=on_download_press)
     │   ├── toga.Button ('Stream', on_press=on_stream_press)

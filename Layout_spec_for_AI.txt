@@ -4,16 +4,20 @@ Start with a horizontal box at the top for show selection:
 - Labelled "Show:"
 - A combo box (toga.Selection) to select the show
 - A "Fetch" button directly to the right to refresh the show catalog from the TWiT API or fallback feeds
+- A "Next" button directly to the right of "Fetch" to grab and append the next page of episodes for the selected show
 
 Directly below the Show section have a horizontal box of episode sorting types:
 - Labelled "Sort by:"
 - Simulated radio buttons for sort types: Date (default: selected "☑ Date"), Episode Number ("☐ Episode Number"), and Episode Title ("☐ Episode Title")
+- Direction toggle button: "▼ Descending" / "▲ Ascending" (toggles server-side API sort order and table ordering)
 - Simulated checkbox for format selection: "☐ Audio Only" / "☑ Audio Only" (persists selection across executions via TWITAUDIOONLY)
 
 Below this is a label "Episodes:" followed by a multi-column table (toga.Table) of the selected show's episodes sorted by the selected sort type:
-- Table columns/headings: "Episode", "Title", "Date"
+- Table columns/headings: "Episode", "Title", "Date", "Length"
+- Displays episode length formatted in hour:minutes:seconds (HH:MM:SS)
 - Supports multiple selection for batch downloading
 - Activating/double-clicking an episode row triggers streaming
+- Enables automatic horizontal and vertical scrollbars when episode titles or column contents exceed visible horizontal space
 
 Below the episodes table are a horizontal group of action buttons:
 - "Download" (initiates multi-threaded background download of selected episodes; on completion, pops up a modal dialog displaying the destination folder at top and downloaded filenames, one per line, with a close button)
