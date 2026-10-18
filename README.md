@@ -44,7 +44,7 @@ This document serves two primary audiences:
 
 - **Show Catalog Navigation**: Browse active and legacy TWiT.tv productions with automatic fallback to static show catalogs when offline or unauthenticated.
 - **In-Show Episode & Topic Search**: Search episodes within the currently selected show by keywords or topics using the official TWiT REST API search endpoint (`/search/{keywords}`) with automatic fallback to Show and Club RSS feed matching.
-- **Episode Metadata Hover Preview**: Hovering over any episode row for 3 seconds triggers a detailed metadata modal revealing complete show notes, guest and host lists, topics, duration, and direct media stream links with clickable web links and media URLs that launch the default browser.
+- **Episode Metadata Hover Preview**: Hovering over any episode row for 3 seconds triggers a detailed metadata modal revealing complete show notes, guest and host lists, topics, duration, direct media stream links, and episode transcripts with clickable buttons for Web Link, Transcript, and Media URL that launch the default browser.
 - **Resilient Episode Ingestion**: Automatic multi-tier failover across the official TWiT REST API v1.0, public XML/RSS feeds (`feeds.twit.tv`), authenticated Club TWiT Memberful RSS feeds, and webpage media scrapers.
 - **Direct Video/Audio Streaming**: Spawn external media players (e.g., VLC, MPV) asynchronously using customizable command templates without stalling the UI.
 - **Concurrent Batch Downloader**: Download single or multiple episodes in non-blocking background daemon threads with configurable byte buffers, duplicate file confirmation, and atomic file writes.
@@ -150,7 +150,7 @@ twitclubstreamer=vlc %f
 - The episode list refreshes automatically upon selection.
 - Click **Fetch** to force a catalog refresh against the TWiT API or fallback feeds.
 - Click **Next** to fetch and append the next page of episodes for the active show.
-- **Episode Metadata Inspection**: Hovering your mouse cursor over any episode row in the list for more than 3 seconds displays a modal dialog showing comprehensive episode metadata including show name, episode number, title, airing date, duration, episode ID, web links, media stream URLs, available formats, hosts/guests, topics, and complete show notes. Web links and media URLs are clickable to open directly in your system's default web browser.
+- **Episode Metadata Inspection**: Hovering your mouse cursor over any episode row in the list for more than 3 seconds displays a modal dialog showing comprehensive episode metadata including show name, episode number, title, airing date, duration, episode ID, web links, transcript links, media stream URLs, available formats, hosts/guests, topics, and complete show notes. Web links, transcript links, and media URLs are clickable to open directly in your system's default web browser.
 
 #### Searching Episodes
 - Enter keywords or topics (e.g., `OpenAI`, `Surface`, `Security`) into the **Search** text box.

@@ -576,6 +576,16 @@ class TwitTUIForm(toga.App):
                     enc_url = enclosure_elem.attrib.get('url', '').strip() if enclosure_elem is not None else ''
                     enc_len = enclosure_elem.attrib.get('length', '').strip() if enclosure_elem is not None else ''
 
+                    transcript_url = ''
+                    transcript_elem = item.find('{https://podcastindex.org/namespace/1.0}transcript')
+                    if transcript_elem is None:
+                        for elem in item:
+                            if elem.tag.endswith('transcript'):
+                                transcript_elem = elem
+                                break
+                    if transcript_elem is not None:
+                        transcript_url = transcript_elem.attrib.get('url', '').strip() or (transcript_elem.text.strip() if transcript_elem.text else '')
+
                     item_data = {
                         'title': title_str,
                         'number': ep_num,
@@ -590,7 +600,8 @@ class TwitTUIForm(toga.App):
                         'link': link_elem.text.strip() if link_elem is not None and link_elem.text else '',
                         'guid': guid_elem.text.strip() if guid_elem is not None and guid_elem.text else '',
                         'pubDate': pub_str,
-                        'enclosure_url': enc_url
+                        'enclosure_url': enc_url,
+                        'transcript_url': transcript_url
                     }
                     if enc_url and self.is_valid_media_url(enc_url):
                         items.append(item_data)
@@ -713,6 +724,17 @@ class TwitTUIForm(toga.App):
 
                         enc_url = enclosure_elem.attrib.get('url', '').strip() if enclosure_elem is not None else ''
                         enc_len = enclosure_elem.attrib.get('length', '').strip() if enclosure_elem is not None else ''
+
+                        transcript_url = ''
+                        transcript_elem = item.find('{https://podcastindex.org/namespace/1.0}transcript')
+                        if transcript_elem is None:
+                            for elem in item:
+                                if elem.tag.endswith('transcript'):
+                                    transcript_elem = elem
+                                    break
+                        if transcript_elem is not None:
+                            transcript_url = transcript_elem.attrib.get('url', '').strip() or (transcript_elem.text.strip() if transcript_elem.text else '')
+
                         if enc_url and self.is_valid_media_url(enc_url):
                             items.append({
                                 'title': title_str,
@@ -726,6 +748,7 @@ class TwitTUIForm(toga.App):
                                 'description': desc_str,
                                 'summary': desc_str,
                                 'link': link_elem.text.strip() if link_elem is not None and link_elem.text else '',
+                                'transcript_url': transcript_url,
                                 'enclosure_url': enc_url
                             })
                     if items:
@@ -2585,6 +2608,10 @@ class TwitTUIForm(toga.App):
                             if media_url:
                                 episode_info['media_url'] = media_url
 
+                            transcript_url = episode.get('transcript_url') or episode.get('transcript') or ''
+                            if transcript_url:
+                                episode_info['transcript_url'] = transcript_url
+
                             episodes.append(episode_info)
 
                     if episodes:
@@ -2621,6 +2648,7 @@ class TwitTUIForm(toga.App):
                         'enclosure_length': item.get('enclosure_length', ''),
                         'media_url': item.get('enclosure_url', ''),
                         'cleanPath': item.get('link', ''),
+                        'transcript_url': item.get('transcript_url', ''),
                         'description': item.get('description', ''),
                         'summary': item.get('summary', ''),
                         'guid': item.get('guid', ''),
@@ -2663,6 +2691,7 @@ class TwitTUIForm(toga.App):
                     'enclosure_length': item.get('enclosure_length', ''),
                     'media_url': item.get('enclosure_url', ''),
                     'cleanPath': item.get('link', ''),
+                    'transcript_url': item.get('transcript_url', ''),
                     'description': item.get('description', ''),
                     'summary': item.get('summary', ''),
                     'guid': item.get('guid', ''),
@@ -2986,6 +3015,89 @@ class TwitTUIForm(toga.App):
                 except Exception:
                     pass
 
+    def resolve_transcript_url(self, target) -> str:
+        """Resolve or extract the transcript URL for an episode target."""
+        if not target:
+            return ''
+        ep_data = {}
+        if hasattr(target, 'episode_data') and isinstance(target.episode_data, dict):
+            ep_data.update(target.episode_data)
+        elif isinstance(target, dict):
+            if 'episode_data' in target and isinstance(target['episode_data'], dict):
+                ep_data.update(target['episode_data'])
+            else:
+                ep_data.update(target)
+
+        # 1. Direct field on target or ep_data
+        t_url = (getattr(target, 'transcript_url', None) or getattr(target, 'transcript', None)
+                 or ep_data.get('transcript_url') or ep_data.get('transcript')
+                 or ep_data.get('podcast_transcript') or ep_data.get('transcriptUrl')
+                 or ep_data.get('transcript_link') or '')
+        if t_url:
+            t_url = str(t_url).strip()
+            if t_url:
+                if not t_url.startswith('http://') and not t_url.startswith('https://'):
+                    t_url = f"https://twit.tv/{t_url.lstrip('/')}"
+                return t_url
+
+        # 2. Check matched cached RSS items
+        ep_title = getattr(target, 'title', '') or ep_data.get('title') or ep_data.get('label') or ''
+        ep_num = getattr(target, 'episode', '') or ep_data.get('number') or ep_data.get('episodeNumber') or ''
+
+        for cache_items in list(getattr(self, '_show_rss_cache', {}).values()) + [getattr(self, '_club_rss_cache', [])] + list(getattr(self, '_memberful_feeds_cache', {}).values()):
+            for it in (cache_items or []):
+                match_num = ep_num and str(it.get('number', '')).strip() == str(ep_num).strip()
+                match_title = ep_title and str(it.get('title', '')).strip().lower() == str(ep_title).strip().lower()
+                if (match_num or match_title) and it.get('transcript_url'):
+                    t_url = str(it['transcript_url']).strip()
+                    if t_url:
+                        if not t_url.startswith('http://') and not t_url.startswith('https://'):
+                            t_url = f"https://twit.tv/{t_url.lstrip('/')}"
+                        return t_url
+
+        # 3. Query TWiT API posts endpoint if episode ID exists
+        ep_id = ep_data.get('id') or ep_data.get('guid') or ep_data.get('node_id') or ''
+        if ep_id and str(ep_id).isdigit():
+            try:
+                load_dotenv()
+                app_id = self.get_api_app_id()
+                app_key = self.get_api_app_key()
+                if app_id and app_key:
+                    headers = {
+                        'Accept': 'application/json',
+                        'app-id': app_id,
+                        'app-key': app_key
+                    }
+                    resp = requests.get(f'https://twit.tv/api/v1.0/posts?filter[episodes]={ep_id}', headers=headers, timeout=4)
+                    if resp.status_code == 200:
+                        posts = resp.json().get('posts', [])
+                        for p in posts:
+                            cp = p.get('cleanPath')
+                            if cp:
+                                t_url = f"https://twit.tv/{str(cp).lstrip('/')}"
+                                ep_data['transcript_url'] = t_url
+                                return t_url
+            except Exception as e:
+                print(f"Error querying transcript posts: {e}")
+
+        # 4. Scrape cleanPath or web link for transcript href if available
+        ep_link = ep_data.get('cleanPath') or ep_data.get('link') or ep_data.get('url') or ''
+        if ep_link:
+            if not str(ep_link).startswith('http://') and not str(ep_link).startswith('https://'):
+                ep_link = f"https://twit.tv/{str(ep_link).lstrip('/')}"
+            try:
+                resp = requests.get(ep_link, headers={'User-Agent': 'TwitTUI/1.0'}, timeout=4)
+                if resp.status_code == 200:
+                    m = re.search(r'href=[\"\'](/posts/transcripts/[^\"\']+)[\"\']', resp.text, re.IGNORECASE)
+                    if m:
+                        t_url = f"https://twit.tv/{m.group(1).lstrip('/')}"
+                        ep_data['transcript_url'] = t_url
+                        return t_url
+            except Exception as e:
+                print(f"Error scraping transcript from webpage: {e}")
+
+        return ''
+
     def extract_episode_metadata_fields(self, target, show_name: str = '') -> dict:
         """Extract all structured metadata fields for an episode."""
         ep_data = {}
@@ -3031,6 +3143,9 @@ class TwitTUIForm(toga.App):
         ep_link = ep_data.get('cleanPath') or ep_data.get('link') or ep_data.get('url') or ''
         if ep_link and not str(ep_link).startswith('http'):
             ep_link = f"https://twit.tv/{str(ep_link).lstrip('/')}"
+
+        # Collect Transcript Link / URL
+        transcript_url = self.resolve_transcript_url(target) or ''
 
         # Collect Media URL
         media_url = getattr(target, 'media_url', '') or ep_data.get('media_url') or ep_data.get('enclosure_url') or ''
@@ -3102,6 +3217,8 @@ class TwitTUIForm(toga.App):
             'file_size': ep_size_formatted,
             'id': ep_id,
             'link': ep_link,
+            'transcript_url': transcript_url,
+            'transcript': transcript_url,
             'media_url': media_url,
             'formats': formats,
             'people': people_list,
@@ -3121,6 +3238,7 @@ class TwitTUIForm(toga.App):
         ep_size = meta.get('size')
         ep_id = meta['id']
         ep_link = meta['link']
+        transcript_url = meta.get('transcript_url') or meta.get('transcript') or ''
         media_url = meta['media_url']
         formats = meta['formats']
         people_list = meta['people']
@@ -3144,6 +3262,8 @@ class TwitTUIForm(toga.App):
             lines.append(f"ID / GUID: {ep_id}")
         if ep_link:
             lines.append(f"Web Link: {ep_link}")
+        if transcript_url:
+            lines.append(f"Transcript: {transcript_url}")
         if media_url:
             lines.append(f"Media URL: {media_url}")
         if formats:
@@ -3199,7 +3319,7 @@ class TwitTUIForm(toga.App):
 
                 # Build rich custom dialog window with clickable URLs
                 win_title = meta.get('header_title') or title or "Episode Details"
-                win = toga.Window(title=win_title, size=(750, 620), on_close=_on_closed)
+                win = toga.Window(title=win_title, size=(750, 650), on_close=_on_closed)
                 self._metadata_window = win
 
                 content_box = toga.Box(style=Pack(direction=COLUMN, margin=10))
@@ -3239,6 +3359,19 @@ class TwitTUIForm(toga.App):
                     )
                     link_box.add(link_btn)
                     content_box.add(link_box)
+
+                # Transcript Link (Clickable)
+                transcript_url = meta.get('transcript_url') or meta.get('transcript') or ''
+                if transcript_url:
+                    transcript_box = toga.Box(style=Pack(direction=ROW, margin_top=4, margin_bottom=4, align_items='center'))
+                    transcript_box.add(toga.Label("Transcript:", style=Pack(width=90, font_weight='bold', margin_right=4)))
+                    transcript_btn = toga.Button(
+                        transcript_url,
+                        on_press=lambda w, u=transcript_url: self.open_url_in_browser(u),
+                        style=Pack(flex=1)
+                    )
+                    transcript_box.add(transcript_btn)
+                    content_box.add(transcript_box)
 
                 # Media URL (Clickable)
                 media_url = meta.get('media_url') or ''
