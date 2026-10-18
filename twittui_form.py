@@ -3015,7 +3015,60 @@ class TwitTUIForm(toga.App):
                 except Exception:
                     pass
 
-    def resolve_transcript_url(self, target) -> str:
+    def generate_transcript_slug_candidates(self, show_name: str, ep_num: str) -> list:
+        """Generate candidate transcript URL slugs for a show and episode number."""
+        if not show_name or not ep_num:
+            return []
+        s = str(show_name).lower().strip()
+        s_clean = re.sub(r'[^a-z0-9\s-]', '', s)
+        ep_clean = str(ep_num).strip().lstrip('#')
+
+        show_variants = [
+            s_clean.replace(' ', '-'),
+        ]
+        if s_clean.startswith('this week in '):
+            show_variants.append(s_clean.replace('this week in ', 'week-').replace(' ', '-'))
+        if s_clean.startswith('the '):
+            show_variants.append(s_clean[4:].replace(' ', '-'))
+
+        short_map = {
+            'this week in tech': ['twit', 'week-tech', 'this-week-in-tech'],
+            'this week in space': ['week-space', 'twis', 'this-week-in-space'],
+            'this week in google': ['week-google', 'twig', 'this-week-in-google'],
+            'this week in enterprise tech': ['week-enterprise-tech', 'twiet'],
+            'tech news weekly': ['tech-news-weekly', 'tnw'],
+            'security now': ['security-now', 'sn'],
+            'macbreak weekly': ['macbreak-weekly', 'mbw'],
+            'windows weekly': ['windows-weekly', 'ww'],
+            'untitled linux show': ['untitled-linux-show', 'uls'],
+            'ios today': ['ios-today', 'iost'],
+            'ask the tech guys': ['ask-tech-guys', 'tech-guy', 'atg'],
+            'floss weekly': ['floss-weekly', 'floss'],
+            'know how': ['know-how', 'kh'],
+            'hands-on mac': ['hands-on-mac', 'hom'],
+            'hands-on windows': ['hands-on-windows', 'how'],
+            'hands-on tech': ['hands-on-tech', 'hot']
+        }
+        for k, v in short_map.items():
+            if k in s_clean:
+                show_variants = v + show_variants
+
+        seen = set()
+        unique_variants = []
+        for var in show_variants:
+            if var and var not in seen:
+                seen.add(var)
+                unique_variants.append(var)
+
+        candidates = []
+        for var in unique_variants:
+            candidates.append(f"https://twit.tv/posts/transcripts/{var}-{ep_clean}-transcript")
+            candidates.append(f"https://twit.tv/posts/transcripts/{var}-episode-{ep_clean}-transcript")
+            candidates.append(f"https://twit.tv/posts/transcripts/{var}-{ep_clean}")
+            candidates.append(f"https://twit.tv/posts/transcripts/{var}-episode-{ep_clean}")
+        return candidates
+
+    def resolve_transcript_url(self, target, show_name: str = '') -> str:
         """Resolve or extract the transcript URL for an episode target."""
         if not target:
             return ''
@@ -3028,7 +3081,25 @@ class TwitTUIForm(toga.App):
             else:
                 ep_data.update(target)
 
-        # 1. Direct field on target or ep_data
+        # Collect show and episode identifiers
+        show = show_name or getattr(target, 'show', '') or ep_data.get('show_name') or ep_data.get('show') or ''
+        if not show and hasattr(self, 'show_combo') and self.show_combo and self.show_combo.value:
+            show = self.show_combo.value or ''
+        if isinstance(show, dict):
+            show = show.get('label') or show.get('title') or ''
+        show_str = str(show).strip()
+        ep_title = getattr(target, 'title', '') or ep_data.get('title') or ep_data.get('label') or ''
+        ep_num = getattr(target, 'episode', '') or getattr(target, 'number', '') or ep_data.get('episode') or ep_data.get('number') or ep_data.get('episodeNumber') or ep_data.get('episode_number') or ''
+        if not ep_num and ep_title:
+            m_num = re.search(r'\b(?:episode|ep|twis|twit|twig|tnw|mbw|sn|ww|uls|iost)?\s*#?\s*(\d{1,5})\b', ep_title, re.IGNORECASE)
+            if m_num:
+                ep_num = m_num.group(1)
+        if not ep_num and (ep_data.get('link') or ep_data.get('cleanPath')):
+            m_link = re.search(r'/episodes/(\d+)', str(ep_data.get('link') or ep_data.get('cleanPath')))
+            if m_link:
+                ep_num = m_link.group(1)
+
+        # 1. Direct field on target or ep_data (with sanity check against show name)
         t_url = (getattr(target, 'transcript_url', None) or getattr(target, 'transcript', None)
                  or ep_data.get('transcript_url') or ep_data.get('transcript')
                  or ep_data.get('podcast_transcript') or ep_data.get('transcriptUrl')
@@ -3038,24 +3109,65 @@ class TwitTUIForm(toga.App):
             if t_url:
                 if not t_url.startswith('http://') and not t_url.startswith('https://'):
                     t_url = f"https://twit.tv/{t_url.lstrip('/')}"
-                return t_url
+                is_mismatch = False
+                if show_str and ep_num:
+                    s_lower = show_str.lower()
+                    u_lower = t_url.lower()
+                    if 'space' in s_lower and 'space' not in u_lower and ('tech-news' in u_lower or 'google' in u_lower or 'windows' in u_lower or 'twit' in u_lower):
+                        is_mismatch = True
+                    elif 'google' in s_lower and 'google' not in u_lower and ('space' in u_lower or 'tech-news' in u_lower):
+                        is_mismatch = True
+                    elif 'tech news weekly' in s_lower and 'tech-news' not in u_lower and ('space' in u_lower or 'google' in u_lower):
+                        is_mismatch = True
+                if not is_mismatch:
+                    return t_url
 
-        # 2. Check matched cached RSS items
-        ep_title = getattr(target, 'title', '') or ep_data.get('title') or ep_data.get('label') or ''
-        ep_num = getattr(target, 'episode', '') or ep_data.get('number') or ep_data.get('episodeNumber') or ''
+        # 2. Check matched cached RSS items for THIS specific show
+        show_key = show_str.lower().strip() if show_str else ''
+        if show_key:
+            matching_caches = []
+            for k, v in getattr(self, '_show_rss_cache', {}).items():
+                if show_key in k.lower() or k.lower().startswith(show_key):
+                    matching_caches.append(v)
+            for cache_items in matching_caches:
+                for it in (cache_items or []):
+                    match_num = ep_num and str(it.get('number', '')).strip() == str(ep_num).strip()
+                    match_title = ep_title and str(it.get('title', '')).strip().lower() == str(ep_title).strip().lower()
+                    if (match_num or match_title) and it.get('transcript_url'):
+                        t_url = str(it['transcript_url']).strip()
+                        if t_url:
+                            if not t_url.startswith('http://') and not t_url.startswith('https://'):
+                                t_url = f"https://twit.tv/{t_url.lstrip('/')}"
+                            return t_url
 
-        for cache_items in list(getattr(self, '_show_rss_cache', {}).values()) + [getattr(self, '_club_rss_cache', [])] + list(getattr(self, '_memberful_feeds_cache', {}).values()):
+        # Check general caches only when title matches or show name is in link/title
+        for cache_items in [getattr(self, '_club_rss_cache', [])] + list(getattr(self, '_memberful_feeds_cache', {}).values()):
             for it in (cache_items or []):
+                it_title = str(it.get('title', '')).strip().lower()
+                it_link = str(it.get('link', '')).strip().lower()
+                match_title = ep_title and ep_title.strip().lower() == it_title
                 match_num = ep_num and str(it.get('number', '')).strip() == str(ep_num).strip()
-                match_title = ep_title and str(it.get('title', '')).strip().lower() == str(ep_title).strip().lower()
-                if (match_num or match_title) and it.get('transcript_url'):
+                match_show = show_key and (show_key in it_title or show_key in it_link or (show_key.replace(' ', '-') in it_link))
+                if ((match_title and (not show_key or match_show)) or (match_num and match_show)) and it.get('transcript_url'):
                     t_url = str(it['transcript_url']).strip()
                     if t_url:
                         if not t_url.startswith('http://') and not t_url.startswith('https://'):
                             t_url = f"https://twit.tv/{t_url.lstrip('/')}"
                         return t_url
 
-        # 3. Query TWiT API posts endpoint if episode ID exists
+        # 3. Direct candidate transcript URLs on twit.tv verified via fast HEAD request
+        if show_str and ep_num:
+            candidates = self.generate_transcript_slug_candidates(show_str, str(ep_num).strip())
+            for cand in candidates:
+                try:
+                    r = requests.head(cand, headers={'User-Agent': 'TwitTUI/1.0'}, timeout=2.5)
+                    if r.status_code == 200:
+                        ep_data['transcript_url'] = cand
+                        return cand
+                except Exception:
+                    pass
+
+        # 4. Query TWiT API posts endpoint if episode ID exists
         ep_id = ep_data.get('id') or ep_data.get('guid') or ep_data.get('node_id') or ''
         if ep_id and str(ep_id).isdigit():
             try:
@@ -3068,7 +3180,9 @@ class TwitTUIForm(toga.App):
                         'app-id': app_id,
                         'app-key': app_key
                     }
-                    resp = requests.get(f'https://twit.tv/api/v1.0/posts?filter[episodes]={ep_id}', headers=headers, timeout=4)
+                    resp = requests.get(f'https://twit.tv/api/v1.0/posts?filter[episodes]={ep_id}&posts_type=transcripts', headers=headers, timeout=4)
+                    if resp.status_code != 200 or not resp.json().get('posts'):
+                        resp = requests.get(f'https://twit.tv/api/v1.0/posts?filter[episodes]={ep_id}', headers=headers, timeout=4)
                     if resp.status_code == 200:
                         posts = resp.json().get('posts', [])
                         for p in posts:
@@ -3080,7 +3194,7 @@ class TwitTUIForm(toga.App):
             except Exception as e:
                 print(f"Error querying transcript posts: {e}")
 
-        # 4. Scrape cleanPath or web link for transcript href if available
+        # 5. Scrape cleanPath or web link for transcript href if available
         ep_link = ep_data.get('cleanPath') or ep_data.get('link') or ep_data.get('url') or ''
         if ep_link:
             if not str(ep_link).startswith('http://') and not str(ep_link).startswith('https://'):
@@ -3117,7 +3231,15 @@ class TwitTUIForm(toga.App):
             show = show.get('label') or show.get('title') or ''
 
         # Collect episode number
-        ep_num = getattr(target, 'episode', '') or ep_data.get('number') or ep_data.get('episodeNumber') or ''
+        ep_num = getattr(target, 'episode', '') or getattr(target, 'number', '') or ep_data.get('episode') or ep_data.get('number') or ep_data.get('episodeNumber') or ep_data.get('episode_number') or ''
+        if not ep_num and ep_title:
+            m_num = re.search(r'\b(?:episode|ep|twis|twit|twig|tnw|mbw|sn|ww|uls|iost)?\s*#?\s*(\d{1,5})\b', ep_title, re.IGNORECASE)
+            if m_num:
+                ep_num = m_num.group(1)
+        if not ep_num and (ep_data.get('link') or ep_data.get('cleanPath')):
+            m_link = re.search(r'/episodes/(\d+)', str(ep_data.get('link') or ep_data.get('cleanPath')))
+            if m_link:
+                ep_num = m_link.group(1)
 
         # Collect episode title
         ep_title = getattr(target, 'title', '') or ep_data.get('title') or ep_data.get('label') or ''
@@ -3145,7 +3267,7 @@ class TwitTUIForm(toga.App):
             ep_link = f"https://twit.tv/{str(ep_link).lstrip('/')}"
 
         # Collect Transcript Link / URL
-        transcript_url = self.resolve_transcript_url(target) or ''
+        transcript_url = self.resolve_transcript_url(target, show_name=show) or ''
 
         # Collect Media URL
         media_url = getattr(target, 'media_url', '') or ep_data.get('media_url') or ep_data.get('enclosure_url') or ''
