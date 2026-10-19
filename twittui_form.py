@@ -3,6 +3,8 @@ from toga.style import Pack
 from toga.style.pack import COLUMN, ROW
 import os
 import re
+import secrets
+import shlex
 import subprocess
 import threading
 import urllib.parse
@@ -17,8 +19,20 @@ import hashlib
 import http.server
 from dotenv import load_dotenv, set_key
 
+try:
+    import defusedxml.ElementTree as DefusedET
+except ImportError:
+    DefusedET = None
+
 # Ensure environment variables are loaded
 load_dotenv()
+
+# Apply Textual backend widget extensions if available
+try:
+    from toga_textual_backend import patch_toga_textual
+    patch_toga_textual()
+except Exception:
+    pass
 
 # Mapping of known show names/slugs to feeds.twit.tv feed filenames
 KNOWN_SHOW_FEEDS = {
@@ -108,16 +122,157 @@ DEFAULT_SHOWS = [
     ("iOS Today", "1660")
 ]
 
+
+def generate_local_server_token() -> str:
+    """Generate a random URL-safe token for local server requests."""
+    return secrets.token_urlsafe(24)
+
+
+def write_restricted_file(file_path: str, content: str) -> None:
+    """Write sensitive content to disk with 0o600 (owner-only) permissions."""
+    flags: int = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd: int = os.open(file_path, flags, 0o600)
+    try:
+        try:
+            os.chmod(file_path, 0o600)
+        except Exception:
+            pass
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
+def safe_xml_fromstring(xml_data: bytes | str) -> ET.Element:
+    """Parse XML string or bytes safely using defusedxml if available."""
+    if isinstance(xml_data, str):
+        data_bytes = xml_data.encode('utf-8', errors='replace')
+    else:
+        data_bytes = xml_data
+
+    if DefusedET is not None:
+        return DefusedET.fromstring(data_bytes)
+
+    return ET.fromstring(data_bytes)
+
+
+def is_safe_http_url(url: str) -> bool:
+    """Check if a URL uses a safe web scheme (http or https)."""
+    if not url or not isinstance(url, str):
+        return False
+    u = url.strip()
+    return u.startswith('http://') or u.startswith('https://')
+
+
+def build_stream_args(
+    streamer_template: str,
+    media_url: str,
+) -> list[str]:
+    """Build a safe argument list for subprocess.Popen without shell=True.
+
+    Args:
+        streamer_template: Command template (e.g., 'vlc %f').
+        media_url: Validated stream URL.
+
+    Returns:
+        List of command arguments for subprocess execution.
+
+    Raises:
+        ValueError: If media_url uses an unsupported scheme or contains whitespace.
+    """
+    if not media_url or not isinstance(media_url, str):
+        raise ValueError("Invalid media URL.")
+
+    clean_url: str = media_url.strip()
+    parsed: urllib.parse.SplitResult = urllib.parse.urlsplit(clean_url)
+    if parsed.scheme.lower() not in {"https", "http", "rtsp", "mms"}:
+        raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
+    if any(ch.isspace() for ch in clean_url):
+        raise ValueError("Media URL must not contain whitespace.")
+
+    template: str = (streamer_template or "vlc %f").strip()
+    try:
+        tokens: list[str] = shlex.split(template)
+    except Exception:
+        tokens = [template]
+
+    if not tokens:
+        tokens = ["vlc", "%f"]
+
+    placeholders: tuple[str, ...] = (
+        "{url}",
+        "{URL}",
+        "{stream_url}",
+        "{media_url}",
+        "{file}",
+        "%f",
+        "%s",
+        "%u",
+        "{}",
+    )
+
+    replaced: bool = False
+    final_args: list[str] = []
+    for token in tokens:
+        matched_ph: str | None = next(
+            (ph for ph in placeholders if ph in token),
+            None,
+        )
+        if matched_ph is not None:
+            final_args.append(token.replace(matched_ph, clean_url))
+            replaced = True
+        else:
+            final_args.append(token)
+
+    if not replaced:
+        final_args.append(clean_url)
+
+    return final_args
+
+
+def launch_stream_safe(
+    streamer_template: str,
+    media_url: str,
+) -> subprocess.Popen:
+    """Spawn the external media player safely with shell=False.
+
+    Args:
+        streamer_template: Command template configured by the user.
+        media_url: Target stream URL.
+
+    Returns:
+        The spawned Popen process instance.
+    """
+    args: list[str] = build_stream_args(streamer_template, media_url)
+    return subprocess.Popen(args, shell=False)
+
+
 class _LocalHTMLServer(http.server.HTTPServer):
     def __init__(self, server_address, RequestHandlerClass):
         super().__init__(server_address, RequestHandlerClass)
         self.pages = {}
         self.lock = threading.Lock()
+        self.secret_token = generate_local_server_token()
+
 
 class _LocalHTMLHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
-        path_key = parsed.path.lstrip('/') or 'index.html'
+        path_parts = [p for p in parsed.path.strip('/').split('/') if p]
+
+        # Require secret session token as the first path segment
+        if not path_parts or path_parts[0] != getattr(self.server, 'secret_token', ''):
+            self.send_response(403)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(b'403 Forbidden: Invalid or missing session token')
+            return
+
+        path_key = path_parts[1] if len(path_parts) > 1 else 'index.html'
 
         with self.server.lock:
             content_bytes = self.server.pages.get(path_key) or self.server.pages.get('index.html')
@@ -139,8 +294,9 @@ class _LocalHTMLHandler(http.server.BaseHTTPRequestHandler):
         # Mute server request logging to preserve clean console output
         pass
 
+
 class TwitTUIForm(toga.App):
-    def __init__(self, formal_name=None, app_id=None, **kwargs):
+    def __init__(self, formal_name='TwitTUI', app_id='org.twit.twittui', **kwargs):
         self.show_ids = {}
         self.current_episodes = []
         self.current_page = 1
@@ -170,7 +326,7 @@ class TwitTUIForm(toga.App):
         return env_audio.strip().lower() in ('1', 'true', 'yes', 'on')
 
     def save_env_setting(self, key: str, value: str) -> None:
-        """Persist a configuration setting key-value pair to the .env file."""
+        """Persist a configuration setting key-value pair to the .env file with restricted permissions."""
         candidate_paths = [
             os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'),
             os.path.join(os.getcwd(), '.env'),
@@ -186,6 +342,11 @@ class TwitTUIForm(toga.App):
 
         try:
             set_key(target_path, key, str(value))
+            if os.path.exists(target_path):
+                try:
+                    os.chmod(target_path, 0o600)
+                except Exception:
+                    pass
         except Exception:
             try:
                 lines = []
@@ -200,8 +361,7 @@ class TwitTUIForm(toga.App):
                         break
                 if not found:
                     lines.append(f"{key}={value}\n")
-                with open(target_path, 'w', encoding='utf-8') as f:
-                    f.writelines(lines)
+                write_restricted_file(target_path, "".join(lines))
             except Exception as e:
                 print(f"Warning: Could not save {key} to {target_path}: {e}")
 
@@ -529,7 +689,7 @@ class TwitTUIForm(toga.App):
         try:
             resp = requests.get(feed_url, headers={'User-Agent': 'TwitTUI/1.0'}, timeout=10)
             if resp.status_code == 200:
-                root = ET.fromstring(resp.content)
+                root = safe_xml_fromstring(resp.content)
                 items = []
                 for item in root.findall('.//item'):
                     title_elem = item.find('title')
@@ -680,7 +840,7 @@ class TwitTUIForm(toga.App):
                 url = f"https://feeds.twit.tv/{feed_file}"
                 resp = requests.get(url, headers={'User-Agent': 'TwitTUI/1.0'}, timeout=8)
                 if resp.status_code == 200:
-                    root = ET.fromstring(resp.content)
+                    root = safe_xml_fromstring(resp.content)
                     for item in root.findall('.//item'):
                         title_elem = item.find('title')
                         link_elem = item.find('link')
@@ -944,7 +1104,7 @@ class TwitTUIForm(toga.App):
         app_key_box = toga.Box(style=Pack(direction=ROW, margin=5))
         app_key_label = toga.Label('API Application Key:', style=Pack(margin=(0, 5)))
         initial_app_key = os.getenv('TWITAPI_APPLICATIONKEYS') or os.getenv('twitapi_applicationkeys') or ''
-        self.app_key_input = toga.TextInput(value=initial_app_key, style=Pack(flex=1))
+        self.app_key_input = toga.PasswordInput(value=initial_app_key, style=Pack(flex=1))
         test_api_button = toga.Button('Test API', on_press=self.on_test_api_press, style=Pack(margin=5))
         app_key_box.add(app_key_label)
         app_key_box.add(self.app_key_input)
@@ -962,7 +1122,7 @@ class TwitTUIForm(toga.App):
             initial_url_key = twit_club_url.split('?auth=', 1)[1]
         else:
             initial_url_key = twit_club_url
-        self.url_input = toga.TextInput(value=initial_url_key, style=Pack(flex=1))
+        self.url_input = toga.PasswordInput(value=initial_url_key, style=Pack(flex=1))
         show_url_button = toga.Button('Show', on_press=self.on_show_club_url_press, style=Pack(margin=5))
         url_box.add(url_label)
         url_box.add(url_prefix)
@@ -1053,18 +1213,41 @@ class TwitTUIForm(toga.App):
         if not html_str:
             return ""
 
+        # Pre-strip dangerous container tags and their inner content
+        dangerous_tags = [
+            "script", "style", "iframe", "object", "embed", "applet",
+            "form", "input", "button", "link", "meta", "svg", "base"
+        ]
+        sanitized = html_str
+        for _ in range(5):
+            prev = sanitized
+            for tag in dangerous_tags:
+                sanitized = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}>", "", sanitized, flags=re.IGNORECASE | re.DOTALL)
+                sanitized = re.sub(rf"<{tag}\b[^>]*/>", "", sanitized, flags=re.IGNORECASE)
+                sanitized = re.sub(rf"<{tag}\b[^>]*>", "", sanitized, flags=re.IGNORECASE)
+            if sanitized == prev:
+                break
+
         # Attempt to use bleach if available
         try:
             import bleach
             return bleach.clean(
-                html_str,
+                sanitized,
                 tags=[
                     "p", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "code",
                     "ul", "ol", "li", "table", "thead", "tbody", "tr", "th", "td",
-                    "blockquote", "strong", "em", "a", "hr", "br", "span", "div"
+                    "blockquote", "strong", "em", "a", "hr", "br", "span", "div", "img"
                 ],
-                attributes={"a": ["href", "title", "id", "name"], "th": ["align"], "td": ["align"], "*": ["class", "id"]},
-                protocols=["http", "https", "mailto"]
+                attributes={
+                    "a": ["href", "title", "id", "name", "target", "rel"],
+                    "img": ["src", "alt", "title", "width", "height"],
+                    "th": ["align"],
+                    "td": ["align"],
+                    "*": ["class", "id"]
+                },
+                protocols=["http", "https", "mailto"],
+                strip=True,
+                strip_comments=True
             )
         except ImportError:
             pass
@@ -1073,36 +1256,41 @@ class TwitTUIForm(toga.App):
         try:
             import nh3
             return nh3.clean(
-                html_str,
+                sanitized,
                 tags={
                     "p", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "code",
                     "ul", "ol", "li", "table", "thead", "tbody", "tr", "th", "td",
-                    "blockquote", "strong", "em", "a", "hr", "br", "span", "div"
+                    "blockquote", "strong", "em", "a", "hr", "br", "span", "div", "img"
                 },
-                attributes={"a": {"href", "title", "id", "name"}, "th": {"align"}, "td": {"align"}, "*": {"class", "id"}},
+                attributes={
+                    "a": {"href", "title", "id", "name", "target", "rel"},
+                    "img": {"src", "alt", "title", "width", "height"},
+                    "th": {"align"},
+                    "td": {"align"},
+                    "*": {"class", "id"}
+                },
                 url_schemes={"http", "https", "mailto"}
             )
         except ImportError:
             pass
 
-        # Defensive sanitization fallback
-        dangerous_tags = [
-            "script", "style", "iframe", "object", "embed", "applet",
-            "form", "input", "button", "link", "meta", "svg", "base"
-        ]
-        sanitized = html_str
-        for tag in dangerous_tags:
-            sanitized = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}>", "", sanitized, flags=re.IGNORECASE | re.DOTALL)
-            sanitized = re.sub(rf"<{tag}\b[^>]*/>", "", sanitized, flags=re.IGNORECASE)
-            sanitized = re.sub(rf"<{tag}\b[^>]*>", "", sanitized, flags=re.IGNORECASE)
-
         # Strip all inline event handlers (e.g., onload, onclick, onerror)
         sanitized = re.sub(r"\s+on[a-zA-Z]+\s*=\s*(?:\"[^\"]*\"|\'[^\']*\'|[^\s>]+)", "", sanitized, flags=re.IGNORECASE)
 
-        # Neutralize unsafe URI schemes in links or source attributes
+        # Neutralize unsafe URI schemes in links or source attributes (including entity-encoded)
+        def _neutralize_schemes(match):
+            attr = match.group(1)
+            eq = match.group(2)
+            quote = match.group(3) or ''
+            val = match.group(4)
+            unescaped_val = html.unescape(val).strip().lower()
+            if any(unescaped_val.startswith(scheme) for scheme in ('javascript:', 'data:', 'vbscript:', 'file:')):
+                return f'{attr}{eq}{quote}#{quote}'
+            return match.group(0)
+
         sanitized = re.sub(
-            r'href\s*=\s*[\"\']?\s*(?:javascript|data|vbscript|file):[^\">\s]*[\"\']?',
-            'href="#"',
+            r'\b(href|src)(\s*=\s*)([\"\']?)([^\"\'\s>]+)',
+            _neutralize_schemes,
             sanitized,
             flags=re.IGNORECASE
         )
@@ -1324,7 +1512,11 @@ class TwitTUIForm(toga.App):
         """Get or create user cache directory accessible by sandboxed web browsers."""
         cache_dir = os.path.expanduser("~/.cache/twittui")
         try:
-            os.makedirs(cache_dir, mode=0o755, exist_ok=True)
+            os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+            try:
+                os.chmod(cache_dir, 0o700)
+            except Exception:
+                pass
             return cache_dir
         except Exception:
             return tempfile.gettempdir()
@@ -1350,7 +1542,8 @@ class TwitTUIForm(toga.App):
                 server.pages[page_name] = html_bytes
                 server.pages['index.html'] = html_bytes
             port = server.server_address[1]
-            webbrowser.open(f"http://127.0.0.1:{port}/{page_name}")
+            token = getattr(server, 'secret_token', '')
+            webbrowser.open(f"http://127.0.0.1:{port}/{token}/{page_name}")
             return
 
         # Fallback to local HTML file in cache directory if local HTTP server unavailable
@@ -1359,7 +1552,7 @@ class TwitTUIForm(toga.App):
         temp_file.write(html_content)
         temp_file.close()
         try:
-            os.chmod(temp_file.name, 0o644)
+            os.chmod(temp_file.name, 0o600)
         except Exception:
             pass
         file_uri = pathlib.Path(os.path.abspath(temp_file.name)).as_uri()
@@ -1465,6 +1658,8 @@ class TwitTUIForm(toga.App):
         """Construct or return the full Club TWiT URL from user input or environment."""
         raw_val = self.url_input.value.strip() if hasattr(self, 'url_input') and self.url_input and self.url_input.value else ''
         if raw_val.startswith('http://') or raw_val.startswith('https://'):
+            if raw_val.startswith('http://'):
+                raw_val = 'https://' + raw_val[7:]
             return raw_val
         auth_key = self.get_club_twit_auth_key()
         if auth_key:
@@ -1494,7 +1689,7 @@ class TwitTUIForm(toga.App):
                 except Exception:
                     pass
 
-        # If lxml and feed-style.xsl are available, attempt XSLT transformation
+        # If lxml and feed-style.xsl are available, attempt XSLT transformation with hardened parser
         candidate_xsl_paths = [
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "feed-style.xsl"),
             os.path.join(os.getcwd(), "feed-style.xsl"),
@@ -1509,23 +1704,29 @@ class TwitTUIForm(toga.App):
         if xsl_path:
             try:
                 import lxml.etree as etree
+                safe_parser = etree.XMLParser(
+                    resolve_entities=False,
+                    no_network=True,
+                    dtd_validation=False,
+                    load_dtd=False
+                )
                 with open(xsl_path, "rb") as xf:
-                    xslt_doc = etree.XML(xf.read())
+                    xslt_doc = etree.XML(xf.read(), parser=safe_parser)
                 transform = etree.XSLT(xslt_doc)
-                src_doc = etree.fromstring(xml_bytes)
+                src_doc = etree.fromstring(xml_bytes, parser=safe_parser)
                 result_tree = transform(src_doc)
                 html_out = str(result_tree)
                 if css_content and '<style>' in html_out and '</style>' in html_out:
                     style_start = html_out.find('<style>') + 7
                     style_end = html_out.find('</style>')
                     html_out = html_out[:style_start] + "\n" + css_content + "\n" + html_out[style_end:]
-                return html_out
+                return self.sanitize_html(html_out)
             except Exception as xslt_err:
                 print(f"XSLT rendering fallback ({xslt_err}), using Python RSS renderer.")
 
         # ElementTree parser fallback
         try:
-            root = ET.fromstring(xml_bytes)
+            root = safe_xml_fromstring(xml_bytes)
             channel = root.find('channel')
             if channel is None:
                 channel = root.find('.//channel')
@@ -1589,7 +1790,7 @@ class TwitTUIForm(toga.App):
                     except Exception:
                         pass
 
-                title_html = f'<a href="{html.escape(link)}" target="_blank" rel="noopener noreferrer">{html.escape(title)}</a>' if link else html.escape(title)
+                title_html = f'<a href="{html.escape(link)}" target="_blank" rel="noopener noreferrer">{html.escape(title)}</a>' if (link and is_safe_http_url(link)) else html.escape(title)
 
                 meta_parts = []
                 if pub_date:
@@ -1601,7 +1802,7 @@ class TwitTUIForm(toga.App):
                 meta_html = f'<div class="episode-meta">{" ".join(meta_parts)}</div>' if meta_parts else ''
 
                 media_html = ''
-                if enc_url:
+                if enc_url and is_safe_http_url(enc_url):
                     media_html = f"""<div class="media-controls">
   <a class="media-link" href="{html.escape(enc_url)}" target="_blank" rel="noopener noreferrer">&#9654; Stream / Download Media</a>
   <span class="media-type">{html.escape(enc_type)}{size_str}</span>
@@ -1617,10 +1818,10 @@ class TwitTUIForm(toga.App):
 </div>"""
                 items_html.append(card_html)
 
-            image_html = f'<img class="channel-image" src="{html.escape(ch_image)}" alt="Podcast Cover Art" />' if ch_image else ''
+            image_html = f'<img class="channel-image" src="{html.escape(ch_image)}" alt="Podcast Cover Art" />' if (ch_image and is_safe_http_url(ch_image)) else ''
             author_html = f'<span>Author: {html.escape(ch_author)}</span>' if ch_author else ''
             lang_html = f'<span>Language: {html.escape(ch_lang)}</span>' if ch_lang else ''
-            link_html = f'<a href="{html.escape(ch_link)}" target="_blank" rel="noopener noreferrer">Visit Website</a>' if ch_link else ''
+            link_html = f'<a href="{html.escape(ch_link)}" target="_blank" rel="noopener noreferrer">Visit Website</a>' if (ch_link and is_safe_http_url(ch_link)) else ''
 
             return f"""<!DOCTYPE html>
 <html lang="en">
@@ -2068,7 +2269,8 @@ class TwitTUIForm(toga.App):
                             expected_size = int(v)
                             break
 
-                print(f"[{idx_0 + 1}/{total_targets}] Downloading '{target_title}' -> {dest_filepath} from {media_url}")
+                sanitized_log_url = re.sub(r'([?&]auth=)[^&]+', r'\1[REDACTED]', media_url)
+                print(f"[{idx_0 + 1}/{total_targets}] Downloading '{target_title}' -> {dest_filepath} from {sanitized_log_url}")
 
                 def _item_progress(downloaded_bytes: int, total_bytes: int, item_idx=idx_0):
                     if total_bytes > 0:
@@ -2116,19 +2318,25 @@ class TwitTUIForm(toga.App):
             print(f"Error initiating download: {e}")
 
     def format_stream_command(self, streamer_template: str, url: str) -> str:
-        """Format the streamer command string with the episode media URL."""
-        template = (streamer_template or 'vlc %f').strip()
-        placeholders = ['{url}', '{URL}', '{stream_url}', '{media_url}', '{file}', '%f', '%s', '%u', '{}']
-        for ph in placeholders:
-            if ph in template:
-                return template.replace(ph, url)
-        return f"{template} {url}"
+        """Format the streamer command string with the episode media URL safely."""
+        try:
+            args = build_stream_args(streamer_template, url)
+            return shlex.join(args)
+        except Exception:
+            template = (streamer_template or 'vlc %f').strip()
+            placeholders = ['{url}', '{URL}', '{stream_url}', '{media_url}', '{file}', '%f', '%s', '%u', '{}']
+            for ph in placeholders:
+                if ph in template:
+                    return template.replace(ph, url)
+            return f"{template} {url}"
 
     def is_valid_media_url(self, url: str) -> bool:
         """Validate if a string is a streamable media URL and not an API endpoint or webpage."""
         if not url or not isinstance(url, str):
             return False
         url = url.strip()
+        if any(ch.isspace() for ch in url):
+            return False
         if not (url.startswith('http://') or url.startswith('https://') or url.startswith('rtsp://') or url.startswith('mms://')):
             return False
         # Reject API endpoints
@@ -2408,9 +2616,9 @@ class TwitTUIForm(toga.App):
                 return
 
             streamer_template = self.streamer_input.value if self.streamer_input and self.streamer_input.value else 'vlc %f'
-            command = self.format_stream_command(streamer_template, media_url)
-            print(f"Launching streamer: {command}")
-            subprocess.Popen(command, shell=True)
+            sanitized_log_url = re.sub(r'([?&]auth=)[^&]+', r'\1[REDACTED]', media_url)
+            print(f"Launching stream player for: {sanitized_log_url}")
+            launch_stream_safe(streamer_template, media_url)
         except Exception as e:
             print(f"Error launching stream: {e}")
 
@@ -3856,6 +4064,8 @@ def main():
     return TwitTUIForm('TWIT.tv TUI', 'org.beeware.twittui')
 
 if __name__ == '__main__':
+    from main import resolve_toga_backend
+    resolve_toga_backend()
     load_dotenv()
     app = main()
     app.main_loop()

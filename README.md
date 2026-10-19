@@ -81,16 +81,29 @@ This document serves two primary audiences:
    ```bash
    pip install toga requests python-dotenv
    ```
-   *(Optional for terminal-only or GTK rendering)*:
+   *(Install GTK desktop UI, Textual terminal UI, or both simultaneously)*:
    ```bash
-   pip install toga-gtk      # For Linux GTK desktop UI
-   pip install toga-textual  # For pure Terminal UI
+   pip install toga-gtk toga-textual  # Both backends can be installed concurrently
    ```
 
 4. **Launch the application**:
    ```bash
    python main.py
    ```
+   - When both `toga-gtk` and `toga-textual` are installed, TwitTUI prompts you at startup to choose your preferred UI interface:
+     ```text
+     Multiple Toga UI backends detected:
+       1) GTK (Graphical Desktop UI)
+       2) Textual (Terminal User Interface)
+     Select backend [1/2] (default: 1 - GTK):
+     ```
+   - You can also bypass the startup prompt using command line switches:
+     ```bash
+     python main.py --gtk        # Launch GTK desktop GUI
+     python main.py --textual    # Launch Textual terminal UI (TUI)
+     python main.py -b gtk       # Alternative syntax (-b gtk / -b textual)
+     python main.py --help       # Display all backend options and switches
+     ```
 
 ---
 
@@ -204,23 +217,30 @@ twittui/
 
 ---
 
-### Execution Lifecycle & Runtime Sanitization (`main.py`)
+### Execution Lifecycle & UI Backend Selection (`main.py`)
 
-`main.py` is the execution entry point. Before importing GUI modules or initializing the main loop, it executes runtime environment stabilization to prevent GTK driver conflicts and standard error pollution on Linux systems:
+`main.py` is the execution entry point. Before importing GUI modules or initializing the main loop, it dynamically inspects available Toga backends (`toga-gtk`, `toga-textual`), processes command-line switches or interactive startup prompts, sets `TOGA_BACKEND`, and executes runtime environment stabilization:
 
 ```
 [ Process Start ]
         │
         ▼
-[ Instantiate StderrRedirector ] ──► Filters 'Failed to load module xapp-gtk3-module'
+[ Parse CLI Switches & Inspect Backends ]
+  ├── --gtk / --gui / -b gtk       ──► Force toga_gtk
+  ├── --textual / --tui / -b textual ──► Force toga_textual
+  └── (No Switch & Both Found)     ──► Interactive CLI prompt [1: GTK / 2: Textual]
         │
         ▼
-[ Patch Environment Variables ]
-  ├── GTK_MODULES = '' (Suppress external modules)
-  ├── del GTK_DEBUG (Prevent assertion crashes in non-debug GTK)
-  ├── NO_AT_BRIDGE = '1' (Bypass accessibility D-Bus bridge overhead)
-  ├── GDK_BACKEND = 'x11' (Enforce stable X11 protocol over buggy Wayland/XApp bindings)
-  └── G_MESSAGES_DEBUG = '' (Mute Glib debug logging)
+[ Set TOGA_BACKEND & Configure Environment ]
+  ├── If toga_gtk:
+  │     ├── Instantiate StderrRedirector (Filter xapp-gtk3-module warnings)
+  │     ├── GTK_MODULES = '' (Suppress external modules)
+  │     ├── del GTK_DEBUG (Prevent assertion crashes in non-debug GTK)
+  │     ├── NO_AT_BRIDGE = '1' (Bypass accessibility D-Bus bridge overhead)
+  │     ├── GDK_BACKEND = 'x11' (Enforce stable X11 protocol)
+  │     └── G_MESSAGES_DEBUG = '' (Mute Glib debug logging)
+  └── If toga_textual:
+        └── Initialize Textual terminal rendering loop
         │
         ▼
 [ load_dotenv() ] ──► Ingest environment configurations
@@ -393,10 +413,10 @@ Every candidate URL passes through `is_valid_media_url(url)` to prevent opening 
 ### Asynchronous Streaming & Multi-Threaded Batch Downloader
 
 #### Subprocess Stream Launcher
-Streaming commands are formatted via `format_stream_command(template, media_url)` supporting flexible replacement tokens (`%f`, `{url}`, `%s`, `{file}`, `{media_url}`):
+Streaming commands are formatted and safely tokenized via `build_stream_args(streamer_template, media_url)` and spawned via `launch_stream_safe(streamer_template, media_url)` supporting replacement tokens (`%f`, `{url}`, `%s`, `{file}`, `{media_url}`) without shell injection risks:
 ```python
-command = self.format_stream_command(streamer_template, media_url)
-subprocess.Popen(command, shell=True)  # Non-blocking, detached execution
+args = build_stream_args(streamer_template, media_url)
+subprocess.Popen(args, shell=False)  # Non-blocking, secure detached execution
 ```
 
 #### Multi-Threaded Batch Download Architecture
