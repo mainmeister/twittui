@@ -7,6 +7,9 @@ import urllib.request
 import urllib.error
 import threading
 import http.server
+
+os.environ.setdefault('TOGA_BACKEND', 'toga_textual')
+
 from twittui_form import (
     build_stream_args,
     write_restricted_file,

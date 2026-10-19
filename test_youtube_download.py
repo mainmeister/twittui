@@ -59,15 +59,19 @@ class TestYouTubeDownload(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             dest_path = os.path.join(tmp_dir, "test.mp4")
-            temp_part = dest_path + '.part'
 
             def mock_popen(cmd, **kwargs):
-                # Simulate yt-dlp creating temp part file
-                with open(temp_part, 'wb') as f:
-                    f.write(b'video_bytes_test')
+                # Find output template from cmd (-o <template>)
+                o_idx = cmd.index('-o') if '-o' in cmd else -1
+                if o_idx != -1 and o_idx + 1 < len(cmd):
+                    out_tmpl = cmd[o_idx + 1]
+                    out_file = out_tmpl.replace('%(ext)s', 'mp4')
+                    with open(out_file, 'wb') as f:
+                        f.write(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00isommp42" + (b"0" * 2048))
                 mock_proc = MagicMock()
                 lines = [
                     "[download]  50.0% of 10.00MiB\n",
+                    "[Merger] Merging formats into temp\n",
                     "[download] 100.0% of 10.00MiB\n",
                     ""
                 ]
@@ -79,7 +83,7 @@ class TestYouTubeDownload(unittest.TestCase):
 
             progress_updates = []
 
-            with patch('shutil.which', return_value='/usr/bin/yt-dlp'):
+            with patch('shutil.which', side_effect=lambda x: '/usr/bin/' + x):
                 with patch('subprocess.Popen', side_effect=mock_popen) as mock_p:
                     success = self.form.download_youtube_video(
                         yt_url,
@@ -88,8 +92,86 @@ class TestYouTubeDownload(unittest.TestCase):
                     )
                     self.assertTrue(success)
                     self.assertTrue(os.path.exists(dest_path))
-                    self.assertFalse(os.path.exists(temp_part))
                     self.assertTrue(any(cur == 50.0 for cur, tot in progress_updates))
+
+    def test_download_youtube_video_cleans_up_stale_part_files(self) -> None:
+        """Ensure orphan .part.f140.m4a, .part.f616.mp4, and .part.temp.mp4 files are purged."""
+        yt_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest_path = os.path.join(tmp_dir, "Security Now 1100.mp4")
+            stale_files = [
+                dest_path + ".part.f140.m4a",
+                dest_path + ".part.f616.mp4",
+                dest_path + ".part.temp.mp4",
+                dest_path + ".part",
+            ]
+            for sf in stale_files:
+                with open(sf, 'wb') as f:
+                    f.write(b"stale_bytes")
+
+            for sf in stale_files:
+                self.assertTrue(os.path.exists(sf))
+
+            def mock_popen(cmd, **kwargs):
+                o_idx = cmd.index('-o') if '-o' in cmd else -1
+                if o_idx != -1 and o_idx + 1 < len(cmd):
+                    out_tmpl = cmd[o_idx + 1]
+                    out_file = out_tmpl.replace('%(ext)s', 'mp4')
+                    with open(out_file, 'wb') as f:
+                        f.write(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00isommp42" + (b"0" * 2048))
+                mock_proc = MagicMock()
+                mock_proc.stdout.readline.return_value = ""
+                mock_proc.poll.return_value = 0
+                mock_proc.wait.return_value = 0
+                return mock_proc
+
+            with patch('shutil.which', side_effect=lambda x: '/usr/bin/' + x):
+                with patch('subprocess.Popen', side_effect=mock_popen):
+                    success = self.form.download_youtube_video(yt_url, dest_path)
+                    self.assertTrue(success)
+                    self.assertTrue(os.path.exists(dest_path))
+                    for sf in stale_files:
+                        self.assertFalse(os.path.exists(sf))
+
+    def test_download_youtube_video_without_ffmpeg_uses_single_stream_fallback(self) -> None:
+        """When ffmpeg is not installed, yt-dlp falls back to pre-muxed best[ext=mp4]/best stream."""
+        yt_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest_path = os.path.join(tmp_dir, "test_no_ffmpeg.mp4")
+            captured_cmds = []
+
+            def mock_popen(cmd, **kwargs):
+                captured_cmds.append(cmd)
+                o_idx = cmd.index('-o') if '-o' in cmd else -1
+                if o_idx != -1 and o_idx + 1 < len(cmd):
+                    out_tmpl = cmd[o_idx + 1]
+                    out_file = out_tmpl.replace('%(ext)s', 'mp4')
+                    with open(out_file, 'wb') as f:
+                        f.write(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00isommp42" + (b"0" * 2048))
+                mock_proc = MagicMock()
+                mock_proc.stdout.readline.return_value = ""
+                mock_proc.poll.return_value = 0
+                mock_proc.wait.return_value = 0
+                return mock_proc
+
+            # yt-dlp available, but ffmpeg returns None
+            def mock_which(binary_name):
+                if binary_name == 'yt-dlp':
+                    return '/usr/bin/yt-dlp'
+                return None
+
+            with patch('shutil.which', side_effect=mock_which):
+                with patch('subprocess.Popen', side_effect=mock_popen):
+                    success = self.form.download_youtube_video(yt_url, dest_path)
+                    self.assertTrue(success)
+                    self.assertTrue(os.path.exists(dest_path))
+                    self.assertTrue(len(captured_cmds) > 0)
+                    cmd = captured_cmds[0]
+                    self.assertIn('-f', cmd)
+                    f_idx = cmd.index('-f')
+                    self.assertEqual(cmd[f_idx + 1], 'best[ext=mp4]/best')
 
     def test_is_existing_file_identical_for_youtube(self) -> None:
         """Verify identical check recognizes substantial existing YouTube downloads."""

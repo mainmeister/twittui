@@ -5,6 +5,7 @@ import asyncio
 import os
 import sys
 import shutil
+import glob
 import re
 import secrets
 import shlex
@@ -2165,30 +2166,66 @@ class TwitTUIForm(toga.App):
                 _show_err()
             return False
 
-        temp_path = dest_path + '.part'
-        os.makedirs(os.path.dirname(dest_path) or '.', exist_ok=True)
+        dest_dir = os.path.dirname(os.path.abspath(dest_path)) or '.'
+        os.makedirs(dest_dir, exist_ok=True)
+        base_filename = os.path.basename(dest_path)
+        base_stem, target_ext = os.path.splitext(base_filename)
+        temp_prefix = os.path.join(dest_dir, f".twittui_yt_{base_stem}")
+        outtmpl = f"{temp_prefix}.%(ext)s"
+
+        def _cleanup_stale_parts() -> None:
+            cleanup_patterns = [
+                f"{temp_prefix}*",
+                f"{dest_path}.part*",
+                f"{dest_path}*.part*",
+            ]
+            for pattern in cleanup_patterns:
+                for p in glob.glob(pattern):
+                    try:
+                        if os.path.isfile(p) or os.path.islink(p):
+                            os.remove(p)
+                        elif os.path.isdir(p):
+                            shutil.rmtree(p, ignore_errors=True)
+                    except Exception:
+                        pass
+
+        # Clean up any leftover partial pieces before starting
+        _cleanup_stale_parts()
 
         if progress_callback is None:
             self.reset_progress()
 
+        has_ffmpeg = bool(shutil.which('ffmpeg'))
+        audio_only = self.is_audio_only()
+
         if ytdlp_bin:
-            audio_only = self.is_audio_only()
             cmd = [
                 ytdlp_bin,
                 '--no-playlist',
                 '--newline',
                 '--no-colors',
+                '--force-overwrites',
             ]
-            if audio_only:
-                cmd.extend(['-x', '--audio-format', 'mp3'])
+            if has_ffmpeg:
+                if audio_only:
+                    cmd.extend(['-x', '--audio-format', 'mp3'])
+                else:
+                    cmd.extend([
+                        '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
+                        '--merge-output-format', 'mp4'
+                    ])
             else:
-                cmd.extend(['-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', '--merge-output-format', 'mp4'])
+                if audio_only:
+                    cmd.extend(['-f', 'bestaudio[ext=m4a]/bestaudio/best'])
+                else:
+                    cmd.extend(['-f', 'best[ext=mp4]/best'])
 
-            cmd.extend(['-o', temp_path, url])
+            cmd.extend(['-o', outtmpl, url])
 
             try:
                 proc = subprocess.Popen(
                     cmd,
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -2196,6 +2233,7 @@ class TwitTUIForm(toga.App):
                     universal_newlines=True
                 )
                 pct_regex = re.compile(r'\[download\]\s+([\d\.]+)%')
+                merger_regex = re.compile(r'\[(?:Merger|ffmpeg|ExtractAudio)\]')
                 while True:
                     if getattr(self, '_cancel_download', False):
                         proc.terminate()
@@ -2203,11 +2241,7 @@ class TwitTUIForm(toga.App):
                             proc.wait(timeout=3)
                         except subprocess.TimeoutExpired:
                             proc.kill()
-                        if os.path.exists(temp_path):
-                            try:
-                                os.remove(temp_path)
-                            except Exception:
-                                pass
+                        _cleanup_stale_parts()
                         return False
 
                     line = proc.stdout.readline()
@@ -2221,45 +2255,41 @@ class TwitTUIForm(toga.App):
                                 progress_callback(pct, 100.0)
                             else:
                                 self.update_progress(pct, 100.0)
+                        elif merger_regex.search(line):
+                            if progress_callback:
+                                progress_callback(99.0, 100.0)
+                            else:
+                                self.update_progress(99.0, 100.0)
 
                 retcode = proc.wait()
                 if retcode != 0:
                     print(f"yt-dlp returned error code {retcode}")
-                    if os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except Exception:
-                            pass
+                    _cleanup_stale_parts()
                     return False
 
-                if os.path.exists(temp_path):
+                # Locate finalized output file
+                candidates = glob.glob(f"{temp_prefix}.*")
+                if not candidates:
+                    candidates = glob.glob(f"{temp_prefix}*")
+
+                found_file = None
+                if candidates:
+                    for c in sorted(candidates, key=lambda x: (not x.endswith('.mp4'), not x.endswith('.m4a'), not x.endswith('.mp3'), len(x))):
+                        if os.path.isfile(c) and os.path.getsize(c) > 1024:
+                            found_file = c
+                            break
+
+                if found_file and os.path.exists(found_file):
                     if os.path.exists(dest_path):
                         try:
                             os.remove(dest_path)
                         except Exception:
                             pass
-                    os.rename(temp_path, dest_path)
-                elif not os.path.exists(dest_path):
-                    base_no_ext = os.path.splitext(temp_path)[0]
-                    candidates = [
-                        temp_path,
-                        base_no_ext,
-                        base_no_ext + '.mp4',
-                        base_no_ext + '.mkv',
-                        base_no_ext + '.webm',
-                        base_no_ext + '.mp3',
-                        dest_path
-                    ]
-                    found = next((c for c in candidates if os.path.exists(c)), None)
-                    if found and found != dest_path:
-                        if os.path.exists(dest_path):
-                            try:
-                                os.remove(dest_path)
-                            except Exception:
-                                pass
-                        os.rename(found, dest_path)
+                    os.rename(found_file, dest_path)
 
-                if os.path.exists(dest_path):
+                _cleanup_stale_parts()
+
+                if os.path.exists(dest_path) and self.is_valid_media_file(dest_path):
                     if progress_callback:
                         progress_callback(100.0, 100.0)
                     else:
@@ -2269,11 +2299,7 @@ class TwitTUIForm(toga.App):
                 return False
             except Exception as e:
                 print(f"Error executing yt-dlp for {url}: {e}")
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except Exception:
-                        pass
+                _cleanup_stale_parts()
                 return False
         else:
             # Python yt_dlp module fallback
@@ -2283,7 +2309,8 @@ class TwitTUIForm(toga.App):
                 def _ytdlp_hook(d):
                     if getattr(self, '_cancel_download', False):
                         raise Exception("Download cancelled by user")
-                    if d.get('status') == 'downloading':
+                    status = d.get('status')
+                    if status == 'downloading':
                         total = d.get('total_bytes') or d.get('total_bytes_estimate') or 100
                         downloaded = d.get('downloaded_bytes', 0)
                         pct = (downloaded / total) * 100.0 if total else 0.0
@@ -2291,47 +2318,60 @@ class TwitTUIForm(toga.App):
                             progress_callback(pct, 100.0)
                         else:
                             self.update_progress(pct, 100.0)
+                    elif status == 'finished':
+                        if progress_callback:
+                            progress_callback(99.0, 100.0)
+                        else:
+                            self.update_progress(99.0, 100.0)
 
                 ydl_opts = {
-                    'outtmpl': temp_path,
+                    'outtmpl': outtmpl,
                     'noplaylist': True,
                     'progress_hooks': [_ytdlp_hook],
                     'quiet': True,
+                    'overwrites': True,
                 }
-                if self.is_audio_only():
-                    ydl_opts['format'] = 'bestaudio/best'
-                    ydl_opts['postprocessors'] = [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                    }]
+                if has_ffmpeg:
+                    if audio_only:
+                        ydl_opts['format'] = 'bestaudio/best'
+                        ydl_opts['postprocessors'] = [{
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                        }]
+                    else:
+                        ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best'
+                        ydl_opts['merge_output_format'] = 'mp4'
                 else:
-                    ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
-                    ydl_opts['merge_output_format'] = 'mp4'
+                    if audio_only:
+                        ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
+                    else:
+                        ydl_opts['format'] = 'best[ext=mp4]/best'
 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
 
-                if os.path.exists(temp_path):
+                candidates = glob.glob(f"{temp_prefix}.*")
+                if not candidates:
+                    candidates = glob.glob(f"{temp_prefix}*")
+
+                found_file = None
+                if candidates:
+                    for c in sorted(candidates, key=lambda x: (not x.endswith('.mp4'), not x.endswith('.m4a'), not x.endswith('.mp3'), len(x))):
+                        if os.path.isfile(c) and os.path.getsize(c) > 1024:
+                            found_file = c
+                            break
+
+                if found_file and os.path.exists(found_file):
                     if os.path.exists(dest_path):
                         try:
                             os.remove(dest_path)
                         except Exception:
                             pass
-                    os.rename(temp_path, dest_path)
-                elif not os.path.exists(dest_path):
-                    base_no_ext = os.path.splitext(temp_path)[0]
-                    for ext in ['.mp4', '.mkv', '.webm', '.mp3']:
-                        cand = base_no_ext + ext
-                        if os.path.exists(cand):
-                            if os.path.exists(dest_path):
-                                try:
-                                    os.remove(dest_path)
-                                except Exception:
-                                    pass
-                            os.rename(cand, dest_path)
-                            break
+                    os.rename(found_file, dest_path)
 
-                if os.path.exists(dest_path):
+                _cleanup_stale_parts()
+
+                if os.path.exists(dest_path) and self.is_valid_media_file(dest_path):
                     if progress_callback:
                         progress_callback(100.0, 100.0)
                     else:
@@ -2341,11 +2381,7 @@ class TwitTUIForm(toga.App):
                 return False
             except Exception as e:
                 print(f"Error downloading YouTube video with yt_dlp module: {e}")
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except Exception:
-                        pass
+                _cleanup_stale_parts()
                 return False
 
     def download_episode_file(self, url: str, dest_path: str, block_size: int = 8192, progress_callback=None, expected_size: int = None) -> bool:
