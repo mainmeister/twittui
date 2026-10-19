@@ -129,10 +129,8 @@ def resolve_toga_backend(argv: list[str] | None = None, prompt_interactive: bool
 if __name__ == '__main__':
     backend = resolve_toga_backend()
 
-    from dotenv import load_dotenv
-    load_dotenv()
-
-    from twittui_form import main
+    from twittui_form import load_twittui_dotenv, main
+    load_twittui_dotenv()
 
     app = main()
     app.main_loop()

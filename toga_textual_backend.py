@@ -819,16 +819,17 @@ def patch_toga_textual() -> None:
 
         toga.platform.Factory.__getattr__ = custom_getattr
 
-        # Also set directly on cached factory instances if available
-        for interface in [None, 'toga_core']:
-            try:
-                f = toga.platform.get_factory(interface)
+        # Also set directly on cached factory instances if the active backend is Textual
+        try:
+            f = toga.platform.get_factory()
+            backend = getattr(f, 'backend', '') or os.environ.get('TOGA_BACKEND', '')
+            if backend in ('toga_textual', 'textual'):
                 for name, impl_cls in TEXTUAL_WIDGET_IMPLEMENTATIONS.items():
                     setattr(f, name, impl_cls)
                 setattr(f, 'dialogs', DialogsFactory)
                 for dialog_name in ['InfoDialog', 'ErrorDialog', 'QuestionDialog', 'ConfirmDialog', 'SelectFolderDialog', 'OpenFileDialog', 'SaveFileDialog', 'ChoiceDialog', 'SelectResolutionDialog']:
                     setattr(f, dialog_name, getattr(DialogsFactory, dialog_name))
-            except Exception:
-                pass
+        except Exception:
+            pass
     except Exception as e:
         pass

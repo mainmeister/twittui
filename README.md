@@ -129,7 +129,7 @@ twitclubdestination=~/Downloads/TWiT
 twitclubblocksize=8192
 
 # Media Player Streaming Command Template (%f or {url} will be replaced by stream URL)
-twitclubstreamer=vlc %f
+twitclubstreamer=env LC_ALL=C vlc %f
 ```
 
 ---
@@ -154,7 +154,7 @@ twitclubstreamer=vlc %f
 | TWIT Club URL: https://twit.memberfulcontent.com/rss/9041?auth= [ KEY ] [ Show ]|
 | Download Destination: [/home/user/Podcasts       ] [ Browse ] [ Open ] [X Show Folders] |
 | Block Size:           [8192                      ]                              |
-| Streamer:             [vlc %f                    ]                              |
+| Streamer:             [env LC_ALL=C vlc %f       ]                              |
 +---------------------------------------------------------------------------------+
 ```
 
@@ -329,7 +329,7 @@ toga.MainWindow (title='TWIT.tv TUI')
         │   └── toga.TextInput (value='8192') [block_input]
         └── toga.Box (direction=ROW) [streamer_box]
             ├── toga.Label ('Streamer:')
-            └── toga.TextInput (value='vlc %f') [streamer_input]
+            └── toga.TextInput (value='env LC_ALL=C vlc %f') [streamer_input]
     └── toga.ProgressBar (max=100.0, value=0.0) [progress_bar]
 ```
 
@@ -518,7 +518,7 @@ The `determine_download_filename(target, media_url)` method sanitizes filenames 
 | `twitcluburl` / `TWITCLUBURL` | String | `""` | Full Memberful RSS feed URL or unique authorization key token. |
 | `twitclubdestination` / `TWITCLUBDESTINATION` | String | `.` (Current dir) | Filesystem directory path for storing downloaded podcast files. |
 | `twitclubblocksize` / `TWITCLUBBLOCKSIZE` | Integer | `8192` (8 KB) | Buffer chunk size in bytes for network download streaming. |
-| `twitclubstreamer` / `TWITCLUBSTREAMER` | String | `vlc %f` | Command template string used to spawn the external streaming player. |
+| `twitclubstreamer` / `TWITCLUBSTREAMER` | String | `env LC_ALL=C vlc %f` | Command template string used to spawn the external streaming player. |
 | `TWITAUDIOONLY` / `twitaudioonly` | Integer / Boolean | `0` (False) | Flag (`1`/`0`) persisting the Audio Only streaming/download preference across sessions. |
 | `TWITCLUBSHOWFOLDERS` / `twitclubshowfolders` | Integer / Boolean | `0` (False) | Flag (`1`/`0`) persisting the Show Folders organization preference across sessions. |
 

@@ -24,6 +24,16 @@ from twittui_form import (
 class TestTwitTUISecurity(unittest.TestCase):
     """Unit tests verifying security remediations across TwitTUI."""
 
+    def test_build_stream_args_default_streamer(self) -> None:
+        """Ensure default streamer template builds correctly with env LC_ALL=C vlc."""
+        url = "https://twit.tv/stream.mp4"
+        args = build_stream_args("env LC_ALL=C vlc %f", url)
+        self.assertEqual(args, ["env", "LC_ALL=C", "vlc", url])
+
+        # Test empty/None fallback
+        args_none = build_stream_args("", url)
+        self.assertEqual(args_none, ["env", "LC_ALL=C", "vlc", url])
+
     def test_build_stream_args_prevents_shell_injection(self) -> None:
         """Ensure shell metacharacters remain a single literal argument."""
         malicious_url = "https://twit.tv/ep.mp4;touch_pwned;.mp4"
@@ -141,6 +151,32 @@ class TestTwitTUISecurity(unittest.TestCase):
         root = safe_xml_fromstring(rss_xml)
         self.assertEqual(root.find('.//channel/title').text, 'Test Show')
         self.assertEqual(root.find('.//item/title').text, 'Episode 1')
+
+    def test_on_streamer_change_persists_setting(self) -> None:
+        """Verify on_streamer_change updates os.environ and calls save_env_setting."""
+        form = TwitTUIForm(formal_name="TwitTUI", app_id="org.twit.test")
+        import toga
+        form.streamer_input = toga.TextInput(value="env LC_ALL=C vlc %f")
+        saved = {}
+        form.save_env_setting = lambda k, v: saved.update({k: v})
+
+        form.on_streamer_change()
+        self.assertEqual(os.environ.get('twitclubstreamer'), "env LC_ALL=C vlc %f")
+        self.assertEqual(saved.get('twitclubstreamer'), "env LC_ALL=C vlc %f")
+
+        form.streamer_input.value = "mpv %f"
+        form.on_streamer_change()
+        self.assertEqual(os.environ.get('twitclubstreamer'), "mpv %f")
+        self.assertEqual(saved.get('twitclubstreamer'), "mpv %f")
+
+    def test_initial_streamer_migrates_legacy_defaults(self) -> None:
+        """Verify form initializes legacy defaults (e.g. vlc {url}, vlc %f) to env LC_ALL=C vlc %f."""
+        for legacy_val in ["vlc {url}", "vlc %f", "vlc", ""]:
+            os.environ['twitclubstreamer'] = legacy_val
+            form = TwitTUIForm(formal_name="TwitTUI", app_id="org.twit.test")
+            setting = form.get_initial_streamer_setting()
+            self.assertEqual(setting, "env LC_ALL=C vlc %f")
+            self.assertEqual(os.environ.get('twitclubstreamer'), "env LC_ALL=C vlc %f")
 
     def test_get_full_club_twit_url_enforces_https(self) -> None:
         """Verify Memberful URLs upgrade http to https."""

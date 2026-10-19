@@ -58,7 +58,7 @@ twitclubblocksize (TWITCLUBBLOCKSIZE)
 
 twitclubstreamer (TWITCLUBSTREAMER)
     Horizontal row with label "Streamer:" and a text input for the command line media player.
-    The stream URL is represented by %f (default: "vlc %f").
+    The stream URL is represented by %f (default: "env LC_ALL=C vlc %f").
 
 At the bottom of the form is a progress bar (toga.ProgressBar):
 - Displays real-time download progress for the batch when downloading episodes.

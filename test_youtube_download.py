@@ -16,6 +16,7 @@ class TestYouTubeDownload(unittest.TestCase):
 
     def setUp(self) -> None:
         self.form = TwitTUIForm(formal_name="TwitTUI", app_id="org.twit.test")
+        self.form.is_audio_only = lambda: False
 
     def test_is_youtube_url(self) -> None:
         """Verify accurate detection of various YouTube URL formats."""

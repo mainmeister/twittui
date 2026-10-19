@@ -22,15 +22,32 @@ import html
 import requests
 import hashlib
 import http.server
-from dotenv import load_dotenv, set_key
+from dotenv import find_dotenv, load_dotenv, set_key
 
 try:
     import defusedxml.ElementTree as DefusedET
 except ImportError:
     DefusedET = None
 
+
+def load_twittui_dotenv() -> None:
+    """Ensure environment variables are loaded from .env with override=True so file values take precedence."""
+    try:
+        dotenv_path = find_dotenv(usecwd=True)
+        if not dotenv_path:
+            candidate = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+            if os.path.exists(candidate):
+                dotenv_path = candidate
+        if dotenv_path:
+            load_dotenv(dotenv_path, override=True)
+        else:
+            load_dotenv(override=True)
+    except Exception:
+        load_dotenv(override=True)
+
+
 # Ensure environment variables are loaded
-load_dotenv()
+load_twittui_dotenv()
 
 # Apply Textual backend widget extensions if available
 try:
@@ -180,7 +197,7 @@ def build_stream_args(
     """Build a safe argument list for subprocess.Popen without shell=True.
 
     Args:
-        streamer_template: Command template (e.g., 'vlc %f').
+        streamer_template: Command template (e.g., 'env LC_ALL=C vlc %f').
         media_url: Validated stream URL.
 
     Returns:
@@ -199,14 +216,14 @@ def build_stream_args(
     if any(ch.isspace() for ch in clean_url):
         raise ValueError("Media URL must not contain whitespace.")
 
-    template: str = (streamer_template or "vlc %f").strip()
+    template: str = (streamer_template or "env LC_ALL=C vlc %f").strip()
     try:
         tokens: list[str] = shlex.split(template)
     except Exception:
         tokens = [template]
 
     if not tokens:
-        tokens = ["vlc", "%f"]
+        tokens = ["env", "LC_ALL=C", "vlc", "%f"]
 
     placeholders: tuple[str, ...] = (
         "{url}",
@@ -319,6 +336,21 @@ class TwitTUIForm(toga.App):
         self._is_downloading = False
         self._cancel_download = False
         super().__init__(formal_name=formal_name, app_id=app_id, **kwargs)
+
+    def get_initial_streamer_setting(self) -> str:
+        """Resolve and migrate streamer command template, persisting if migrating legacy defaults."""
+        raw = os.getenv('twitclubstreamer')
+        if raw is None or not raw.strip():
+            raw = os.getenv('TWITCLUBSTREAMER')
+        if raw is None or not raw.strip():
+            raw = os.getenv('TWIT_CLUB_STREAMER')
+        val = (raw or '').strip()
+        if not val or val in ('vlc {url}', 'vlc %f', 'vlc', '{url}', '%f'):
+            val = 'env LC_ALL=C vlc %f'
+            self.save_env_setting('twitclubstreamer', val)
+        os.environ['twitclubstreamer'] = val
+        os.environ['TWITCLUBSTREAMER'] = val
+        return val
 
     def is_audio_only(self) -> bool:
         """Return True if Audio Only checkbox is enabled."""
@@ -999,7 +1031,7 @@ class TwitTUIForm(toga.App):
     def fetch_shows(self):
         """Fetch shows from the TWIT API and return a list of show names."""
         try:
-            load_dotenv()
+            load_twittui_dotenv()
             app_id = self.get_api_app_id()
             app_key = self.get_api_app_key()
 
@@ -1131,7 +1163,7 @@ class TwitTUIForm(toga.App):
         app_id_box = toga.Box(style=Pack(direction=ROW, margin=5))
         app_id_label = toga.Label('API Application ID:', style=Pack(margin=(0, 5)))
         initial_app_id = os.getenv('TWITAPI_APPLICATIONID') or os.getenv('twitapi_applicationid') or ''
-        self.app_id_input = toga.TextInput(value=initial_app_id, style=Pack(flex=1))
+        self.app_id_input = toga.TextInput(value=initial_app_id, on_change=self.on_app_id_change, style=Pack(flex=1))
         app_id_box.add(app_id_label)
         app_id_box.add(self.app_id_input)
 
@@ -1139,7 +1171,7 @@ class TwitTUIForm(toga.App):
         app_key_box = toga.Box(style=Pack(direction=ROW, margin=5))
         app_key_label = toga.Label('API Application Key:', style=Pack(margin=(0, 5)))
         initial_app_key = os.getenv('TWITAPI_APPLICATIONKEYS') or os.getenv('twitapi_applicationkeys') or ''
-        self.app_key_input = toga.PasswordInput(value=initial_app_key, style=Pack(flex=1))
+        self.app_key_input = toga.PasswordInput(value=initial_app_key, on_change=self.on_app_key_change, style=Pack(flex=1))
         test_api_button = toga.Button('Test API', on_press=self.on_test_api_press, style=Pack(margin=5))
         app_key_box.add(app_key_label)
         app_key_box.add(self.app_key_input)
@@ -1157,7 +1189,7 @@ class TwitTUIForm(toga.App):
             initial_url_key = twit_club_url.split('?auth=', 1)[1]
         else:
             initial_url_key = twit_club_url
-        self.url_input = toga.PasswordInput(value=initial_url_key, style=Pack(flex=1))
+        self.url_input = toga.PasswordInput(value=initial_url_key, on_change=self.on_url_change, style=Pack(flex=1))
         show_url_button = toga.Button('Show', on_press=self.on_show_club_url_press, style=Pack(margin=5))
         url_box.add(url_label)
         url_box.add(url_prefix)
@@ -1168,7 +1200,7 @@ class TwitTUIForm(toga.App):
         dest_box = toga.Box(style=Pack(direction=ROW, margin=5))
         dest_label = toga.Label('Download Destination:', style=Pack(margin=(0, 5)))
         initial_dest = os.getenv('twitclubdestination') or os.getenv('TWITCLUBDESTINATION') or os.getenv('TWIT_CLUB_DESTINATION') or ''
-        self.dest_input = toga.TextInput(value=initial_dest, style=Pack(flex=1))
+        self.dest_input = toga.TextInput(value=initial_dest, on_change=self.on_dest_change, style=Pack(flex=1))
         dest_button = toga.Button('Browse', on_press=self.on_browse_press, style=Pack(margin=5))
         dest_open_button = toga.Button('Open', on_press=self.on_open_destination_press, style=Pack(margin=5))
         initial_show_folders = self.is_show_folders_enabled()
@@ -1183,15 +1215,15 @@ class TwitTUIForm(toga.App):
         block_box = toga.Box(style=Pack(direction=ROW, margin=5))
         block_label = toga.Label('Block Size:', style=Pack(margin=(0, 5)))
         initial_block = os.getenv('twitclubblocksize') or os.getenv('TWITCLUBBLOCKSIZE') or '8192'
-        self.block_input = toga.TextInput(value=initial_block, style=Pack(flex=1))
+        self.block_input = toga.TextInput(value=initial_block, on_change=self.on_block_change, style=Pack(flex=1))
         block_box.add(block_label)
         block_box.add(self.block_input)
 
         # Streamer setting
         streamer_box = toga.Box(style=Pack(direction=ROW, margin=5))
         streamer_label = toga.Label('Streamer:', style=Pack(margin=(0, 5)))
-        initial_streamer = os.getenv('twitclubstreamer') or os.getenv('TWITCLUBSTREAMER') or os.getenv('TWIT_CLUB_STREAMER') or 'vlc %f'
-        self.streamer_input = toga.TextInput(value=initial_streamer, style=Pack(flex=1))
+        initial_streamer = self.get_initial_streamer_setting()
+        self.streamer_input = toga.TextInput(value=initial_streamer, on_change=self.on_streamer_change, style=Pack(flex=1))
         streamer_box.add(streamer_label)
         streamer_box.add(self.streamer_input)
 
@@ -2002,6 +2034,62 @@ class TwitTUIForm(toga.App):
         val_str = '1' if is_enabled else '0'
         os.environ['TWITCLUBSHOWFOLDERS'] = val_str
         self.save_env_setting('TWITCLUBSHOWFOLDERS', val_str)
+
+    def on_streamer_change(self, widget=None) -> None:
+        """Handle streamer template change, update environment, and persist to .env."""
+        val = self.streamer_input.value if hasattr(self, 'streamer_input') and self.streamer_input else ''
+        val_str = (val or '').strip()
+        if not val_str:
+            val_str = 'env LC_ALL=C vlc %f'
+        os.environ['twitclubstreamer'] = val_str
+        os.environ['TWITCLUBSTREAMER'] = val_str
+        self.save_env_setting('twitclubstreamer', val_str)
+
+    def on_dest_change(self, widget=None) -> None:
+        """Handle download destination change, update environment, and persist to .env."""
+        val = self.dest_input.value if hasattr(self, 'dest_input') and self.dest_input else ''
+        val_str = (val or '').strip()
+        os.environ['twitclubdestination'] = val_str
+        os.environ['TWITCLUBDESTINATION'] = val_str
+        self.save_env_setting('twitclubdestination', val_str)
+
+    def on_block_change(self, widget=None) -> None:
+        """Handle block size change, update environment, and persist to .env."""
+        val = self.block_input.value if hasattr(self, 'block_input') and self.block_input else ''
+        val_str = (val or '').strip()
+        if val_str:
+            os.environ['twitclubblocksize'] = val_str
+            os.environ['TWITCLUBBLOCKSIZE'] = val_str
+            self.save_env_setting('twitclubblocksize', val_str)
+
+    def on_app_id_change(self, widget=None) -> None:
+        """Handle TWiT API App ID change, update environment, and persist to .env."""
+        val = self.app_id_input.value if hasattr(self, 'app_id_input') and self.app_id_input else ''
+        val_str = (val or '').strip()
+        os.environ['TWITAPI_APPLICATIONID'] = val_str
+        self.save_env_setting('TWITAPI_APPLICATIONID', val_str)
+
+    def on_app_key_change(self, widget=None) -> None:
+        """Handle TWiT API App Key change, update environment, and persist to .env."""
+        val = self.app_key_input.value if hasattr(self, 'app_key_input') and self.app_key_input else ''
+        val_str = (val or '').strip()
+        os.environ['TWITAPI_APPLICATIONKEYS'] = val_str
+        self.save_env_setting('TWITAPI_APPLICATIONKEYS', val_str)
+
+    def on_url_change(self, widget=None) -> None:
+        """Handle TWiT Club URL change, update environment, and persist to .env."""
+        val = self.url_input.value if hasattr(self, 'url_input') and self.url_input else ''
+        val_str = (val or '').strip()
+        auth_prefix = 'https://twit.memberfulcontent.com/rss/9041?auth='
+        if not val_str:
+            full_url = ''
+        elif val_str.startswith('http://') or val_str.startswith('https://'):
+            full_url = val_str
+        else:
+            full_url = f"{auth_prefix}{val_str}"
+        os.environ['twitcluburl'] = full_url
+        os.environ['TWITCLUBURL'] = full_url
+        self.save_env_setting('twitcluburl', full_url)
 
     def get_show_folder_name(self, target) -> str:
         """Determine a clean, filesystem-safe show folder name for the target episode."""
@@ -2846,7 +2934,7 @@ class TwitTUIForm(toga.App):
             args = build_stream_args(streamer_template, url)
             return shlex.join(args)
         except Exception:
-            template = (streamer_template or 'vlc %f').strip()
+            template = (streamer_template or 'env LC_ALL=C vlc %f').strip()
             placeholders = ['{url}', '{URL}', '{stream_url}', '{media_url}', '{file}', '%f', '%s', '%u', '{}']
             for ph in placeholders:
                 if ph in template:
@@ -3383,7 +3471,7 @@ class TwitTUIForm(toga.App):
                 print("No media URL found for the selected episode")
                 return
 
-            streamer_template = self.streamer_input.value if self.streamer_input and self.streamer_input.value else 'vlc %f'
+            streamer_template = self.streamer_input.value if self.streamer_input and self.streamer_input.value else 'env LC_ALL=C vlc %f'
             sanitized_log_url = re.sub(r'([?&]auth=)[^&]+', r'\1[REDACTED]', media_url)
             print(f"Launching stream player for: {sanitized_log_url}")
             launch_stream_safe(streamer_template, media_url)
@@ -3498,7 +3586,7 @@ class TwitTUIForm(toga.App):
     def fetch_episode_detail(self, episode_id):
         """Fetch full details for a single episode ID."""
         try:
-            load_dotenv()
+            load_twittui_dotenv()
             app_id = self.get_api_app_id()
             app_key = self.get_api_app_key()
             if not app_id or not app_key:
@@ -3532,7 +3620,7 @@ class TwitTUIForm(toga.App):
                     selected_show = name
                     break
         try:
-            load_dotenv()
+            load_twittui_dotenv()
             app_id = self.get_api_app_id()
             app_key = self.get_api_app_key()
 
@@ -3789,7 +3877,7 @@ class TwitTUIForm(toga.App):
 
         # Tier 1: TWiT REST API Search Endpoint
         try:
-            load_dotenv()
+            load_twittui_dotenv()
             app_id = self.get_api_app_id()
             app_key = self.get_api_app_key()
 
@@ -4147,7 +4235,7 @@ class TwitTUIForm(toga.App):
         ep_id = ep_data.get('id') or ep_data.get('guid') or ep_data.get('node_id') or ''
         if ep_id and str(ep_id).isdigit():
             try:
-                load_dotenv()
+                load_twittui_dotenv()
                 app_id = self.get_api_app_id()
                 app_key = self.get_api_app_key()
                 if app_id and app_key:
@@ -4834,6 +4922,6 @@ def main():
 if __name__ == '__main__':
     from main import resolve_toga_backend
     resolve_toga_backend()
-    load_dotenv()
+    load_twittui_dotenv()
     app = main()
     app.main_loop()
