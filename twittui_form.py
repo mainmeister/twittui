@@ -616,7 +616,29 @@ class TwitTUIForm(toga.App):
         if not url or not isinstance(url, str):
             return False
         clean = url.strip().lower()
-        return 'youtube.com/' in clean or 'youtu.be/' in clean or 'youtube.com/watch' in clean
+        return (
+            'youtube.com' in clean
+            or 'youtu.be' in clean
+            or 'youtube-nocookie.com' in clean
+            or 'yt.be' in clean
+            or clean.startswith('youtube:')
+        )
+
+    @staticmethod
+    def is_valid_media_file(file_path: str) -> bool:
+        """Check if a file exists and contains valid binary media rather than an HTML page or text error document."""
+        if not file_path or not os.path.exists(file_path):
+            return False
+        try:
+            if os.path.getsize(file_path) < 512:
+                return False
+            with open(file_path, 'rb') as f:
+                header = f.read(512).strip().lower()
+                if header.startswith((b'<!doctype', b'<html', b'<?xml', b'<head', b'<body', b'<div', b'<table', b'<![cdata[')):
+                    return False
+            return True
+        except Exception:
+            return False
 
     def update_progress(self, current: float, total: float | None = None) -> None:
         """Thread-safe update of the progress bar value and maximum."""
@@ -2037,6 +2059,9 @@ class TwitTUIForm(toga.App):
         if not dest_path or not os.path.exists(dest_path):
             return False
 
+        if not self.is_valid_media_file(dest_path):
+            return False
+
         try:
             local_size = os.path.getsize(dest_path)
         except Exception:
@@ -2046,7 +2071,7 @@ class TwitTUIForm(toga.App):
             return False
 
         if self.is_youtube_url(url):
-            # For YouTube streams, consider existing if file is substantial (> 1MB)
+            # For YouTube streams, consider existing if file is substantial (> 1MB) and valid binary
             return local_size > 1024 * 1024
 
         if expected_size is not None and expected_size > 0 and local_size != expected_size:
@@ -2347,6 +2372,27 @@ class TwitTUIForm(toga.App):
             headers = {'User-Agent': 'Mozilla/5.0 (compatible; TwitTUI/1.0)'}
             with requests.get(url, stream=True, headers=headers, timeout=30) as r:
                 r.raise_for_status()
+
+                # Check if final redirected URL is a YouTube stream
+                if self.is_youtube_url(r.url) or self.is_youtube_url(url):
+                    return self.download_youtube_video(r.url if self.is_youtube_url(r.url) else url, dest_path, progress_callback=progress_callback)
+
+                content_type = r.headers.get('content-type', '').lower()
+                if content_type.startswith('text/html') or 'text/html' in content_type:
+                    # Server returned HTML page instead of binary media
+                    html_content = r.text
+                    yt_matches = re.findall(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[a-zA-Z0-9_-]+', html_content)
+                    if yt_matches:
+                        return self.download_youtube_video(yt_matches[0], dest_path, progress_callback=progress_callback)
+
+                    media_matches = re.findall(r'https?://[^\s\"\'<>]+\.(?:mp4|mp3|m4a|webm|ogg|m4v|aac)', html_content)
+                    for cand in media_matches:
+                        if self.is_valid_media_url(cand) and (not self.is_audio_only() or self.is_audio_url(cand)):
+                            return self.download_episode_file(cand, dest_path, block_size, progress_callback=progress_callback, expected_size=expected_size)
+
+                    print(f"Error: URL '{url}' returned an HTML document instead of a playable media stream.")
+                    return False
+
                 total_bytes = 0
                 content_length = r.headers.get('content-length')
                 if content_length and content_length.isdigit():
@@ -2406,6 +2452,17 @@ class TwitTUIForm(toga.App):
                                     self.update_progress(min(downloaded_bytes / (1024 * 1024), 100), 100)
 
             if getattr(self, '_cancel_download', False):
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+                if progress_callback is None:
+                    self.reset_progress()
+                return False
+
+            if not self.is_valid_media_file(temp_path):
+                print(f"Error: Downloaded content from '{url}' contains text/HTML rather than valid media.")
                 if os.path.exists(temp_path):
                     try:
                         os.remove(temp_path)
@@ -2977,7 +3034,7 @@ class TwitTUIForm(toga.App):
             if not url or not isinstance(url, str):
                 return
             cand_url = url.strip()
-            if not self.is_valid_media_url(cand_url):
+            if not (self.is_valid_media_url(cand_url) or self.is_youtube_url(cand_url)):
                 return
             if cand_url in seen_urls:
                 return
@@ -3016,12 +3073,18 @@ class TwitTUIForm(toga.App):
         for fid, name, ftype in format_specs:
             val = ep_dict.get(fid)
             if isinstance(val, dict):
-                u = next((val[k] for k in ['mediaUrl', 'media_url', 'downloadUrl', 'streamUrl', 'url', 'href', 'guid'] if val.get(k)), None)
+                u = next((val[k] for k in ['mediaUrl', 'media_url', 'downloadUrl', 'streamUrl', 'url', 'href', 'guid', 'videoId', 'video_id', 'id'] if val.get(k)), None)
                 s = next((val[k] for k in ['fileSize', 'file_size', 'size', 'bytes', 'length'] if val.get(k)), None)
                 if u:
-                    _add_cand(fid, name, ftype, str(u), s)
-            elif isinstance(val, str) and self.is_valid_media_url(val):
-                _add_cand(fid, name, ftype, val)
+                    u_str = str(u).strip()
+                    if not (u_str.startswith('http://') or u_str.startswith('https://')) and (fid == 'video_youtube' or 'youtube' in fid):
+                        u_str = f"https://www.youtube.com/watch?v={u_str}"
+                    _add_cand(fid, name, ftype, u_str, s)
+            elif isinstance(val, str) and val.strip():
+                val_str = val.strip()
+                if not (val_str.startswith('http://') or val_str.startswith('https://')) and (fid == 'video_youtube' or 'youtube' in fid):
+                    val_str = f"https://www.youtube.com/watch?v={val_str}"
+                _add_cand(fid, name, ftype, val_str)
 
         # 2. Check files list/dict
         files = ep_dict.get('files')
