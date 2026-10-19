@@ -49,7 +49,8 @@ twitcluburl (TWITCLUBURL)
 
 twitclubdestination (TWITCLUBDESTINATION)
     Horizontal row with label "Download Destination:", a text input for the target download folder,
-    a "Browse" button opening a native folder selection dialog, and an "Open" button opening the destination folder in the default system file manager.
+    a "Browse" button opening a native folder selection dialog, an "Open" button opening the destination folder in the default system file manager,
+    and a "Show Folders" checkbox (toga.Switch) that when selected organizes downloads into subfolders named after each show under the destination folder (persisted via TWITCLUBSHOWFOLDERS).
 
 twitclubblocksize (TWITCLUBBLOCKSIZE)
     Horizontal row with label "Block Size:" and a text input for the download stream chunk read size

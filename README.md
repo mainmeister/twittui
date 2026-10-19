@@ -152,7 +152,7 @@ twitclubstreamer=vlc %f
 | API Application ID:   [ 3edec74c                 ]                              |
 | API Application Key:  [ 36a22e422f0f8773e03b8... ] [ Test API ]                |
 | TWIT Club URL: https://twit.memberfulcontent.com/rss/9041?auth= [ KEY ] [ Show ]|
-| Download Destination: [/home/user/Podcasts       ] [ Browse ] [ Open ]          |
+| Download Destination: [/home/user/Podcasts       ] [ Browse ] [ Open ] [X Show Folders] |
 | Block Size:           [8192                      ]                              |
 | Streamer:             [vlc %f                    ]                              |
 +---------------------------------------------------------------------------------+
@@ -188,9 +188,10 @@ twitclubstreamer=vlc %f
 #### Batch Downloading Episodes
 1. Highlight one or more episodes in the table (hold `Shift` or `Ctrl` for multiple selections).
 2. Ensure **Download Destination** is set to your preferred folder (use **Browse** to select).
-3. Click **Download**. Downloads execute concurrently in the background without freezing the UI.
-4. Files are saved directly to your destination path with normalized, clean filenames (e.g., `This Week in Tech 1001 AI in the Fast Lane.mp4`).
-5. When the batch completes, a modal dialog appears displaying the target download folder at the top and the list of downloaded filenames (one per line) with a **Close** button.
+3. Optionally toggle **Show Folders** if you want downloaded episodes organized into dedicated subfolders named after each show (e.g., `<Download Destination>/Security Now/Security Now 1000.mp4`).
+4. Click **Download**. Downloads execute concurrently in the background without freezing the UI.
+5. Files are saved directly to your destination path (or show subfolder) with normalized, clean filenames (e.g., `This Week in Tech 1001 AI in the Fast Lane.mp4`).
+6. When the batch completes, a modal dialog appears displaying the target download folder at the top and the list of downloaded filenames (one per line) with a **Close** button.
 
 #### Club TWiT Member Features
 - Paste your unique Memberful key into the **TWIT Club URL** box.
@@ -321,7 +322,8 @@ toga.MainWindow (title='TWIT.tv TUI')
         │   ├── toga.Label ('Download Destination:')
         │   ├── toga.TextInput (value=initial_dest) [dest_input]
         │   ├── toga.Button ('Browse', on_press=on_browse_press)
-        │   └── toga.Button ('Open', on_press=on_open_destination_press)
+        │   ├── toga.Button ('Open', on_press=on_open_destination_press)
+        │   └── toga.Switch ('Show Folders', on_change=on_show_folders_change) [show_folders_checkbox]
         ├── toga.Box (direction=ROW) [block_box]
         │   ├── toga.Label ('Block Size:')
         │   └── toga.TextInput (value='8192') [block_input]
@@ -518,6 +520,7 @@ The `determine_download_filename(target, media_url)` method sanitizes filenames 
 | `twitclubblocksize` / `TWITCLUBBLOCKSIZE` | Integer | `8192` (8 KB) | Buffer chunk size in bytes for network download streaming. |
 | `twitclubstreamer` / `TWITCLUBSTREAMER` | String | `vlc %f` | Command template string used to spawn the external streaming player. |
 | `TWITAUDIOONLY` / `twitaudioonly` | Integer / Boolean | `0` (False) | Flag (`1`/`0`) persisting the Audio Only streaming/download preference across sessions. |
+| `TWITCLUBSHOWFOLDERS` / `twitclubshowfolders` | Integer / Boolean | `0` (False) | Flag (`1`/`0`) persisting the Show Folders organization preference across sessions. |
 
 ---
 

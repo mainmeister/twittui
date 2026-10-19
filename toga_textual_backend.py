@@ -716,6 +716,61 @@ class TextualPasswordInput(Widget):
         self.interface.intrinsic.height = 3
 
 
+class TextualSwitch(Widget):
+    """Textual implementation for Toga Switch / Checkbox widget."""
+
+    def create(self) -> None:
+        self._initial_value = False
+        try:
+            from toga_textual.widgets.switch import TogaSwitch
+            self.native_switch = TogaSwitch(self)
+        except Exception:
+            from textual.widgets import Switch as BaseSwitch
+            self.native_switch = BaseSwitch()
+
+        self.native_label = Label()
+        self.native = Horizontal(self.native_switch, self.native_label)
+
+    def get_text(self) -> str:
+        return str(getattr(self.native_label, 'renderable', ''))
+
+    def set_text(self, text: str) -> None:
+        if hasattr(self.native_label, 'update'):
+            self.native_label.update(text or '')
+        try:
+            self.refresh()
+        except Exception:
+            pass
+
+    def get_value(self) -> bool:
+        return bool(getattr(self.native_switch, 'value', self._initial_value))
+
+    def set_value(self, value: bool) -> None:
+        bool_val = bool(value)
+        self._initial_value = bool_val
+        try:
+            self.native_switch.value = bool_val
+        except (NoActiveAppError, Exception):
+            pass
+
+    def set_enabled(self, value: bool) -> None:
+        super().set_enabled(value)
+        if hasattr(self.native_switch, 'disabled'):
+            self.native_switch.disabled = not bool(value)
+
+    def focus(self) -> None:
+        try:
+            if hasattr(self.native_switch, 'app') and hasattr(self.native_switch.app, 'set_focus'):
+                self.native_switch.app.set_focus(self.native_switch)
+        except Exception:
+            pass
+
+    def rehint(self) -> None:
+        text_len = len(self.get_text())
+        self.interface.intrinsic.width = at_least(text_len + 8)
+        self.interface.intrinsic.height = 3
+
+
 # Registry of widget implementations for toga_textual
 TEXTUAL_WIDGET_IMPLEMENTATIONS: dict[str, type] = {
     'Selection': TextualSelection,
@@ -726,6 +781,7 @@ TEXTUAL_WIDGET_IMPLEMENTATIONS: dict[str, type] = {
     'ActivityIndicator': TextualActivityIndicator,
     'MultilineTextInput': TextualMultilineTextInput,
     'PasswordInput': TextualPasswordInput,
+    'Switch': TextualSwitch,
 }
 
 

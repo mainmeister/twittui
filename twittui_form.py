@@ -1171,10 +1171,13 @@ class TwitTUIForm(toga.App):
         self.dest_input = toga.TextInput(value=initial_dest, style=Pack(flex=1))
         dest_button = toga.Button('Browse', on_press=self.on_browse_press, style=Pack(margin=5))
         dest_open_button = toga.Button('Open', on_press=self.on_open_destination_press, style=Pack(margin=5))
+        initial_show_folders = self.is_show_folders_enabled()
+        self.show_folders_checkbox = toga.Switch('Show Folders', value=initial_show_folders, on_change=self.on_show_folders_change, style=Pack(margin=5))
         dest_box.add(dest_label)
         dest_box.add(self.dest_input)
         dest_box.add(dest_button)
         dest_box.add(dest_open_button)
+        dest_box.add(self.show_folders_checkbox)
 
         # Block size setting
         block_box = toga.Box(style=Pack(direction=ROW, margin=5))
@@ -1983,6 +1986,77 @@ class TwitTUIForm(toga.App):
         """Handler for Open button press next to Download Destination."""
         threading.Thread(target=self.open_destination_folder, daemon=True).start()
 
+    def is_show_folders_enabled(self) -> bool:
+        """Check if Show Folders organization is enabled."""
+        if hasattr(self, 'show_folders_checkbox') and self.show_folders_checkbox is not None:
+            try:
+                return bool(self.show_folders_checkbox.value)
+            except Exception:
+                pass
+        env_val = os.getenv('twitclubshowfolders') or os.getenv('TWITCLUBSHOWFOLDERS') or os.getenv('TWIT_CLUB_SHOW_FOLDERS') or ''
+        return env_val.strip().lower() in ('1', 'true', 'yes', 'on')
+
+    def on_show_folders_change(self, widget=None) -> None:
+        """Handle toggling the Show Folders checkbox."""
+        is_enabled = self.is_show_folders_enabled()
+        val_str = '1' if is_enabled else '0'
+        os.environ['TWITCLUBSHOWFOLDERS'] = val_str
+        self.save_env_setting('TWITCLUBSHOWFOLDERS', val_str)
+
+    def get_show_folder_name(self, target) -> str:
+        """Determine a clean, filesystem-safe show folder name for the target episode."""
+        show = ''
+        if hasattr(target, 'episode_data') and isinstance(target.episode_data, dict):
+            show = target.episode_data.get('show_name') or target.episode_data.get('show') or ''
+        elif isinstance(target, dict):
+            if 'episode_data' in target and isinstance(target['episode_data'], dict):
+                show = target['episode_data'].get('show_name') or target['episode_data'].get('show') or ''
+            else:
+                show = target.get('show_name') or target.get('show') or ''
+
+        if not show:
+            show = getattr(target, 'show', '') or ''
+
+        if not show and hasattr(self, 'show_combo') and self.show_combo and self.show_combo.value:
+            show = self.show_combo.value or ''
+
+        if isinstance(show, dict):
+            show = show.get('label') or show.get('title') or ''
+
+        show_str = str(show or '').strip()
+
+        # If show is generic like "All TWiT.tv Shows" or "All Shows", try extracting from target title
+        if not show_str or show_str.lower() in ('all twit.tv shows', 'all shows', 'all', 'twit'):
+            target_title = getattr(target, 'title', '') or (target.get('title', '') if isinstance(target, dict) else '')
+            if hasattr(target, 'episode_data') and isinstance(target.episode_data, dict):
+                target_title = target.episode_data.get('title') or target_title
+            target_title_str = str(target_title or '').strip()
+            m = re.match(r'^([A-Za-z0-9\s\+\.\-\'\&]+?)\s+\d{1,5}\b', target_title_str)
+            if m:
+                show_str = m.group(1).strip()
+            elif target_title_str:
+                show_str = target_title_str.split(':')[0].strip() if ':' in target_title_str else target_title_str
+            else:
+                show_str = "TWiT"
+
+        # Normalize TWiT+ prefix (e.g. TWiT+ Club Shows -> TWiT Club Shows)
+        show_str = re.sub(r'^TWiT\+\s*', 'TWiT ', show_str)
+
+        # Sanitize folder name for filesystem safety
+        clean_show = re.sub(r'[/\\:*?"<>|]', '', show_str)
+        clean_show = re.sub(r'\s+', ' ', clean_show).strip()
+
+        return clean_show or "TWiT"
+
+    def get_target_destination_folder(self, target) -> str:
+        """Get the destination directory for downloading the specified episode, accounting for Show Folders."""
+        base_dest = self.get_destination_folder()
+        if self.is_show_folders_enabled():
+            show_folder = self.get_show_folder_name(target)
+            if show_folder:
+                return os.path.join(base_dest, show_folder)
+        return base_dest
+
     def get_block_size(self) -> int:
         """Get the configured block size in bytes for download chunking."""
         block_str = self.block_input.value if hasattr(self, 'block_input') and self.block_input and self.block_input.value else ''
@@ -2614,16 +2688,16 @@ class TwitTUIForm(toga.App):
         self._is_downloading = True
         self._cancel_download = False
         self.reset_progress()
-        dest_dir = self.get_destination_folder()
+        base_dest_dir = self.get_destination_folder()
         block_size = self.get_block_size()
         downloaded_files = []
         total_targets = len(targets) if targets else 1
 
-        print(f"Starting batch download for {len(targets)} episode(s) to '{dest_dir}' (block size: {block_size})...")
+        print(f"Starting batch download for {len(targets)} episode(s) to '{base_dest_dir}' (block size: {block_size})...")
         try:
-            os.makedirs(dest_dir, exist_ok=True)
+            os.makedirs(base_dest_dir, exist_ok=True)
         except Exception as e:
-            print(f"Error creating destination directory '{dest_dir}': {e}")
+            print(f"Error creating destination directory '{base_dest_dir}': {e}")
             self._is_downloading = False
             self.reset_progress()
             return
@@ -2651,8 +2725,15 @@ class TwitTUIForm(toga.App):
                     self.update_progress(batch_pct, 100.0)
                     continue
 
+                item_dest_dir = self.get_target_destination_folder(target)
+                try:
+                    os.makedirs(item_dest_dir, exist_ok=True)
+                except Exception as e:
+                    print(f"Error creating destination directory '{item_dest_dir}': {e}")
+                    item_dest_dir = base_dest_dir
+
                 filename = self.determine_download_filename(target, media_url)
-                dest_filepath = os.path.join(dest_dir, filename)
+                dest_filepath = os.path.join(item_dest_dir, filename)
 
                 # Attempt to extract known expected enclosure size
                 expected_size = None
@@ -2682,7 +2763,12 @@ class TwitTUIForm(toga.App):
 
                 success = self.download_episode_file(media_url, dest_filepath, block_size, progress_callback=_item_progress, expected_size=expected_size)
                 if success:
-                    downloaded_files.append(filename)
+                    if self.is_show_folders_enabled():
+                        show_folder = self.get_show_folder_name(target)
+                        rel_path = os.path.join(show_folder, filename) if show_folder else filename
+                        downloaded_files.append(rel_path)
+                    else:
+                        downloaded_files.append(filename)
 
                 batch_pct = ((idx_0 + 1) / total_targets) * 100.0
                 self.update_progress(batch_pct, 100.0)
@@ -2691,7 +2777,7 @@ class TwitTUIForm(toga.App):
             if getattr(self, '_cancel_download', False):
                 self.reset_progress()
             if downloaded_files:
-                self.show_download_complete_dialog(dest_dir, downloaded_files)
+                self.show_download_complete_dialog(base_dest_dir, downloaded_files)
 
     async def on_download_press(self, widget=None) -> None:
         """Process selected episodes for batch download with resolution prompt if multiple are available."""
