@@ -49,7 +49,7 @@ twitcluburl (TWITCLUBURL)
 
 twitclubdestination (TWITCLUBDESTINATION)
     Horizontal row with label "Download Destination:", a text input for the target download folder,
-    and a "Browse" button opening a native folder selection dialog.
+    a "Browse" button opening a native folder selection dialog, and an "Open" button opening the destination folder in the default system file manager.
 
 twitclubblocksize (TWITCLUBBLOCKSIZE)
     Horizontal row with label "Block Size:" and a text input for the download stream chunk read size

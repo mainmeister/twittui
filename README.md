@@ -152,7 +152,7 @@ twitclubstreamer=vlc %f
 | API Application ID:   [ 3edec74c                 ]                              |
 | API Application Key:  [ 36a22e422f0f8773e03b8... ] [ Test API ]                |
 | TWIT Club URL: https://twit.memberfulcontent.com/rss/9041?auth= [ KEY ] [ Show ]|
-| Download Destination: [/home/user/Podcasts       ] [ Browse ]                   |
+| Download Destination: [/home/user/Podcasts       ] [ Browse ] [ Open ]          |
 | Block Size:           [8192                      ]                              |
 | Streamer:             [vlc %f                    ]                              |
 +---------------------------------------------------------------------------------+
@@ -320,7 +320,8 @@ toga.MainWindow (title='TWIT.tv TUI')
         ├── toga.Box (direction=ROW) [dest_box]
         │   ├── toga.Label ('Download Destination:')
         │   ├── toga.TextInput (value=initial_dest) [dest_input]
-        │   └── toga.Button ('Browse', on_press=on_browse_press)
+        │   ├── toga.Button ('Browse', on_press=on_browse_press)
+        │   └── toga.Button ('Open', on_press=on_open_destination_press)
         ├── toga.Box (direction=ROW) [block_box]
         │   ├── toga.Label ('Block Size:')
         │   └── toga.TextInput (value='8192') [block_input]
@@ -418,6 +419,11 @@ Streaming commands are formatted and safely tokenized via `build_stream_args(str
 args = build_stream_args(streamer_template, media_url)
 subprocess.Popen(args, shell=False)  # Non-blocking, secure detached execution
 ```
+
+#### Dynamic Multi-Resolution Selection
+When streaming or downloading an episode that offers multiple media resolutions (e.g., HD Video 1080p/720p, Large Video 540p/480p, Small Video 360p, Audio Only MP3/M4A), TwitTUI presents an interactive modal prompt allowing the user to choose their preferred format:
+- For single-episode downloads and streaming, the modal lists each available stream format along with its human-readable file size.
+- For batch downloads with multiple selected episodes, users can pick a batch resolution preference (HD, Large, Small, or Audio) applied across all queued downloads.
 
 #### Multi-Threaded Batch Download Architecture
 Downloads run on background daemon threads (`threading.Thread`) to keep Toga's main event loop fully responsive.

@@ -1,12 +1,16 @@
 import toga
 from toga.style import Pack
 from toga.style.pack import COLUMN, ROW
+import asyncio
 import os
+import sys
+import shutil
 import re
 import secrets
 import shlex
 import subprocess
 import threading
+from typing import Any
 import urllib.parse
 import email.utils
 import xml.etree.ElementTree as ET
@@ -606,6 +610,14 @@ class TwitTUIForm(toga.App):
         clean = url.split('?')[0].split('#')[0].lower()
         return clean.endswith(('.mp4', '.webm', '.m4v', '.mov', '.flv', '.m3u8', '.mkv')) or '/video' in clean or 'youtube.com' in clean or 'youtu.be' in clean
 
+    @staticmethod
+    def is_youtube_url(url: str) -> bool:
+        """Check if URL points to a YouTube video or stream."""
+        if not url or not isinstance(url, str):
+            return False
+        clean = url.strip().lower()
+        return 'youtube.com/' in clean or 'youtu.be/' in clean or 'youtube.com/watch' in clean
+
     def update_progress(self, current: float, total: float | None = None) -> None:
         """Thread-safe update of the progress bar value and maximum."""
         if not hasattr(self, 'progress_bar') or self.progress_bar is None:
@@ -1061,7 +1073,7 @@ class TwitTUIForm(toga.App):
         # Episodes list section
         episodes_label = toga.Label('Episodes:', style=Pack(margin=(0, 5)))
         self.episodes_list = toga.Table(
-            headings=['Episode', 'Title', 'Date', 'Length', 'Size'],
+            columns=['Episode', 'Title', 'Date', 'Length', 'Size'],
             multiple_select=True,
             on_activate=lambda widget, row: self.on_stream_press(widget),
             style=Pack(flex=1, margin=5, height=200)
@@ -1135,9 +1147,11 @@ class TwitTUIForm(toga.App):
         initial_dest = os.getenv('twitclubdestination') or os.getenv('TWITCLUBDESTINATION') or os.getenv('TWIT_CLUB_DESTINATION') or ''
         self.dest_input = toga.TextInput(value=initial_dest, style=Pack(flex=1))
         dest_button = toga.Button('Browse', on_press=self.on_browse_press, style=Pack(margin=5))
+        dest_open_button = toga.Button('Open', on_press=self.on_open_destination_press, style=Pack(margin=5))
         dest_box.add(dest_label)
         dest_box.add(self.dest_input)
         dest_box.add(dest_button)
+        dest_box.add(dest_open_button)
 
         # Block size setting
         block_box = toga.Box(style=Pack(direction=ROW, margin=5))
@@ -1902,6 +1916,50 @@ class TwitTUIForm(toga.App):
         dest = os.path.expanduser(dest.strip())
         return dest or '.'
 
+    def open_destination_folder(self, folder_path: str = None) -> bool:
+        """Open the configured or specified download destination folder in the system file manager."""
+        if not folder_path:
+            folder_path = self.get_destination_folder()
+
+        target_dir = os.path.abspath(os.path.expanduser(folder_path or '.'))
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except Exception as e:
+            print(f"Could not create destination directory '{target_dir}': {e}")
+
+        try:
+            if sys.platform == 'win32':
+                os.startfile(target_dir)
+                return True
+            elif sys.platform == 'darwin':
+                subprocess.Popen(['open', target_dir])
+                return True
+            else:
+                # Linux and other Unix/BSD systems
+                subprocess.Popen(['xdg-open', target_dir])
+                return True
+        except Exception as e:
+            print(f"Failed to launch file manager for '{target_dir}': {e}")
+            try:
+                file_uri = pathlib.Path(target_dir).as_uri()
+                webbrowser.open(file_uri)
+                return True
+            except Exception as e2:
+                print(f"Fallback to browser for folder URI failed: {e2}")
+                if hasattr(self, 'main_window') and self.main_window:
+                    try:
+                        self.main_window.error_dialog(
+                            "File Manager Error",
+                            f"Could not open download folder:\n{target_dir}\n\nError: {e}"
+                        )
+                    except Exception:
+                        pass
+                return False
+
+    def on_open_destination_press(self, widget=None) -> None:
+        """Handler for Open button press next to Download Destination."""
+        threading.Thread(target=self.open_destination_folder, daemon=True).start()
+
     def get_block_size(self) -> int:
         """Get the configured block size in bytes for download chunking."""
         block_str = self.block_input.value if hasattr(self, 'block_input') and self.block_input and self.block_input.value else ''
@@ -1987,6 +2045,10 @@ class TwitTUIForm(toga.App):
         if local_size <= 0:
             return False
 
+        if self.is_youtube_url(url):
+            # For YouTube streams, consider existing if file is substantial (> 1MB)
+            return local_size > 1024 * 1024
+
         if expected_size is not None and expected_size > 0 and local_size != expected_size:
             return False
 
@@ -2029,8 +2091,244 @@ class TwitTUIForm(toga.App):
 
         return False
 
+    def download_youtube_video(self, url: str, dest_path: str, progress_callback=None) -> bool:
+        """Extract and download a YouTube video or audio stream using yt-dlp or youtube-dl."""
+        if self.is_existing_file_identical(dest_path, url):
+            local_size = os.path.getsize(dest_path)
+            print(f"Skipping download: '{dest_path}' already exists ({local_size} bytes).")
+            if progress_callback:
+                progress_callback(100.0, 100.0)
+            else:
+                self.update_progress(100.0, 100.0)
+            return True
+
+        ytdlp_bin = shutil.which('yt-dlp') or shutil.which('youtube-dl')
+        has_py_module = False
+        if not ytdlp_bin:
+            try:
+                import yt_dlp
+                has_py_module = True
+            except ImportError:
+                has_py_module = False
+
+        if not ytdlp_bin and not has_py_module:
+            error_msg = (
+                f"Cannot download YouTube URL '{url}'.\n\n"
+                "Extracting YouTube video streams requires 'yt-dlp' or 'youtube-dl' to be installed on your system.\n"
+                "Please install yt-dlp (e.g. 'pip install yt-dlp' or via your package manager) and try again."
+            )
+            print(f"Error: {error_msg}")
+
+            def _show_err():
+                try:
+                    main_win = None
+                    try:
+                        main_win = self.main_window
+                    except Exception:
+                        main_win = None
+                    if main_win:
+                        main_win.error_dialog("YouTube Downloader Required", error_msg)
+                except Exception:
+                    pass
+
+            if hasattr(self, 'loop') and self.loop and self.loop.is_running():
+                try:
+                    self.loop.call_soon_threadsafe(_show_err)
+                except Exception:
+                    _show_err()
+            else:
+                _show_err()
+            return False
+
+        temp_path = dest_path + '.part'
+        os.makedirs(os.path.dirname(dest_path) or '.', exist_ok=True)
+
+        if progress_callback is None:
+            self.reset_progress()
+
+        if ytdlp_bin:
+            audio_only = self.is_audio_only()
+            cmd = [
+                ytdlp_bin,
+                '--no-playlist',
+                '--newline',
+                '--no-colors',
+            ]
+            if audio_only:
+                cmd.extend(['-x', '--audio-format', 'mp3'])
+            else:
+                cmd.extend(['-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', '--merge-output-format', 'mp4'])
+
+            cmd.extend(['-o', temp_path, url])
+
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True
+                )
+                pct_regex = re.compile(r'\[download\]\s+([\d\.]+)%')
+                while True:
+                    if getattr(self, '_cancel_download', False):
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        if os.path.exists(temp_path):
+                            try:
+                                os.remove(temp_path)
+                            except Exception:
+                                pass
+                        return False
+
+                    line = proc.stdout.readline()
+                    if not line and proc.poll() is not None:
+                        break
+                    if line:
+                        match = pct_regex.search(line)
+                        if match:
+                            pct = float(match.group(1))
+                            if progress_callback:
+                                progress_callback(pct, 100.0)
+                            else:
+                                self.update_progress(pct, 100.0)
+
+                retcode = proc.wait()
+                if retcode != 0:
+                    print(f"yt-dlp returned error code {retcode}")
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except Exception:
+                            pass
+                    return False
+
+                if os.path.exists(temp_path):
+                    if os.path.exists(dest_path):
+                        try:
+                            os.remove(dest_path)
+                        except Exception:
+                            pass
+                    os.rename(temp_path, dest_path)
+                elif not os.path.exists(dest_path):
+                    base_no_ext = os.path.splitext(temp_path)[0]
+                    candidates = [
+                        temp_path,
+                        base_no_ext,
+                        base_no_ext + '.mp4',
+                        base_no_ext + '.mkv',
+                        base_no_ext + '.webm',
+                        base_no_ext + '.mp3',
+                        dest_path
+                    ]
+                    found = next((c for c in candidates if os.path.exists(c)), None)
+                    if found and found != dest_path:
+                        if os.path.exists(dest_path):
+                            try:
+                                os.remove(dest_path)
+                            except Exception:
+                                pass
+                        os.rename(found, dest_path)
+
+                if os.path.exists(dest_path):
+                    if progress_callback:
+                        progress_callback(100.0, 100.0)
+                    else:
+                        self.update_progress(100.0, 100.0)
+                    print(f"Finished downloading YouTube video: {dest_path}")
+                    return True
+                return False
+            except Exception as e:
+                print(f"Error executing yt-dlp for {url}: {e}")
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+                return False
+        else:
+            # Python yt_dlp module fallback
+            try:
+                import yt_dlp
+
+                def _ytdlp_hook(d):
+                    if getattr(self, '_cancel_download', False):
+                        raise Exception("Download cancelled by user")
+                    if d.get('status') == 'downloading':
+                        total = d.get('total_bytes') or d.get('total_bytes_estimate') or 100
+                        downloaded = d.get('downloaded_bytes', 0)
+                        pct = (downloaded / total) * 100.0 if total else 0.0
+                        if progress_callback:
+                            progress_callback(pct, 100.0)
+                        else:
+                            self.update_progress(pct, 100.0)
+
+                ydl_opts = {
+                    'outtmpl': temp_path,
+                    'noplaylist': True,
+                    'progress_hooks': [_ytdlp_hook],
+                    'quiet': True,
+                }
+                if self.is_audio_only():
+                    ydl_opts['format'] = 'bestaudio/best'
+                    ydl_opts['postprocessors'] = [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                    }]
+                else:
+                    ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+                    ydl_opts['merge_output_format'] = 'mp4'
+
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+
+                if os.path.exists(temp_path):
+                    if os.path.exists(dest_path):
+                        try:
+                            os.remove(dest_path)
+                        except Exception:
+                            pass
+                    os.rename(temp_path, dest_path)
+                elif not os.path.exists(dest_path):
+                    base_no_ext = os.path.splitext(temp_path)[0]
+                    for ext in ['.mp4', '.mkv', '.webm', '.mp3']:
+                        cand = base_no_ext + ext
+                        if os.path.exists(cand):
+                            if os.path.exists(dest_path):
+                                try:
+                                    os.remove(dest_path)
+                                except Exception:
+                                    pass
+                            os.rename(cand, dest_path)
+                            break
+
+                if os.path.exists(dest_path):
+                    if progress_callback:
+                        progress_callback(100.0, 100.0)
+                    else:
+                        self.update_progress(100.0, 100.0)
+                    print(f"Finished downloading YouTube video: {dest_path}")
+                    return True
+                return False
+            except Exception as e:
+                print(f"Error downloading YouTube video with yt_dlp module: {e}")
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+                return False
+
     def download_episode_file(self, url: str, dest_path: str, block_size: int = 8192, progress_callback=None, expected_size: int = None) -> bool:
         """Stream and save a media file in chunks using the specified block size, skipping identical existing files."""
+        # Handle YouTube URLs via specialized stream extractor/downloader (yt-dlp)
+        if self.is_youtube_url(url):
+            return self.download_youtube_video(url, dest_path, progress_callback=progress_callback)
+
         # Check if identical file already exists on disk
         if self.is_existing_file_identical(dest_path, url, expected_size=expected_size):
             local_size = os.path.getsize(dest_path)
@@ -2218,7 +2516,7 @@ class TwitTUIForm(toga.App):
         else:
             _show()
 
-    def download_episodes_batch(self, targets: list) -> None:
+    def download_episodes_batch(self, targets: list, preferred_resolution: str = None) -> None:
         """Background worker to download multiple selected episodes."""
         self._is_downloading = True
         self._cancel_download = False
@@ -2244,7 +2542,16 @@ class TwitTUIForm(toga.App):
                     break
                 target_title = getattr(target, 'title', str(target))
                 target_num = getattr(target, 'episode', '')
-                media_url = self.resolve_target_media_url(target)
+
+                if hasattr(target, 'selected_media_url') and target.selected_media_url:
+                    media_url = target.selected_media_url
+                elif preferred_resolution:
+                    cand_res = self.get_available_resolutions(target)
+                    matching = next((r['url'] for r in cand_res if r.get('id') == preferred_resolution or r.get('type') == preferred_resolution), None)
+                    media_url = matching or self.resolve_target_media_url(target)
+                else:
+                    media_url = self.resolve_target_media_url(target)
+
                 if not media_url:
                     print(f"[{idx_0 + 1}/{total_targets}] No media URL found for episode: {target_num} {target_title}")
                     batch_pct = ((idx_0 + 1) / total_targets) * 100.0
@@ -2293,8 +2600,8 @@ class TwitTUIForm(toga.App):
             if downloaded_files:
                 self.show_download_complete_dialog(dest_dir, downloaded_files)
 
-    def on_download_press(self, widget=None) -> None:
-        """Process selected episodes for batch download."""
+    async def on_download_press(self, widget=None) -> None:
+        """Process selected episodes for batch download with resolution prompt if multiple are available."""
         try:
             self._cancel_hover_timer()
             selected = self.episodes_list.selection
@@ -2311,8 +2618,45 @@ class TwitTUIForm(toga.App):
                 print("No episode selected for download")
                 return
 
+            preferred_resolution = None
+
+            if len(targets) == 1:
+                target = targets[0]
+                resolutions = self.get_available_resolutions(target)
+                target_title = getattr(target, 'title', str(target[1] if isinstance(target, (tuple, list)) and len(target) > 1 else 'Episode'))
+                if len(resolutions) > 1:
+                    chosen_res = await self.prompt_resolution_choice(
+                        title="Select Download Resolution",
+                        message=f"Multiple resolutions available for '{target_title}'. Which resolution do you prefer to download?",
+                        resolutions=resolutions
+                    )
+                    if not chosen_res:
+                        print("Download cancelled by user.")
+                        return
+                    target.selected_media_url = chosen_res.get('url')
+                    target.selected_resolution = chosen_res.get('id')
+            else:
+                # Check if multiple resolutions exist across batch
+                has_multi = any(len(self.get_available_resolutions(t)) > 1 for t in targets)
+                if has_multi:
+                    batch_options = [
+                        {'id': 'video_hd', 'name': 'HD Video (1080p/720p)', 'label': 'HD Video (1080p/720p) - High Quality', 'type': 'video'},
+                        {'id': 'video_large', 'name': 'Large Video (540p/480p)', 'label': 'Large Video (540p/480p) - Medium Quality', 'type': 'video'},
+                        {'id': 'video_small', 'name': 'Small / Mobile Video (360p)', 'label': 'Small / Mobile Video (360p) - Low Bandwidth', 'type': 'video'},
+                        {'id': 'video_audio', 'name': 'Audio Only (MP3/M4A)', 'label': 'Audio Only (MP3/M4A) - Audio Only', 'type': 'audio'},
+                    ]
+                    chosen_batch = await self.prompt_resolution_choice(
+                        title="Select Batch Download Resolution",
+                        message=f"Multiple resolutions available across the {len(targets)} selected episodes. Which resolution do you prefer?",
+                        resolutions=batch_options
+                    )
+                    if not chosen_batch:
+                        print("Batch download cancelled by user.")
+                        return
+                    preferred_resolution = chosen_batch.get('id')
+
             # Start download in background thread so GUI remains responsive
-            thread = threading.Thread(target=self.download_episodes_batch, args=(targets,), daemon=True)
+            thread = threading.Thread(target=self.download_episodes_batch, args=(targets, preferred_resolution), daemon=True)
             thread.start()
         except Exception as e:
             print(f"Error initiating download: {e}")
@@ -2598,8 +2942,231 @@ class TwitTUIForm(toga.App):
 
         return fallback_candidate
 
-    def on_stream_press(self, widget=None) -> None:
-        """Process selected episode for streaming."""
+    def get_available_resolutions(self, target, show_name: str = None) -> list[dict]:
+        """Extract all available resolution and format choices for a given episode target."""
+        if target is None:
+            return []
+
+        resolutions = []
+        seen_urls = set()
+
+        ep_dict = {}
+        if hasattr(target, 'episode_data') and isinstance(target.episode_data, dict):
+            ep_dict.update(target.episode_data)
+        elif isinstance(target, dict):
+            ep_dict.update(target)
+        elif hasattr(target, '__dict__'):
+            for k, v in target.__dict__.items():
+                if not k.startswith('_'):
+                    ep_dict[k] = v
+
+        target_num = getattr(target, 'episode', str(target[0] if isinstance(target, (tuple, list)) and len(target) > 0 else ''))
+        target_title = getattr(target, 'title', str(target[1] if isinstance(target, (tuple, list)) and len(target) > 1 else ''))
+
+        if hasattr(self, 'current_episodes') and self.current_episodes:
+            for ep in self.current_episodes:
+                if (target_num and str(ep.get('number', '')) == str(target_num)) or (target_title and ep.get('title') == target_title):
+                    if isinstance(ep, dict):
+                        ep_dict = {**ep, **ep_dict}
+                    break
+
+        if not show_name:
+            show_name = self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo else ''
+
+        def _add_cand(res_id: str, name: str, res_type: str, url: str | None, size_val: Any = None):
+            if not url or not isinstance(url, str):
+                return
+            cand_url = url.strip()
+            if not self.is_valid_media_url(cand_url):
+                return
+            if cand_url in seen_urls:
+                return
+            seen_urls.add(cand_url)
+
+            size_bytes = 0
+            if size_val is not None:
+                try:
+                    size_bytes = int(size_val)
+                except Exception:
+                    size_bytes = 0
+
+            size_formatted = self.format_file_size(size_bytes) if size_bytes > 0 else ""
+            label = f"{name} ({size_formatted})" if size_formatted else name
+
+            resolutions.append({
+                'id': res_id,
+                'name': name,
+                'label': label,
+                'type': res_type,
+                'url': cand_url,
+                'size': size_bytes,
+                'size_formatted': size_formatted
+            })
+
+        # 1. Standard TWiT API format fields
+        format_specs = [
+            ('video_hd', 'HD Video (1080p/720p)', 'video'),
+            ('video_large', 'Large Video (540p/480p)', 'video'),
+            ('video_small', 'Small / Mobile Video (360p)', 'video'),
+            ('video_audio', 'Audio Only (MP3/M4A)', 'audio'),
+            ('audio', 'Audio (MP3/M4A)', 'audio'),
+            ('video_youtube', 'YouTube Stream', 'video'),
+        ]
+
+        for fid, name, ftype in format_specs:
+            val = ep_dict.get(fid)
+            if isinstance(val, dict):
+                u = next((val[k] for k in ['mediaUrl', 'media_url', 'downloadUrl', 'streamUrl', 'url', 'href', 'guid'] if val.get(k)), None)
+                s = next((val[k] for k in ['fileSize', 'file_size', 'size', 'bytes', 'length'] if val.get(k)), None)
+                if u:
+                    _add_cand(fid, name, ftype, str(u), s)
+            elif isinstance(val, str) and self.is_valid_media_url(val):
+                _add_cand(fid, name, ftype, val)
+
+        # 2. Check files list/dict
+        files = ep_dict.get('files')
+        if isinstance(files, list):
+            for idx, f in enumerate(files):
+                if isinstance(f, dict):
+                    u = next((f[k] for k in ['mediaUrl', 'media_url', 'downloadUrl', 'url', 'fileUrl'] if f.get(k)), None)
+                    s = next((f[k] for k in ['fileSize', 'file_size', 'size', 'bytes', 'length'] if f.get(k)), None)
+                    fmt = str(f.get('format') or f.get('quality') or f.get('label') or '').lower()
+                    if u:
+                        if 'hd' in fmt or '1080' in fmt or '720' in fmt:
+                            _add_cand('video_hd', 'HD Video (1080p/720p)', 'video', str(u), s)
+                        elif 'large' in fmt or '540' in fmt or '480' in fmt or 'sdl' in fmt:
+                            _add_cand('video_large', 'Large Video (540p/480p)', 'video', str(u), s)
+                        elif 'small' in fmt or '360' in fmt or 'sds' in fmt or 'low' in fmt:
+                            _add_cand('video_small', 'Small / Mobile Video (360p)', 'video', str(u), s)
+                        elif 'audio' in fmt or 'mp3' in fmt or 'm4a' in fmt:
+                            _add_cand('video_audio', 'Audio Only (MP3/M4A)', 'audio', str(u), s)
+                        else:
+                            is_aud = self.is_audio_url(str(u))
+                            _add_cand(f'file_{idx}', f.get('label') or ('Audio' if is_aud else 'Video'), 'audio' if is_aud else 'video', str(u), s)
+        elif isinstance(files, dict):
+            for k, f in files.items():
+                if isinstance(f, dict):
+                    u = next((f[sf] for sf in ['mediaUrl', 'media_url', 'downloadUrl', 'url', 'fileUrl'] if f.get(sf)), None)
+                    s = next((f[sf] for sf in ['fileSize', 'file_size', 'size', 'bytes', 'length'] if f.get(sf)), None)
+                    if u:
+                        k_low = str(k).lower()
+                        if 'hd' in k_low:
+                            _add_cand('video_hd', 'HD Video (1080p/720p)', 'video', str(u), s)
+                        elif 'large' in k_low:
+                            _add_cand('video_large', 'Large Video (540p/480p)', 'video', str(u), s)
+                        elif 'small' in k_low:
+                            _add_cand('video_small', 'Small / Mobile Video (360p)', 'video', str(u), s)
+                        elif 'audio' in k_low:
+                            _add_cand('video_audio', 'Audio Only (MP3/M4A)', 'audio', str(u), s)
+                        else:
+                            is_aud = self.is_audio_url(str(u))
+                            _add_cand(str(k), str(k), 'audio' if is_aud else 'video', str(u), s)
+
+        # 3. Check RSS feeds for this show
+        if show_name and hasattr(self, '_show_rss_cache'):
+            show_key = show_name.strip().lower()
+            clean_path = ep_dict.get('cleanPath') or getattr(target, 'clean_path', '')
+            ep_id = str(ep_dict.get('id') or getattr(target, 'id', ''))
+
+            # Check cached RSS feeds for matching episode
+            for feed_file in KNOWN_SHOW_FEEDS.get(show_key, []):
+                cache_key = f"rss_{feed_file}"
+                items = self._show_rss_cache.get(cache_key, [])
+                for item in items:
+                    if self._match_rss_item(item, clean_path, ep_id, target_num, target_title, show_name):
+                        enc = item.get('enclosure_url')
+                        s = item.get('enclosure_length')
+                        if enc and self.is_valid_media_url(enc):
+                            if 'video_hd' in feed_file or '_hd' in feed_file:
+                                _add_cand('video_hd', 'HD Video (1080p/720p)', 'video', enc, s)
+                            elif 'video_large' in feed_file or '_large' in feed_file:
+                                _add_cand('video_large', 'Large Video (540p/480p)', 'video', enc, s)
+                            elif 'video_small' in feed_file or '_small' in feed_file:
+                                _add_cand('video_small', 'Small / Mobile Video (360p)', 'video', enc, s)
+                            else:
+                                is_aud = self.is_audio_url(enc)
+                                _add_cand('rss_feed', 'Audio (MP3/M4A)' if is_aud else 'Standard Video', 'audio' if is_aud else 'video', enc, s)
+
+        # 4. Check direct media_url or resolved candidate
+        direct_url = getattr(target, 'media_url', None) or ep_dict.get('media_url') or ep_dict.get('mediaUrl')
+        if direct_url and self.is_valid_media_url(direct_url) and direct_url not in seen_urls:
+            is_aud = self.is_audio_url(direct_url)
+            _add_cand('direct', 'Audio' if is_aud else 'Video', 'audio' if is_aud else 'video', direct_url)
+
+        return resolutions
+
+    async def prompt_resolution_choice(self, title: str, message: str, resolutions: list[dict]) -> dict | None:
+        """Prompt the user to select their preferred resolution from available choices."""
+        if not resolutions:
+            return None
+        if len(resolutions) == 1:
+            return resolutions[0]
+
+        # 1. Try backend ChoiceDialog first (e.g. Textual)
+        try:
+            from toga_textual_backend import ChoiceDialog
+            res = await self.main_window.dialog(ChoiceDialog(title, message, resolutions))
+            if res is not None:
+                return res
+            # User cancelled or dismissed
+            return None
+        except Exception:
+            pass
+
+        # 2. Universal GUI Modal Window Fallback (for GTK / Cocoa / WinForms / etc.)
+        try:
+            choice_future = asyncio.get_running_loop().create_future()
+            modal_win = toga.Window(title=title, size=(520, 340))
+
+            box = toga.Box(style=Pack(direction=COLUMN, margin=15))
+            title_lbl = toga.Label(title, style=Pack(margin=(0, 0, 10, 0), font_weight='bold'))
+            msg_lbl = toga.Label(message, style=Pack(margin=(0, 0, 15, 0)))
+            box.add(title_lbl)
+            box.add(msg_lbl)
+
+            options_box = toga.Box(style=Pack(direction=COLUMN, margin=(0, 0, 15, 0)))
+            for opt in resolutions:
+                lbl = opt.get('label') or opt.get('name') or str(opt)
+                def _make_handler(option_dict=opt):
+                    def _on_click(btn):
+                        if not choice_future.done():
+                            choice_future.set_result(option_dict)
+                        try:
+                            modal_win.close()
+                        except Exception:
+                            pass
+                    return _on_click
+                btn = toga.Button(lbl, on_press=_make_handler(opt), style=Pack(margin=(3, 0)))
+                options_box.add(btn)
+            box.add(options_box)
+
+            def _on_cancel(btn):
+                if not choice_future.done():
+                    choice_future.set_result(None)
+                try:
+                    modal_win.close()
+                except Exception:
+                    pass
+
+            cancel_btn = toga.Button('Cancel', on_press=_on_cancel, style=Pack(margin=(10, 0)))
+            box.add(cancel_btn)
+
+            def _on_win_close(win):
+                if not choice_future.done():
+                    choice_future.set_result(None)
+                return True
+
+            modal_win.on_close = _on_win_close
+            modal_win.content = box
+            modal_win.show()
+
+            return await choice_future
+        except Exception as e:
+            print(f"Error presenting resolution choice dialog: {e}")
+            return resolutions[0]
+
+    async def on_stream_press(self, widget=None) -> None:
+        """Process selected episode for streaming with resolution prompt if multiple are available."""
         try:
             self._cancel_hover_timer()
             selected = self.episodes_list.selection
@@ -2609,7 +3176,23 @@ class TwitTUIForm(toga.App):
 
             target = selected[0] if isinstance(selected, list) else selected
 
-            media_url = self.resolve_target_media_url(target)
+            resolutions = self.get_available_resolutions(target)
+            target_title = getattr(target, 'title', str(target[1] if isinstance(target, (tuple, list)) and len(target) > 1 else 'Episode'))
+
+            if len(resolutions) > 1:
+                chosen_res = await self.prompt_resolution_choice(
+                    title="Select Stream Resolution",
+                    message=f"Multiple resolutions available for '{target_title}'. Which resolution do you prefer to stream?",
+                    resolutions=resolutions
+                )
+                if not chosen_res:
+                    print("Stream cancelled by user.")
+                    return
+                media_url = chosen_res.get('url')
+            elif len(resolutions) == 1:
+                media_url = resolutions[0].get('url')
+            else:
+                media_url = self.resolve_target_media_url(target)
 
             if not media_url:
                 print("No media URL found for the selected episode")

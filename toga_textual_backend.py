@@ -113,6 +113,113 @@ class BaseTextualDialog:
             future.set_result(self.default_result)
 
 
+class TextualChoiceDialogScreen(ModalScreen):
+    """Textual modal screen for displaying multiple choice options (such as video resolutions)."""
+
+    DEFAULT_CSS = """
+    TextualChoiceDialogScreen {
+        align: center middle;
+        background: rgba(0, 0, 0, 0.7);
+    }
+    #choice_dialog_box {
+        width: 72;
+        max-width: 90%;
+        height: auto;
+        border: solid $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #choice_dialog_title {
+        text-style: bold;
+        margin-bottom: 1;
+        width: 100%;
+        text-align: center;
+    }
+    #choice_dialog_message {
+        margin-bottom: 1;
+        width: 100%;
+        text-align: center;
+    }
+    #choice_options_container {
+        width: 100%;
+        height: auto;
+        margin-bottom: 1;
+    }
+    .choice_option_btn {
+        width: 100%;
+        margin-bottom: 1;
+    }
+    #choice_cancel_row {
+        align: center middle;
+        width: 100%;
+        height: auto;
+    }
+    """
+
+    def __init__(self, title: str, message: str, options: list[dict], future: Any) -> None:
+        super().__init__()
+        self.dialog_title = title
+        self.dialog_message = message
+        self.options = options
+        self.future = future
+
+    def compose(self) -> Any:
+        with Vertical(id="choice_dialog_box"):
+            yield Label(self.dialog_title, id="choice_dialog_title")
+            if self.dialog_message:
+                yield Label(self.dialog_message, id="choice_dialog_message")
+            with Vertical(id="choice_options_container"):
+                for idx, opt in enumerate(self.options):
+                    lbl = opt.get('label') or opt.get('name') or str(opt)
+                    yield Button(lbl, id=f"opt_btn_{idx}", classes="choice_option_btn", variant="primary" if idx == 0 else "default")
+            with Horizontal(id="choice_cancel_row"):
+                yield Button("Cancel", id="btn_choice_cancel", variant="error")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id
+        if button_id == "btn_choice_cancel":
+            self.dismiss(None)
+            if self.future and not self.future.done():
+                self.future.set_result(None)
+            return
+
+        if button_id and button_id.startswith("opt_btn_"):
+            try:
+                idx = int(button_id.split("opt_btn_")[1])
+                selected = self.options[idx]
+                self.dismiss(selected)
+                if self.future and not self.future.done():
+                    self.future.set_result(selected)
+                return
+            except Exception:
+                pass
+
+        self.dismiss(None)
+        if self.future and not self.future.done():
+            self.future.set_result(None)
+
+
+class ChoiceDialog:
+    """Dialog that allows user to choose from a list of option dictionaries."""
+    def __init__(self, title: str, message: str, options: list[dict], default_result: Any = None) -> None:
+        self.title = title
+        self.message = message
+        self.options = options
+        self.default_result = default_result
+
+    def show(self, host_window: Any, future: Any) -> None:
+        try:
+            app = toga.App.app
+            if app and hasattr(app, '_impl') and hasattr(app._impl, 'native'):
+                screen = TextualChoiceDialogScreen(self.title, self.message, self.options, future)
+                app._impl.native.push_screen(screen)
+                return
+        except Exception:
+            pass
+        if future and not future.done():
+            future.set_result(self.default_result)
+
+
 class InfoDialog(BaseTextualDialog):
     def __init__(self, title: str, message: str) -> None:
         super().__init__(title, message, [("OK", None)], default_result=None)
@@ -179,6 +286,8 @@ class DialogsFactory:
     SelectFolderDialog = SelectFolderDialog
     OpenFileDialog = OpenFileDialog
     SaveFileDialog = SaveFileDialog
+    ChoiceDialog = ChoiceDialog
+    SelectResolutionDialog = ChoiceDialog
 
 
 class TogaSelect(Select):
@@ -661,7 +770,7 @@ def patch_toga_textual() -> None:
                 for name, impl_cls in TEXTUAL_WIDGET_IMPLEMENTATIONS.items():
                     setattr(f, name, impl_cls)
                 setattr(f, 'dialogs', DialogsFactory)
-                for dialog_name in ['InfoDialog', 'ErrorDialog', 'QuestionDialog', 'ConfirmDialog', 'SelectFolderDialog', 'OpenFileDialog', 'SaveFileDialog']:
+                for dialog_name in ['InfoDialog', 'ErrorDialog', 'QuestionDialog', 'ConfirmDialog', 'SelectFolderDialog', 'OpenFileDialog', 'SaveFileDialog', 'ChoiceDialog', 'SelectResolutionDialog']:
                     setattr(f, dialog_name, getattr(DialogsFactory, dialog_name))
             except Exception:
                 pass
