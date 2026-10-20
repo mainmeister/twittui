@@ -49,6 +49,69 @@ def load_twittui_dotenv() -> None:
 # Ensure environment variables are loaded
 load_twittui_dotenv()
 
+# Universal Toga Widget Tooltip Support
+def apply_tooltip_to_impl(impl: Any, tooltip_text: str | None) -> None:
+    """Apply tooltip text to native backend widgets across GTK, Textual, and other platforms."""
+    if impl is None:
+        return
+    targets = []
+    for attr in ('native', 'native_table', 'native_switch', 'native_label', 'native_textview'):
+        obj = getattr(impl, attr, None)
+        if obj is not None and obj not in targets:
+            targets.append(obj)
+    if not targets and (hasattr(impl, 'set_tooltip_text') or hasattr(impl, 'tooltip')):
+        targets.append(impl)
+
+    for target in targets:
+        # GTK backend support (Gtk.Widget)
+        if hasattr(target, 'set_tooltip_text'):
+            try:
+                target.set_tooltip_text(tooltip_text if tooltip_text else None)
+            except Exception:
+                pass
+        # Textual backend support (textual.widget.Widget)
+        if hasattr(target, 'tooltip'):
+            try:
+                target.tooltip = tooltip_text if tooltip_text else None
+            except Exception:
+                pass
+
+
+def get_widget_tooltip(widget: toga.Widget) -> str | None:
+    """Retrieve tooltip associated with a Toga widget."""
+    return getattr(widget, '_twittui_tooltip', None)
+
+
+def set_widget_tooltip(widget: toga.Widget, tooltip_text: str | None) -> toga.Widget:
+    """Set tooltip on a Toga widget and propagate to underlying native elements."""
+    setattr(widget, '_twittui_tooltip', tooltip_text)
+    impl = getattr(widget, '_impl', None)
+    if impl is not None:
+        apply_tooltip_to_impl(impl, tooltip_text)
+    return widget
+
+
+_ORIG_TOGA_WIDGET_INIT = toga.Widget.__init__
+
+
+def _patched_toga_widget_init(self: toga.Widget, *args: Any, tooltip: str | None = None, **kwargs: Any) -> None:
+    """Patched Toga Widget __init__ accepting optional tooltip parameter."""
+    _ORIG_TOGA_WIDGET_INIT(self, *args, **kwargs)
+    if tooltip is not None:
+        self.tooltip = tooltip
+
+
+def patch_toga_tooltips() -> None:
+    """Patch toga.Widget to support tooltip property and constructor keyword."""
+    if not getattr(toga.Widget, '_twittui_tooltips_patched', False):
+        toga.Widget.tooltip = property(get_widget_tooltip, set_widget_tooltip)
+        toga.Widget.__init__ = _patched_toga_widget_init
+        toga.Widget._twittui_tooltips_patched = True
+
+
+# Initialize Toga tooltip support
+patch_toga_tooltips()
+
 # Apply Textual backend widget extensions if available
 try:
     from toga_textual_backend import patch_toga_textual
@@ -190,6 +253,58 @@ def is_safe_http_url(url: str) -> bool:
     return u.startswith('http://') or u.startswith('https://')
 
 
+def resolve_stream_url(media_url: str, timeout: float = 10.0) -> str:
+    """Resolve redirect chains (e.g. podcast tracking/analytics URLs) to the final playable media stream URL.
+
+    Args:
+        media_url: The source media URL (may be wrapped by podcast analytics or multi-hop redirects).
+        timeout: Maximum duration in seconds for HTTP redirect resolution.
+
+    Returns:
+        The resolved destination media URL, or the unwrapped / original URL upon failure.
+    """
+    if not media_url or not isinstance(media_url, str):
+        return media_url
+
+    clean_url: str = media_url.strip()
+    parsed: urllib.parse.SplitResult = urllib.parse.urlsplit(clean_url)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return clean_url
+
+    # Do not follow redirects for YouTube stream URLs
+    if re.search(r'(?:youtube\.com/|youtu\.be/)', clean_url, re.IGNORECASE):
+        return clean_url
+
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (compatible; TwitTUI/1.0)'}
+        head_resp = requests.head(clean_url, headers=headers, allow_redirects=True, timeout=timeout)
+        if head_resp.status_code < 400 and head_resp.url:
+            return head_resp.url
+        with requests.get(clean_url, headers=headers, stream=True, allow_redirects=True, timeout=timeout) as get_resp:
+            if get_resp.status_code < 400 and get_resp.url:
+                return get_resp.url
+    except Exception as e:
+        print(f"Note: Could not resolve redirects for stream URL: {e}")
+
+    # Fallback: Unwrap known podcast tracking / redirect prefixes if HTTP resolution failed or was unreachable
+    try:
+        match = re.search(r'(https?://(?:cdn\.twit\.tv|twit\.cachefly\.net|episodes\.captivate\.fm|podcasts\.captivate\.fm)/.+)$', clean_url)
+        if match:
+            return match.group(1)
+        elif re.search(r'/(?:pdst\.fm|pscrb\.fm|mgln\.ai|dts\.podtrac\.com|chrt\.fm|traffic\.megaphone\.fm)/', clean_url):
+            match = re.search(r'(https?://[^/]+/(?:cap|video|members)/.+)$', clean_url)
+            if match:
+                return match.group(1)
+            else:
+                match = re.search(r'/(cdn\.twit\.tv/.+)$', clean_url)
+                if match:
+                    return f"https://{match.group(1)}"
+    except Exception:
+        pass
+
+    return clean_url
+
+
 def build_stream_args(
     streamer_template: str,
     media_url: str,
@@ -269,7 +384,8 @@ def launch_stream_safe(
     Returns:
         The spawned Popen process instance.
     """
-    args: list[str] = build_stream_args(streamer_template, media_url)
+    resolved_url: str = resolve_stream_url(media_url)
+    args: list[str] = build_stream_args(streamer_template, resolved_url)
     return subprocess.Popen(args, shell=False)
 
 
@@ -326,16 +442,64 @@ class TwitTUIForm(toga.App):
         self._memberful_feeds_cache = {}
         self._show_rss_cache = {}
         self._local_server = None
-        self.app_id_input = None
-        self.app_key_input = None
-        self.audio_only_checkbox = None
-        self.sort_order_button = None
+        self.show_label = None
+        self.show_combo = None
+        self.fetch_button = None
         self.next_button = None
+        self.search_label = None
         self.search_input = None
+        self.search_button = None
+        self.clear_button = None
+        self.sort_label = None
+        self.date_radio = None
+        self.episode_radio = None
+        self.title_radio = None
+        self.sort_order_button = None
+        self.audio_only_checkbox = None
+        self.episodes_label = None
+        self.episodes_list = None
+        self.download_button = None
+        self.stream_button = None
+        self.cancel_button = None
+        self.close_button = None
+        self.app_id_label = None
+        self.app_id_input = None
+        self.app_key_label = None
+        self.app_key_input = None
+        self.test_api_button = None
+        self.url_label = None
+        self.url_prefix = None
+        self.url_input = None
+        self.show_url_button = None
+        self.dest_label = None
+        self.dest_input = None
+        self.dest_button = None
+        self.dest_open_button = None
+        self.show_folders_checkbox = None
+        self.block_label = None
+        self.block_input = None
+        self.streamer_label = None
+        self.streamer_input = None
         self.progress_bar = None
+        self.readme_cmd = None
+        self.apib_cmd = None
+        self.api_key_cmd = None
         self._is_downloading = False
         self._cancel_download = False
         super().__init__(formal_name=formal_name, app_id=app_id, **kwargs)
+
+    def set_tooltip(self, widget: Any, tooltip_text: str | None) -> Any:
+        """Helper to assign a tooltip to any UI widget or command."""
+        if hasattr(widget, 'tooltip'):
+            widget.tooltip = tooltip_text
+        set_widget_tooltip(widget, tooltip_text)
+        return widget
+
+    def get_tooltip(self, widget: Any) -> str | None:
+        """Helper to retrieve the tooltip of any UI widget or command."""
+        if hasattr(widget, 'tooltip') and widget.tooltip is not None:
+            return widget.tooltip
+        return get_widget_tooltip(widget)
 
     def get_initial_streamer_setting(self) -> str:
         """Resolve and migrate streamer command template, persisting if migrating legacy defaults."""
@@ -414,6 +578,9 @@ class TwitTUIForm(toga.App):
                 self.audio_only_checkbox.value = not self.audio_only_checkbox.value
 
         is_audio = self.is_audio_only()
+        if hasattr(self, 'audio_only_checkbox') and self.audio_only_checkbox:
+            self.audio_only_checkbox.tooltip = "Currently showing audio-only feed. Click to switch to video feeds" if is_audio else "Currently showing video feeds. Click to switch to audio-only feed"
+
         val_str = '1' if is_audio else '0'
         os.environ['TWITAUDIOONLY'] = val_str
         self.save_env_setting('TWITAUDIOONLY', val_str)
@@ -431,8 +598,10 @@ class TwitTUIForm(toga.App):
         """Toggle between Descending and Ascending sort order and reload episodes from API."""
         if self.is_sort_ascending():
             self.sort_order_button.text = '▼ Descending'
+            self.sort_order_button.tooltip = "Currently descending (newest first). Click to sort ascending (oldest first)"
         else:
             self.sort_order_button.text = '▲ Ascending'
+            self.sort_order_button.tooltip = "Currently ascending (oldest first). Click to sort descending (newest first)"
 
         self.load_episodes_for_selected_show()
 
@@ -1084,10 +1253,30 @@ class TwitTUIForm(toga.App):
         main_box = toga.Box(style=Pack(direction=COLUMN, margin=5))
 
         # Show selection section
-        show_label = toga.Label('Show:', style=Pack(margin=(0, 5)))
-        self.show_combo = toga.Selection(on_change=self.on_show_select, style=Pack(flex=1))
-        fetch_button = toga.Button('Fetch', on_press=self.on_fetch_press, style=Pack(margin=5))
-        self.next_button = toga.Button('Next', on_press=self.on_next_press, style=Pack(margin=5))
+        show_label = toga.Label(
+            'Show:',
+            style=Pack(margin=(0, 5)),
+            tooltip='Select which TWiT show to browse'
+        )
+        self.show_label = show_label
+        self.show_combo = toga.Selection(
+            on_change=self.on_show_select,
+            style=Pack(flex=1),
+            tooltip='Choose a TWiT show from the list of available shows'
+        )
+        fetch_button = toga.Button(
+            'Fetch',
+            on_press=self.on_fetch_press,
+            style=Pack(margin=5),
+            tooltip='Fetch the latest episodes for the selected show'
+        )
+        self.fetch_button = fetch_button
+        self.next_button = toga.Button(
+            'Next',
+            on_press=self.on_next_press,
+            style=Pack(margin=5),
+            tooltip='Load the next page of older episodes for the selected show'
+        )
         show_box = toga.Box(style=Pack(direction=ROW, margin=5))
         show_box.add(show_label)
         show_box.add(self.show_combo)
@@ -1095,10 +1284,32 @@ class TwitTUIForm(toga.App):
         show_box.add(self.next_button)
 
         # Search section
-        search_label = toga.Label('Search:', style=Pack(margin=(0, 5)))
-        self.search_input = toga.TextInput(placeholder='Search episodes in selected show...', on_confirm=self.on_search_press, style=Pack(flex=1))
-        search_button = toga.Button('Search', on_press=self.on_search_press, style=Pack(margin=5))
-        clear_button = toga.Button('Clear', on_press=self.on_clear_search_press, style=Pack(margin=5))
+        search_label = toga.Label(
+            'Search:',
+            style=Pack(margin=(0, 5)),
+            tooltip='Filter episodes in the selected show'
+        )
+        self.search_label = search_label
+        self.search_input = toga.TextInput(
+            placeholder='Search episodes in selected show...',
+            on_confirm=self.on_search_press,
+            style=Pack(flex=1),
+            tooltip='Enter search keywords or episode number to filter episodes'
+        )
+        search_button = toga.Button(
+            'Search',
+            on_press=self.on_search_press,
+            style=Pack(margin=5),
+            tooltip='Apply search filter to episode list'
+        )
+        self.search_button = search_button
+        clear_button = toga.Button(
+            'Clear',
+            on_press=self.on_clear_search_press,
+            style=Pack(margin=5),
+            tooltip='Clear search input and restore all episodes'
+        )
+        self.clear_button = clear_button
         search_box = toga.Box(style=Pack(direction=ROW, margin=5))
         search_box.add(search_label)
         search_box.add(self.search_input)
@@ -1106,16 +1317,46 @@ class TwitTUIForm(toga.App):
         search_box.add(clear_button)
 
         # Sort options section
-        sort_label = toga.Label('Sort by:', style=Pack(margin=(0, 5)))
-        self.date_radio = toga.Button('☑ Date', on_press=self.on_sort_button_press, style=Pack(margin=5))
-        self.episode_radio = toga.Button('☐ Episode Number', on_press=self.on_sort_button_press, style=Pack(margin=5))
-        self.title_radio = toga.Button('☐ Episode Title', on_press=self.on_sort_button_press, style=Pack(margin=5))
-        self.sort_order_button = toga.Button('▼ Descending', on_press=self.on_sort_order_toggle, style=Pack(margin=5))
+        sort_label = toga.Label(
+            'Sort by:',
+            style=Pack(margin=(0, 5)),
+            tooltip='Choose criterion for sorting episodes'
+        )
+        self.sort_label = sort_label
+        self.date_radio = toga.Button(
+            '☑ Date',
+            on_press=self.on_sort_button_press,
+            style=Pack(margin=5),
+            tooltip='Sort episodes by release date (active)'
+        )
+        self.episode_radio = toga.Button(
+            '☐ Episode Number',
+            on_press=self.on_sort_button_press,
+            style=Pack(margin=5),
+            tooltip='Sort episodes by episode number'
+        )
+        self.title_radio = toga.Button(
+            '☐ Episode Title',
+            on_press=self.on_sort_button_press,
+            style=Pack(margin=5),
+            tooltip='Sort episodes alphabetically by title'
+        )
+        self.sort_order_button = toga.Button(
+            '▼ Descending',
+            on_press=self.on_sort_order_toggle,
+            style=Pack(margin=5),
+            tooltip='Currently descending (newest first). Click to sort ascending (oldest first)'
+        )
 
         env_audio = os.getenv('TWITAUDIOONLY') or os.getenv('twitaudioonly') or os.getenv('TWIT_AUDIO_ONLY') or ''
         initial_audio_only = env_audio.strip().lower() in ('1', 'true', 'yes', 'on')
         audio_symbol = '☑' if initial_audio_only else '☐'
-        self.audio_only_checkbox = toga.Button(f'{audio_symbol} Audio Only', on_press=self.on_audio_only_toggle, style=Pack(margin=5))
+        self.audio_only_checkbox = toga.Button(
+            f'{audio_symbol} Audio Only',
+            on_press=self.on_audio_only_toggle,
+            style=Pack(margin=5),
+            tooltip='Currently showing audio-only feed. Click to switch to video feeds' if initial_audio_only else 'Currently showing video feeds. Click to switch to audio-only feed'
+        )
 
         sort_box = toga.Box(style=Pack(direction=ROW, margin=5))
         sort_box.add(sort_label)
@@ -1126,12 +1367,18 @@ class TwitTUIForm(toga.App):
         sort_box.add(self.audio_only_checkbox)
 
         # Episodes list section
-        episodes_label = toga.Label('Episodes:', style=Pack(margin=(0, 5)))
+        episodes_label = toga.Label(
+            'Episodes:',
+            style=Pack(margin=(0, 5)),
+            tooltip='Episodes available for streaming or downloading'
+        )
+        self.episodes_label = episodes_label
         self.episodes_list = toga.Table(
             columns=['Episode', 'Title', 'Date', 'Length', 'Size'],
             multiple_select=True,
             on_activate=lambda widget, row: self.on_stream_press(widget),
-            style=Pack(flex=1, margin=5, height=200)
+            style=Pack(flex=1, margin=5, height=200),
+            tooltip='Episode list: select episodes to download, or double-click / press Enter to stream'
         )
         self._enable_table_horizontal_scroll()
         self._setup_table_hover_events()
@@ -1146,10 +1393,34 @@ class TwitTUIForm(toga.App):
 
         # Buttons section
         button_box = toga.Box(style=Pack(direction=ROW, margin=5))
-        download_button = toga.Button('Download', on_press=self.on_download_press, style=Pack(margin=5))
-        stream_button = toga.Button('Stream', on_press=self.on_stream_press, style=Pack(margin=5))
-        cancel_button = toga.Button('Cancel', on_press=self.on_cancel_press, style=Pack(margin=5))
-        close_button = toga.Button('Close', on_press=self.on_close_press, style=Pack(margin=5))
+        download_button = toga.Button(
+            'Download',
+            on_press=self.on_download_press,
+            style=Pack(margin=5),
+            tooltip='Download selected episodes to destination directory'
+        )
+        self.download_button = download_button
+        stream_button = toga.Button(
+            'Stream',
+            on_press=self.on_stream_press,
+            style=Pack(margin=5),
+            tooltip='Stream selected episode in external media player'
+        )
+        self.stream_button = stream_button
+        cancel_button = toga.Button(
+            'Cancel',
+            on_press=self.on_cancel_press,
+            style=Pack(margin=5),
+            tooltip='Cancel active download or exit application'
+        )
+        self.cancel_button = cancel_button
+        close_button = toga.Button(
+            'Close',
+            on_press=self.on_close_press,
+            style=Pack(margin=5),
+            tooltip='Exit TwitTUI application'
+        )
+        self.close_button = close_button
 
         button_box.add(download_button)
         button_box.add(stream_button)
@@ -1161,26 +1432,62 @@ class TwitTUIForm(toga.App):
 
         # TWIT API Application ID setting
         app_id_box = toga.Box(style=Pack(direction=ROW, margin=5))
-        app_id_label = toga.Label('API Application ID:', style=Pack(margin=(0, 5)))
+        app_id_label = toga.Label(
+            'API Application ID:',
+            style=Pack(margin=(0, 5)),
+            tooltip='TWiT API 3Scale Application ID'
+        )
+        self.app_id_label = app_id_label
         initial_app_id = os.getenv('TWITAPI_APPLICATIONID') or os.getenv('twitapi_applicationid') or ''
-        self.app_id_input = toga.TextInput(value=initial_app_id, on_change=self.on_app_id_change, style=Pack(flex=1))
+        self.app_id_input = toga.TextInput(
+            value=initial_app_id,
+            on_change=self.on_app_id_change,
+            style=Pack(flex=1),
+            tooltip='Enter your TWiT API Application ID from 3Scale developer portal'
+        )
         app_id_box.add(app_id_label)
         app_id_box.add(self.app_id_input)
 
         # TWIT API Application Key setting
         app_key_box = toga.Box(style=Pack(direction=ROW, margin=5))
-        app_key_label = toga.Label('API Application Key:', style=Pack(margin=(0, 5)))
+        app_key_label = toga.Label(
+            'API Application Key:',
+            style=Pack(margin=(0, 5)),
+            tooltip='TWiT API 3Scale Application Key'
+        )
+        self.app_key_label = app_key_label
         initial_app_key = os.getenv('TWITAPI_APPLICATIONKEYS') or os.getenv('twitapi_applicationkeys') or ''
-        self.app_key_input = toga.PasswordInput(value=initial_app_key, on_change=self.on_app_key_change, style=Pack(flex=1))
-        test_api_button = toga.Button('Test API', on_press=self.on_test_api_press, style=Pack(margin=5))
+        self.app_key_input = toga.PasswordInput(
+            value=initial_app_key,
+            on_change=self.on_app_key_change,
+            style=Pack(flex=1),
+            tooltip='Enter your TWiT API Application Key (token) from 3Scale developer portal'
+        )
+        test_api_button = toga.Button(
+            'Test API',
+            on_press=self.on_test_api_press,
+            style=Pack(margin=5),
+            tooltip='Test TWiT API credentials and verify connection to TWiT API'
+        )
+        self.test_api_button = test_api_button
         app_key_box.add(app_key_label)
         app_key_box.add(self.app_key_input)
         app_key_box.add(test_api_button)
 
         # TWIT Club URL setting
         url_box = toga.Box(style=Pack(direction=ROW, margin=5))
-        url_label = toga.Label('TWIT Club URL:', style=Pack(margin=(0, 5)))
-        url_prefix = toga.Label('https://twit.memberfulcontent.com/rss/9041?auth=', style=Pack(margin=(0, 5)))
+        url_label = toga.Label(
+            'TWIT Club URL:',
+            style=Pack(margin=(0, 5)),
+            tooltip='Club TWiT Memberful RSS feed address or authentication key'
+        )
+        self.url_label = url_label
+        url_prefix = toga.Label(
+            'https://twit.memberfulcontent.com/rss/9041?auth=',
+            style=Pack(margin=(0, 5)),
+            tooltip='Club TWiT Memberful RSS feed base URL prefix'
+        )
+        self.url_prefix = url_prefix
         twit_club_url = os.getenv('twitcluburl') or os.getenv('TWITCLUBURL') or os.getenv('TWIT_CLUB_URL') or ''
         auth_prefix = 'https://twit.memberfulcontent.com/rss/9041?auth='
         if twit_club_url.startswith(auth_prefix):
@@ -1189,8 +1496,19 @@ class TwitTUIForm(toga.App):
             initial_url_key = twit_club_url.split('?auth=', 1)[1]
         else:
             initial_url_key = twit_club_url
-        self.url_input = toga.PasswordInput(value=initial_url_key, on_change=self.on_url_change, style=Pack(flex=1))
-        show_url_button = toga.Button('Show', on_press=self.on_show_club_url_press, style=Pack(margin=5))
+        self.url_input = toga.PasswordInput(
+            value=initial_url_key,
+            on_change=self.on_url_change,
+            style=Pack(flex=1),
+            tooltip='Enter Club TWiT Memberful authentication key or complete RSS feed URL'
+        )
+        show_url_button = toga.Button(
+            'Show',
+            on_press=self.on_show_club_url_press,
+            style=Pack(margin=5),
+            tooltip='Open Club TWiT feed URL in browser or show feed info'
+        )
+        self.show_url_button = show_url_button
         url_box.add(url_label)
         url_box.add(url_prefix)
         url_box.add(self.url_input)
@@ -1198,13 +1516,41 @@ class TwitTUIForm(toga.App):
 
         # Destination folder setting
         dest_box = toga.Box(style=Pack(direction=ROW, margin=5))
-        dest_label = toga.Label('Download Destination:', style=Pack(margin=(0, 5)))
+        dest_label = toga.Label(
+            'Download Destination:',
+            style=Pack(margin=(0, 5)),
+            tooltip='Directory where downloaded podcast media files will be stored'
+        )
+        self.dest_label = dest_label
         initial_dest = os.getenv('twitclubdestination') or os.getenv('TWITCLUBDESTINATION') or os.getenv('TWIT_CLUB_DESTINATION') or ''
-        self.dest_input = toga.TextInput(value=initial_dest, on_change=self.on_dest_change, style=Pack(flex=1))
-        dest_button = toga.Button('Browse', on_press=self.on_browse_press, style=Pack(margin=5))
-        dest_open_button = toga.Button('Open', on_press=self.on_open_destination_press, style=Pack(margin=5))
+        self.dest_input = toga.TextInput(
+            value=initial_dest,
+            on_change=self.on_dest_change,
+            style=Pack(flex=1),
+            tooltip='Path to destination directory for downloaded media files'
+        )
+        dest_button = toga.Button(
+            'Browse',
+            on_press=self.on_browse_press,
+            style=Pack(margin=5),
+            tooltip='Browse filesystem to choose download destination directory'
+        )
+        self.dest_button = dest_button
+        dest_open_button = toga.Button(
+            'Open',
+            on_press=self.on_open_destination_press,
+            style=Pack(margin=5),
+            tooltip='Open download destination directory in system file manager'
+        )
+        self.dest_open_button = dest_open_button
         initial_show_folders = self.is_show_folders_enabled()
-        self.show_folders_checkbox = toga.Switch('Show Folders', value=initial_show_folders, on_change=self.on_show_folders_change, style=Pack(margin=5))
+        self.show_folders_checkbox = toga.Switch(
+            'Show Folders',
+            value=initial_show_folders,
+            on_change=self.on_show_folders_change,
+            style=Pack(margin=5),
+            tooltip='Automatically create subfolders named after each show when downloading'
+        )
         dest_box.add(dest_label)
         dest_box.add(self.dest_input)
         dest_box.add(dest_button)
@@ -1213,17 +1559,37 @@ class TwitTUIForm(toga.App):
 
         # Block size setting
         block_box = toga.Box(style=Pack(direction=ROW, margin=5))
-        block_label = toga.Label('Block Size:', style=Pack(margin=(0, 5)))
+        block_label = toga.Label(
+            'Block Size:',
+            style=Pack(margin=(0, 5)),
+            tooltip='Download buffer chunk size in bytes'
+        )
+        self.block_label = block_label
         initial_block = os.getenv('twitclubblocksize') or os.getenv('TWITCLUBBLOCKSIZE') or '8192'
-        self.block_input = toga.TextInput(value=initial_block, on_change=self.on_block_change, style=Pack(flex=1))
+        self.block_input = toga.TextInput(
+            value=initial_block,
+            on_change=self.on_block_change,
+            style=Pack(flex=1),
+            tooltip='Download chunk buffer size in bytes (default: 8192)'
+        )
         block_box.add(block_label)
         block_box.add(self.block_input)
 
         # Streamer setting
         streamer_box = toga.Box(style=Pack(direction=ROW, margin=5))
-        streamer_label = toga.Label('Streamer:', style=Pack(margin=(0, 5)))
+        streamer_label = toga.Label(
+            'Streamer:',
+            style=Pack(margin=(0, 5)),
+            tooltip='Command-line template for media player to stream episodes'
+        )
+        self.streamer_label = streamer_label
         initial_streamer = self.get_initial_streamer_setting()
-        self.streamer_input = toga.TextInput(value=initial_streamer, on_change=self.on_streamer_change, style=Pack(flex=1))
+        self.streamer_input = toga.TextInput(
+            value=initial_streamer,
+            on_change=self.on_streamer_change,
+            style=Pack(flex=1),
+            tooltip="Media player launch command; %f is replaced with stream URL (e.g. 'env LC_ALL=C vlc %f')"
+        )
         streamer_box.add(streamer_label)
         streamer_box.add(self.streamer_input)
 
@@ -1236,7 +1602,12 @@ class TwitTUIForm(toga.App):
         settings_box.add(streamer_box)
 
         # Progress bar section at the bottom of the form
-        self.progress_bar = toga.ProgressBar(max=100.0, value=0.0, style=Pack(flex=1, margin=5))
+        self.progress_bar = toga.ProgressBar(
+            max=100.0,
+            value=0.0,
+            style=Pack(flex=1, margin=5),
+            tooltip='Progress indicator for active download or operation'
+        )
 
         # Add all components to main box
         main_box.add(show_box)
@@ -1256,24 +1627,30 @@ class TwitTUIForm(toga.App):
         readme_cmd = toga.Command(
             self.on_open_readme,
             text='View README Documentation',
+            tooltip='View TwitTUI documentation and usage guide',
             group=toga.Group.HELP,
             section=0,
             order=1
         )
+        self.readme_cmd = readme_cmd
         apib_cmd = toga.Command(
             self.on_open_apib,
             text='View API Specification (twittv.apib)',
+            tooltip='View TWiT API Blueprint specification',
             group=toga.Group.HELP,
             section=0,
             order=2
         )
+        self.apib_cmd = apib_cmd
         api_key_cmd = toga.Command(
             self.on_open_api_key_url,
             text='Get TWiT API Key',
+            tooltip='Open TWiT API developer portal in browser to obtain API key',
             group=toga.Group.HELP,
             section=0,
             order=3
         )
+        self.api_key_cmd = api_key_cmd
         self.commands.add(readme_cmd)
         self.commands.add(apib_cmd)
         self.commands.add(api_key_cmd)
@@ -2889,12 +3266,13 @@ class TwitTUIForm(toga.App):
 
             if len(targets) == 1:
                 target = targets[0]
-                resolutions = self.get_available_resolutions(target)
+                is_audio = self.is_audio_only()
+                resolutions = self.get_available_resolutions(target, audio_only=is_audio)
                 target_title = getattr(target, 'title', str(target[1] if isinstance(target, (tuple, list)) and len(target) > 1 else 'Episode'))
                 if len(resolutions) > 1:
                     chosen_res = await self.prompt_resolution_choice(
-                        title="Select Download Resolution",
-                        message=f"Multiple resolutions available for '{target_title}'. Which resolution do you prefer to download?",
+                        title="Select Download Format" if is_audio else "Select Download Resolution",
+                        message=f"Multiple audio options available for '{target_title}'. Which format do you prefer to download?" if is_audio else f"Multiple resolutions available for '{target_title}'. Which resolution do you prefer to download?",
                         resolutions=resolutions
                     )
                     if not chosen_res:
@@ -2902,25 +3280,55 @@ class TwitTUIForm(toga.App):
                         return
                     target.selected_media_url = chosen_res.get('url')
                     target.selected_resolution = chosen_res.get('id')
+                elif len(resolutions) == 1:
+                    target.selected_media_url = resolutions[0].get('url')
+                    target.selected_resolution = resolutions[0].get('id')
             else:
+                is_audio = self.is_audio_only()
                 # Check if multiple resolutions exist across batch
-                has_multi = any(len(self.get_available_resolutions(t)) > 1 for t in targets)
+                has_multi = any(len(self.get_available_resolutions(t, audio_only=is_audio)) > 1 for t in targets)
                 if has_multi:
-                    batch_options = [
-                        {'id': 'video_hd', 'name': 'HD Video (1080p/720p)', 'label': 'HD Video (1080p/720p) - High Quality', 'type': 'video'},
-                        {'id': 'video_large', 'name': 'Large Video (540p/480p)', 'label': 'Large Video (540p/480p) - Medium Quality', 'type': 'video'},
-                        {'id': 'video_small', 'name': 'Small / Mobile Video (360p)', 'label': 'Small / Mobile Video (360p) - Low Bandwidth', 'type': 'video'},
-                        {'id': 'video_audio', 'name': 'Audio Only (MP3/M4A)', 'label': 'Audio Only (MP3/M4A) - Audio Only', 'type': 'audio'},
-                    ]
-                    chosen_batch = await self.prompt_resolution_choice(
-                        title="Select Batch Download Resolution",
-                        message=f"Multiple resolutions available across the {len(targets)} selected episodes. Which resolution do you prefer?",
-                        resolutions=batch_options
-                    )
-                    if not chosen_batch:
-                        print("Batch download cancelled by user.")
-                        return
-                    preferred_resolution = chosen_batch.get('id')
+                    if is_audio:
+                        seen_ids = set()
+                        batch_options = []
+                        for t in targets:
+                            for r in self.get_available_resolutions(t, audio_only=True):
+                                if r['id'] not in seen_ids:
+                                    seen_ids.add(r['id'])
+                                    batch_options.append({
+                                        'id': r['id'],
+                                        'name': r['name'],
+                                        'label': r['label'],
+                                        'type': 'audio'
+                                    })
+                        if not batch_options:
+                            batch_options = [
+                                {'id': 'video_audio', 'name': 'Audio Only (MP3/M4A)', 'label': 'Audio Only (MP3/M4A) - Audio Only', 'type': 'audio'},
+                            ]
+                        prompt_title = "Select Batch Download Format"
+                        prompt_msg = f"Multiple audio formats available across the {len(targets)} selected episodes. Which format do you prefer?"
+                    else:
+                        batch_options = [
+                            {'id': 'video_hd', 'name': 'HD Video (1080p/720p)', 'label': 'HD Video (1080p/720p) - High Quality', 'type': 'video'},
+                            {'id': 'video_large', 'name': 'Large Video (540p/480p)', 'label': 'Large Video (540p/480p) - Medium Quality', 'type': 'video'},
+                            {'id': 'video_small', 'name': 'Small / Mobile Video (360p)', 'label': 'Small / Mobile Video (360p) - Low Bandwidth', 'type': 'video'},
+                            {'id': 'video_audio', 'name': 'Audio Only (MP3/M4A)', 'label': 'Audio Only (MP3/M4A) - Audio Only', 'type': 'audio'},
+                        ]
+                        prompt_title = "Select Batch Download Resolution"
+                        prompt_msg = f"Multiple resolutions available across the {len(targets)} selected episodes. Which resolution do you prefer?"
+
+                    if len(batch_options) > 1:
+                        chosen_batch = await self.prompt_resolution_choice(
+                            title=prompt_title,
+                            message=prompt_msg,
+                            resolutions=batch_options
+                        )
+                        if not chosen_batch:
+                            print("Batch download cancelled by user.")
+                            return
+                        preferred_resolution = chosen_batch.get('id')
+                    elif len(batch_options) == 1:
+                        preferred_resolution = batch_options[0].get('id')
 
             # Start download in background thread so GUI remains responsive
             thread = threading.Thread(target=self.download_episodes_batch, args=(targets, preferred_resolution), daemon=True)
@@ -3209,10 +3617,13 @@ class TwitTUIForm(toga.App):
 
         return fallback_candidate
 
-    def get_available_resolutions(self, target, show_name: str = None) -> list[dict]:
+    def get_available_resolutions(self, target, show_name: str = None, audio_only: bool = None) -> list[dict]:
         """Extract all available resolution and format choices for a given episode target."""
         if target is None:
             return []
+
+        if audio_only is None:
+            audio_only = self.is_audio_only()
 
         resolutions = []
         seen_urls = set()
@@ -3248,6 +3659,11 @@ class TwitTUIForm(toga.App):
                 return
             if cand_url in seen_urls:
                 return
+
+            if audio_only:
+                if res_type != 'audio' and not self.is_audio_url(cand_url):
+                    return
+
             seen_urls.add(cand_url)
 
             size_bytes = 0
@@ -3312,7 +3728,7 @@ class TwitTUIForm(toga.App):
                         elif 'small' in fmt or '360' in fmt or 'sds' in fmt or 'low' in fmt:
                             _add_cand('video_small', 'Small / Mobile Video (360p)', 'video', str(u), s)
                         elif 'audio' in fmt or 'mp3' in fmt or 'm4a' in fmt:
-                            _add_cand('video_audio', 'Audio Only (MP3/M4A)', 'audio', str(u), s)
+                            _add_cand(f'audio_{idx}' if idx > 0 else 'video_audio', f.get('label') or 'Audio Only (MP3/M4A)', 'audio', str(u), s)
                         else:
                             is_aud = self.is_audio_url(str(u))
                             _add_cand(f'file_{idx}', f.get('label') or ('Audio' if is_aud else 'Video'), 'audio' if is_aud else 'video', str(u), s)
@@ -3361,10 +3777,18 @@ class TwitTUIForm(toga.App):
                                 _add_cand('rss_feed', 'Audio (MP3/M4A)' if is_aud else 'Standard Video', 'audio' if is_aud else 'video', enc, s)
 
         # 4. Check direct media_url or resolved candidate
-        direct_url = getattr(target, 'media_url', None) or ep_dict.get('media_url') or ep_dict.get('mediaUrl')
-        if direct_url and self.is_valid_media_url(direct_url) and direct_url not in seen_urls:
-            is_aud = self.is_audio_url(direct_url)
-            _add_cand('direct', 'Audio' if is_aud else 'Video', 'audio' if is_aud else 'video', direct_url)
+        for k in ['audio_url', 'audioUrl', 'media_url', 'mediaUrl', 'downloadUrl', 'streamUrl', 'fileUrl', 'enclosure_url']:
+            direct_url = ep_dict.get(k) or (getattr(target, k, None) if hasattr(target, k) else None)
+            if direct_url and self.is_valid_media_url(direct_url) and direct_url not in seen_urls:
+                is_aud = self.is_audio_url(direct_url) or 'audio' in k.lower()
+                _add_cand('direct', 'Audio' if is_aud else 'Video', 'audio' if is_aud else 'video', direct_url)
+
+        if not resolutions and audio_only:
+            resolved_url = self.resolve_target_media_url(target, audio_only=True)
+            if resolved_url and self.is_valid_media_url(resolved_url) and resolved_url not in seen_urls:
+                is_aud = self.is_audio_url(resolved_url)
+                if is_aud:
+                    _add_cand('audio', 'Audio Only (MP3/M4A)', 'audio', resolved_url)
 
         return resolutions
 
@@ -3392,8 +3816,8 @@ class TwitTUIForm(toga.App):
             modal_win = toga.Window(title=title, size=(520, 340))
 
             box = toga.Box(style=Pack(direction=COLUMN, margin=15))
-            title_lbl = toga.Label(title, style=Pack(margin=(0, 0, 10, 0), font_weight='bold'))
-            msg_lbl = toga.Label(message, style=Pack(margin=(0, 0, 15, 0)))
+            title_lbl = toga.Label(title, style=Pack(margin=(0, 0, 10, 0), font_weight='bold'), tooltip='Resolution selection dialog title')
+            msg_lbl = toga.Label(message, style=Pack(margin=(0, 0, 15, 0)), tooltip='Available stream formats for this episode')
             box.add(title_lbl)
             box.add(msg_lbl)
 
@@ -3409,7 +3833,7 @@ class TwitTUIForm(toga.App):
                         except Exception:
                             pass
                     return _on_click
-                btn = toga.Button(lbl, on_press=_make_handler(opt), style=Pack(margin=(3, 0)))
+                btn = toga.Button(lbl, on_press=_make_handler(opt), style=Pack(margin=(3, 0)), tooltip=f'Stream with resolution: {lbl}')
                 options_box.add(btn)
             box.add(options_box)
 
@@ -3421,7 +3845,7 @@ class TwitTUIForm(toga.App):
                 except Exception:
                     pass
 
-            cancel_btn = toga.Button('Cancel', on_press=_on_cancel, style=Pack(margin=(10, 0)))
+            cancel_btn = toga.Button('Cancel', on_press=_on_cancel, style=Pack(margin=(10, 0)), tooltip='Cancel stream resolution selection')
             box.add(cancel_btn)
 
             def _on_win_close(win):
@@ -3448,14 +3872,15 @@ class TwitTUIForm(toga.App):
                 return
 
             target = selected[0] if isinstance(selected, list) else selected
+            is_audio = self.is_audio_only()
 
-            resolutions = self.get_available_resolutions(target)
+            resolutions = self.get_available_resolutions(target, audio_only=is_audio)
             target_title = getattr(target, 'title', str(target[1] if isinstance(target, (tuple, list)) and len(target) > 1 else 'Episode'))
 
             if len(resolutions) > 1:
                 chosen_res = await self.prompt_resolution_choice(
-                    title="Select Stream Resolution",
-                    message=f"Multiple resolutions available for '{target_title}'. Which resolution do you prefer to stream?",
+                    title="Select Audio Stream" if is_audio else "Select Stream Resolution",
+                    message=f"Multiple audio options available for '{target_title}'. Which format do you prefer to stream?" if is_audio else f"Multiple resolutions available for '{target_title}'. Which resolution do you prefer to stream?",
                     resolutions=resolutions
                 )
                 if not chosen_res:
@@ -3465,16 +3890,17 @@ class TwitTUIForm(toga.App):
             elif len(resolutions) == 1:
                 media_url = resolutions[0].get('url')
             else:
-                media_url = self.resolve_target_media_url(target)
+                media_url = self.resolve_target_media_url(target, audio_only=is_audio)
 
             if not media_url:
                 print("No media URL found for the selected episode")
                 return
 
-            streamer_template = self.streamer_input.value if self.streamer_input and self.streamer_input.value else 'env LC_ALL=C vlc %f'
-            sanitized_log_url = re.sub(r'([?&]auth=)[^&]+', r'\1[REDACTED]', media_url)
+            resolved_media_url = resolve_stream_url(media_url)
+            streamer_template = self.streamer_input.value if getattr(self, 'streamer_input', None) and self.streamer_input.value else 'env LC_ALL=C vlc %f'
+            sanitized_log_url = re.sub(r'([?&]auth=)[^&]+', r'\1[REDACTED]', resolved_media_url)
             print(f"Launching stream player for: {sanitized_log_url}")
-            launch_stream_safe(streamer_template, media_url)
+            launch_stream_safe(streamer_template, resolved_media_url)
         except Exception as e:
             print(f"Error launching stream: {e}")
 
@@ -4513,7 +4939,7 @@ class TwitTUIForm(toga.App):
                 # Title
                 ep_title = meta.get('title') or ''
                 if ep_title:
-                    content_box.add(toga.Label(ep_title, style=Pack(font_size=13, font_weight='bold', margin_bottom=6)))
+                    content_box.add(toga.Label(ep_title, style=Pack(font_size=13, font_weight='bold', margin_bottom=6), tooltip='Episode title'))
 
                 # Metadata Key-Values
                 meta_rows = []
@@ -4531,17 +4957,18 @@ class TwitTUIForm(toga.App):
                     meta_rows.append(f"ID / GUID: {meta['id']}")
 
                 for row_text in meta_rows:
-                    content_box.add(toga.Label(row_text, style=Pack(margin_bottom=3)))
+                    content_box.add(toga.Label(row_text, style=Pack(margin_bottom=3), tooltip=f'Metadata: {row_text}'))
 
                 # Web Link (Clickable)
                 ep_link = meta.get('link') or ''
                 if ep_link:
                     link_box = toga.Box(style=Pack(direction=ROW, margin_top=4, margin_bottom=4, align_items='center'))
-                    link_box.add(toga.Label("Web Link:", style=Pack(width=90, font_weight='bold', margin_right=4)))
+                    link_box.add(toga.Label("Web Link:", style=Pack(width=90, font_weight='bold', margin_right=4), tooltip='Episode webpage link'))
                     link_btn = toga.Button(
                         ep_link,
                         on_press=lambda w, u=ep_link: self.open_url_in_browser(u),
-                        style=Pack(flex=1)
+                        style=Pack(flex=1),
+                        tooltip=f'Open episode webpage in browser: {ep_link}'
                     )
                     link_box.add(link_btn)
                     content_box.add(link_box)
@@ -4550,11 +4977,12 @@ class TwitTUIForm(toga.App):
                 transcript_url = meta.get('transcript_url') or meta.get('transcript') or ''
                 if transcript_url:
                     transcript_box = toga.Box(style=Pack(direction=ROW, margin_top=4, margin_bottom=4, align_items='center'))
-                    transcript_box.add(toga.Label("Transcript:", style=Pack(width=90, font_weight='bold', margin_right=4)))
+                    transcript_box.add(toga.Label("Transcript:", style=Pack(width=90, font_weight='bold', margin_right=4), tooltip='Episode transcript link'))
                     transcript_btn = toga.Button(
                         transcript_url,
                         on_press=lambda w, u=transcript_url: self.open_url_in_browser(u),
-                        style=Pack(flex=1)
+                        style=Pack(flex=1),
+                        tooltip=f'Open transcript in browser: {transcript_url}'
                     )
                     transcript_box.add(transcript_btn)
                     content_box.add(transcript_box)
@@ -4563,42 +4991,44 @@ class TwitTUIForm(toga.App):
                 media_url = meta.get('media_url') or ''
                 if media_url:
                     media_box = toga.Box(style=Pack(direction=ROW, margin_top=4, margin_bottom=4, align_items='center'))
-                    media_box.add(toga.Label("Media URL:", style=Pack(width=90, font_weight='bold', margin_right=4)))
+                    media_box.add(toga.Label("Media URL:", style=Pack(width=90, font_weight='bold', margin_right=4), tooltip='Direct media stream link'))
                     media_btn = toga.Button(
                         media_url,
                         on_press=lambda w, u=media_url: self.open_url_in_browser(u),
-                        style=Pack(flex=1)
+                        style=Pack(flex=1),
+                        tooltip=f'Open media stream in browser: {media_url}'
                     )
                     media_box.add(media_btn)
                     content_box.add(media_box)
 
                 # Available Formats
                 if meta.get('formats'):
-                    content_box.add(toga.Label(f"Available Formats: {', '.join(meta['formats'])}", style=Pack(margin_top=3, margin_bottom=3)))
+                    content_box.add(toga.Label(f"Available Formats: {', '.join(meta['formats'])}", style=Pack(margin_top=3, margin_bottom=3), tooltip='Available media formats for this episode'))
 
                 # Hosts / Guests
                 if meta.get('people'):
-                    content_box.add(toga.Label(f"Hosts / Guests: {', '.join(meta['people'])}", style=Pack(margin_top=3, margin_bottom=3)))
+                    content_box.add(toga.Label(f"Hosts / Guests: {', '.join(meta['people'])}", style=Pack(margin_top=3, margin_bottom=3), tooltip='Hosts and guests appearing in this episode'))
 
                 # Topics
                 if meta.get('topics'):
-                    content_box.add(toga.Label(f"Topics: {', '.join(meta['topics'])}", style=Pack(margin_top=3, margin_bottom=3)))
+                    content_box.add(toga.Label(f"Topics: {', '.join(meta['topics'])}", style=Pack(margin_top=3, margin_bottom=3), tooltip='Topics discussed in this episode'))
 
                 # Description / Show notes
                 desc_text = meta.get('description') or ''
                 if desc_text:
-                    content_box.add(toga.Label("Description / Show Notes:", style=Pack(font_weight='bold', margin_top=6, margin_bottom=4)))
+                    content_box.add(toga.Label("Description / Show Notes:", style=Pack(font_weight='bold', margin_top=6, margin_bottom=4), tooltip='Episode description and show notes'))
                     desc_input = toga.MultilineTextInput(
                         value=desc_text,
                         readonly=True,
-                        style=Pack(flex=1, height=220, margin_bottom=6)
+                        style=Pack(flex=1, height=220, margin_bottom=6),
+                        tooltip='Episode description and show notes'
                     )
                     content_box.add(desc_input)
 
                 # Bottom Action Bar
                 btn_box = toga.Box(style=Pack(direction=ROW, margin_top=6, align_items='center'))
                 btn_box.add(toga.Box(style=Pack(flex=1)))
-                close_btn = toga.Button('Close', on_press=_close_meta_window, style=Pack(width=100))
+                close_btn = toga.Button('Close', on_press=_close_meta_window, style=Pack(width=100), tooltip='Close episode details window')
                 btn_box.add(close_btn)
                 content_box.add(btn_box)
 
@@ -4913,6 +5343,13 @@ class TwitTUIForm(toga.App):
             self.episode_radio.text = self.episode_radio.text.replace('☐', '☑')
         elif widget == self.title_radio:
             self.title_radio.text = self.title_radio.text.replace('☐', '☑')
+
+        if hasattr(self, 'date_radio') and self.date_radio:
+            self.date_radio.tooltip = "Sort episodes by release date" + (" (active)" if widget == self.date_radio else "")
+        if hasattr(self, 'episode_radio') and self.episode_radio:
+            self.episode_radio.tooltip = "Sort episodes by episode number" + (" (active)" if widget == self.episode_radio else "")
+        if hasattr(self, 'title_radio') and self.title_radio:
+            self.title_radio.tooltip = "Sort episodes alphabetically by title" + (" (active)" if widget == self.title_radio else "")
 
         self.load_episodes_for_selected_show()
 

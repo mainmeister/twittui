@@ -3,6 +3,7 @@
 import os
 import tempfile
 import unittest
+import unittest.mock
 import urllib.request
 import urllib.error
 import threading
@@ -12,6 +13,8 @@ os.environ.setdefault('TOGA_BACKEND', 'toga_textual')
 
 from twittui_form import (
     build_stream_args,
+    resolve_stream_url,
+    launch_stream_safe,
     write_restricted_file,
     generate_local_server_token,
     safe_xml_fromstring,
@@ -185,6 +188,48 @@ class TestTwitTUISecurity(unittest.TestCase):
         form.url_input = toga.PasswordInput(value="http://twit.memberfulcontent.com/rss/9041?auth=test")
         url = form.get_full_club_twit_url()
         self.assertTrue(url.startswith("https://"))
+
+    def test_resolve_stream_url_following_redirects(self) -> None:
+        """Verify resolve_stream_url follows HTTP redirects to destination URL."""
+        source_url = "https://pdst.fm/e/pscrb.fm/rss/p/mgln.ai/e/294/cdn.twit.tv/cap/sn_1100/b76f564f-0da0-482a-8df2-d239ddec87f1.mp3"
+        target_url = "https://cdn.twit.tv/cap/sn_1100/b76f564f-0da0-482a-8df2-d239ddec87f1.mp3"
+
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.url = target_url
+
+        with unittest.mock.patch("requests.head", return_value=mock_resp):
+            resolved = resolve_stream_url(source_url)
+            self.assertEqual(resolved, target_url)
+
+    def test_resolve_stream_url_unwraps_tracking_prefix_on_failure(self) -> None:
+        """Verify fallback unwraps nested podcast analytics prefix when network request fails."""
+        source_url = "https://pdst.fm/e/pscrb.fm/rss/p/mgln.ai/e/294/cdn.twit.tv/cap/sn_1100/b76f564f-0da0-482a-8df2-d239ddec87f1.mp3"
+        target_url = "https://cdn.twit.tv/cap/sn_1100/b76f564f-0da0-482a-8df2-d239ddec87f1.mp3"
+
+        with unittest.mock.patch("requests.head", side_effect=Exception("Connection refused")), \
+             unittest.mock.patch("requests.get", side_effect=Exception("Connection refused")):
+            resolved = resolve_stream_url(source_url)
+            self.assertEqual(resolved, target_url)
+
+    def test_resolve_stream_url_skips_youtube(self) -> None:
+        """Verify YouTube URLs bypass redirect resolution."""
+        yt_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        with unittest.mock.patch("requests.head") as mock_head:
+            resolved = resolve_stream_url(yt_url)
+            self.assertEqual(resolved, yt_url)
+            mock_head.assert_not_called()
+
+    def test_launch_stream_safe_resolves_and_spawns(self) -> None:
+        """Verify launch_stream_safe resolves stream URL and launches subprocess."""
+        source_url = "https://pdst.fm/e/pscrb.fm/rss/p/mgln.ai/e/294/cdn.twit.tv/cap/sn_1100/b76f564f-0da0-482a-8df2-d239ddec87f1.mp3"
+        target_url = "https://cdn.twit.tv/cap/sn_1100/b76f564f-0da0-482a-8df2-d239ddec87f1.mp3"
+
+        with unittest.mock.patch("twittui_form.resolve_stream_url", return_value=target_url) as mock_resolve, \
+             unittest.mock.patch("subprocess.Popen") as mock_popen:
+            launch_stream_safe("env LC_ALL=C vlc %f", source_url)
+            mock_resolve.assert_called_once_with(source_url)
+            mock_popen.assert_called_once_with(["env", "LC_ALL=C", "vlc", target_url], shell=False)
 
 
 if __name__ == "__main__":

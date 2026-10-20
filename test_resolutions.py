@@ -2,6 +2,7 @@
 
 import os
 import unittest
+import unittest.mock
 import asyncio
 
 os.environ.setdefault('TOGA_BACKEND', 'toga_textual')
@@ -13,6 +14,8 @@ class TestTwitTUIResolutions(unittest.TestCase):
     """Test resolution extraction and selection behavior."""
 
     def setUp(self) -> None:
+        os.environ['TWITAUDIOONLY'] = '0'
+        os.environ['TWITCLUBSHOWFOLDERS'] = '0'
         self.form = TwitTUIForm(formal_name="TwitTUI", app_id="org.twit.test")
 
     def test_get_available_resolutions_from_api_dict(self) -> None:
@@ -172,6 +175,231 @@ class TestTwitTUIResolutions(unittest.TestCase):
 
         self.form.download_episodes_batch([target])
         self.assertEqual(downloaded_urls, ['https://twit.tv/ep102_custom.mp4'])
+
+    def test_get_available_resolutions_when_audio_only_enabled(self) -> None:
+        """Verify only audio options are returned when audio_only is True or enabled."""
+        ep_data = {
+            'id': '12345',
+            'video_hd': {
+                'mediaUrl': 'https://twit.tv/ep1000_1080p.mp4',
+                'fileSize': 1500000000,
+            },
+            'video_large': {
+                'mediaUrl': 'https://twit.tv/ep1000_540p.mp4',
+                'fileSize': 750000000,
+            },
+            'video_audio': {
+                'mediaUrl': 'https://twit.tv/ep1000_audio.mp3',
+                'fileSize': 70000000,
+            },
+        }
+
+        resolutions = self.form.get_available_resolutions(ep_data, audio_only=True)
+        self.assertEqual(len(resolutions), 1)
+        self.assertEqual(resolutions[0]['id'], 'video_audio')
+        self.assertEqual(resolutions[0]['url'], 'https://twit.tv/ep1000_audio.mp3')
+        self.assertEqual(resolutions[0]['type'], 'audio')
+
+    def test_get_available_resolutions_multiple_audio_options_when_audio_only(self) -> None:
+        """Verify multiple audio formats are returned when episode has multiple audio sources."""
+        ep_data = {
+            'video_hd': {'mediaUrl': 'https://twit.tv/ep1000_1080p.mp4'},
+            'files': [
+                {'format': 'audio', 'label': 'MP3 Audio (High)', 'mediaUrl': 'https://twit.tv/audio_hq.mp3', 'fileSize': 80000000},
+                {'format': 'audio', 'label': 'M4A Audio (AAC)', 'mediaUrl': 'https://twit.tv/audio.m4a', 'fileSize': 40000000},
+            ]
+        }
+
+        self.form.is_audio_only = lambda: True
+        resolutions = self.form.get_available_resolutions(ep_data)
+        self.assertEqual(len(resolutions), 2)
+        urls = [r['url'] for r in resolutions]
+        self.assertIn('https://twit.tv/audio_hq.mp3', urls)
+        self.assertIn('https://twit.tv/audio.m4a', urls)
+        self.assertTrue(all(r['type'] == 'audio' for r in resolutions))
+
+    def test_on_stream_press_audio_only_with_multiple_audio_prompts_audio_options(self) -> None:
+        """Verify on_stream_press prompts user with only audio options when audio only is enabled."""
+        ep_data = {
+            'title': 'Test Episode',
+            'video_hd': {'mediaUrl': 'https://twit.tv/video_hd.mp4'},
+            'files': [
+                {'format': 'audio', 'label': 'MP3 Audio', 'mediaUrl': 'https://twit.tv/stream_audio.mp3'},
+                {'format': 'audio', 'label': 'AAC Audio', 'mediaUrl': 'https://twit.tv/stream_audio.m4a'},
+            ]
+        }
+
+        class MockTarget:
+            def __init__(self, data):
+                self.title = data['title']
+                self.episode_data = data
+
+        self.form.is_audio_only = lambda: True
+        self.form.episodes_list = type('MockList', (), {'selection': [MockTarget(ep_data)]})()
+
+        prompted_resolutions = []
+
+        async def mock_prompt(title, message, resolutions):
+            prompted_resolutions.extend(resolutions)
+            return resolutions[1]  # Choose AAC Audio
+
+        self.form.prompt_resolution_choice = mock_prompt
+
+        launched_streams = []
+        with unittest.mock.patch('twittui_form.launch_stream_safe', side_effect=lambda template, url: launched_streams.append(url)):
+            asyncio.run(self.form.on_stream_press())
+
+        self.assertEqual(len(prompted_resolutions), 2)
+        self.assertTrue(all(r['type'] == 'audio' for r in prompted_resolutions))
+        self.assertEqual(launched_streams, ['https://twit.tv/stream_audio.m4a'])
+
+    def test_on_stream_press_audio_only_with_single_audio_option_plays_without_prompt(self) -> None:
+        """Verify on_stream_press directly streams audio without prompt when only 1 audio option is available."""
+        ep_data = {
+            'title': 'Test Single Audio Ep',
+            'video_hd': {'mediaUrl': 'https://twit.tv/video_hd.mp4'},
+            'video_large': {'mediaUrl': 'https://twit.tv/video_large.mp4'},
+            'video_audio': {'mediaUrl': 'https://twit.tv/stream_single.mp3'},
+        }
+
+        class MockTarget:
+            def __init__(self, data):
+                self.title = data['title']
+                self.episode_data = data
+
+        self.form.is_audio_only = lambda: True
+        self.form.episodes_list = type('MockList', (), {'selection': [MockTarget(ep_data)]})()
+
+        mock_prompt_called = False
+
+        async def mock_prompt(title, message, resolutions):
+            nonlocal mock_prompt_called
+            mock_prompt_called = True
+            return resolutions[0]
+
+        self.form.prompt_resolution_choice = mock_prompt
+
+        launched_streams = []
+        with unittest.mock.patch('twittui_form.launch_stream_safe', side_effect=lambda template, url: launched_streams.append(url)):
+            asyncio.run(self.form.on_stream_press())
+
+        self.assertFalse(mock_prompt_called)
+        self.assertEqual(launched_streams, ['https://twit.tv/stream_single.mp3'])
+
+    def test_on_download_press_audio_only_with_multiple_audio_prompts_audio_options(self) -> None:
+        """Verify on_download_press prompts user with only audio options when audio only is enabled."""
+        ep_data = {
+            'title': 'Test Download Ep',
+            'video_hd': {'mediaUrl': 'https://twit.tv/video_hd.mp4'},
+            'files': [
+                {'format': 'audio', 'label': 'MP3 Audio', 'mediaUrl': 'https://twit.tv/dl_audio.mp3'},
+                {'format': 'audio', 'label': 'AAC Audio', 'mediaUrl': 'https://twit.tv/dl_audio.m4a'},
+            ]
+        }
+
+        class MockTarget:
+            def __init__(self, data):
+                self.title = data['title']
+                self.episode = '101'
+                self.episode_data = data
+
+        target = MockTarget(ep_data)
+        self.form.is_audio_only = lambda: True
+        self.form.episodes_list = type('MockList', (), {'selection': [target]})()
+
+        prompted_resolutions = []
+
+        async def mock_prompt(title, message, resolutions):
+            prompted_resolutions.extend(resolutions)
+            return resolutions[0]
+
+        self.form.prompt_resolution_choice = mock_prompt
+
+        with unittest.mock.patch('threading.Thread'):
+            asyncio.run(self.form.on_download_press())
+
+        self.assertEqual(len(prompted_resolutions), 2)
+        self.assertTrue(all(r['type'] == 'audio' for r in prompted_resolutions))
+        self.assertEqual(target.selected_media_url, 'https://twit.tv/dl_audio.mp3')
+
+    def test_on_download_press_audio_only_single_audio_option_downloads_without_prompt(self) -> None:
+        """Verify on_download_press directly selects audio without prompt when only 1 audio option is available."""
+        ep_data = {
+            'title': 'Test Single Audio DL',
+            'video_hd': {'mediaUrl': 'https://twit.tv/video_hd.mp4'},
+            'video_large': {'mediaUrl': 'https://twit.tv/video_large.mp4'},
+            'video_audio': {'mediaUrl': 'https://twit.tv/dl_single.mp3'},
+        }
+
+        class MockTarget:
+            def __init__(self, data):
+                self.title = data['title']
+                self.episode = '102'
+                self.episode_data = data
+
+        target = MockTarget(ep_data)
+        self.form.is_audio_only = lambda: True
+        self.form.episodes_list = type('MockList', (), {'selection': [target]})()
+
+        mock_prompt_called = False
+
+        async def mock_prompt(title, message, resolutions):
+            nonlocal mock_prompt_called
+            mock_prompt_called = True
+            return resolutions[0]
+
+        self.form.prompt_resolution_choice = mock_prompt
+
+        with unittest.mock.patch('threading.Thread'):
+            asyncio.run(self.form.on_download_press())
+
+        self.assertFalse(mock_prompt_called)
+        self.assertEqual(target.selected_media_url, 'https://twit.tv/dl_single.mp3')
+
+    def test_batch_download_audio_only_prompts_only_audio_options(self) -> None:
+        """Verify batch download with multiple audio formats prompts user with audio options only."""
+        ep1_data = {
+            'title': 'Batch Ep 1',
+            'video_hd': {'mediaUrl': 'https://twit.tv/ep1_hd.mp4'},
+            'files': [
+                {'format': 'audio', 'label': 'MP3 Audio', 'mediaUrl': 'https://twit.tv/ep1.mp3'},
+                {'format': 'audio', 'label': 'AAC Audio', 'mediaUrl': 'https://twit.tv/ep1.m4a'},
+            ]
+        }
+        ep2_data = {
+            'title': 'Batch Ep 2',
+            'video_hd': {'mediaUrl': 'https://twit.tv/ep2_hd.mp4'},
+            'files': [
+                {'format': 'audio', 'label': 'MP3 Audio', 'mediaUrl': 'https://twit.tv/ep2.mp3'},
+                {'format': 'audio', 'label': 'AAC Audio', 'mediaUrl': 'https://twit.tv/ep2.m4a'},
+            ]
+        }
+
+        class MockTarget:
+            def __init__(self, data, ep_num):
+                self.title = data['title']
+                self.episode = ep_num
+                self.episode_data = data
+
+        targets = [MockTarget(ep1_data, '1'), MockTarget(ep2_data, '2')]
+        self.form.is_audio_only = lambda: True
+        self.form.episodes_list = type('MockList', (), {'selection': targets})()
+
+        prompted_resolutions = []
+
+        async def mock_prompt(title, message, resolutions):
+            prompted_resolutions.extend(resolutions)
+            return resolutions[0]
+
+        self.form.prompt_resolution_choice = mock_prompt
+
+        with unittest.mock.patch('threading.Thread'):
+            asyncio.run(self.form.on_download_press())
+
+        self.assertTrue(len(prompted_resolutions) >= 1)
+        self.assertTrue(all(r.get('type') == 'audio' for r in prompted_resolutions))
+        self.assertNotIn('video_hd', [r.get('id') for r in prompted_resolutions])
+        self.assertNotIn('video_large', [r.get('id') for r in prompted_resolutions])
 
 
 if __name__ == "__main__":

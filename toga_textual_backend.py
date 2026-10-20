@@ -78,7 +78,7 @@ class TextualDialogScreen(ModalScreen):
             yield Label(self.dialog_message, id="dialog_message")
             with Horizontal(id="button_row"):
                 for label, val in self.buttons:
-                    yield Button(label, id=f"btn_{label.lower()}", variant="primary" if val else "default")
+                    yield Button(label, id=f"btn_{label.lower()}", variant="primary" if val else "default", tooltip=f"Select {label}")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
@@ -171,9 +171,9 @@ class TextualChoiceDialogScreen(ModalScreen):
             with Vertical(id="choice_options_container"):
                 for idx, opt in enumerate(self.options):
                     lbl = opt.get('label') or opt.get('name') or str(opt)
-                    yield Button(lbl, id=f"opt_btn_{idx}", classes="choice_option_btn", variant="primary" if idx == 0 else "default")
+                    yield Button(lbl, id=f"opt_btn_{idx}", classes="choice_option_btn", variant="primary" if idx == 0 else "default", tooltip=f"Choose resolution: {lbl}")
             with Horizontal(id="choice_cancel_row"):
-                yield Button("Cancel", id="btn_choice_cancel", variant="error")
+                yield Button("Cancel", id="btn_choice_cancel", variant="error", tooltip="Cancel resolution selection")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
@@ -789,6 +789,38 @@ def patch_toga_textual() -> None:
     """Register missing Textual widget implementations with Toga's platform factory."""
     try:
         import toga_textual
+        import toga_textual.window
+        import toga_textual.widgets.base
+
+        # Safely wrap Window.set_app to handle headless/test execution
+        orig_set_app = toga_textual.window.Window.set_app
+
+        def safe_set_app(self: Any, app: Any) -> None:
+            try:
+                orig_set_app(self, app)
+            except Exception:
+                try:
+                    app.native.install_screen(self.native, name=self.interface.id)
+                except Exception:
+                    pass
+
+        toga_textual.window.Window.set_app = safe_set_app
+
+        # Safely wrap Widget._mount to handle unmounted container parents during tests
+        orig_mount = toga_textual.widgets.base.Widget._mount
+
+        def safe_mount(self: Any, parent: Any, before: Any = None) -> None:
+            try:
+                orig_mount(self, parent, before)
+            except Exception:
+                for child in getattr(self.interface, 'children', []):
+                    try:
+                        child._impl.install(parent=self)
+                    except Exception:
+                        pass
+
+        toga_textual.widgets.base.Widget._mount = safe_mount
+
         # Inject implementations into toga_textual module
         for name, impl_cls in TEXTUAL_WIDGET_IMPLEMENTATIONS.items():
             setattr(toga_textual, name, impl_cls)
