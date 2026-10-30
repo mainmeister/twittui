@@ -433,6 +433,23 @@ class _LocalHTMLHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+def resolve_app_icon() -> str | None:
+    """Find and return the base path or file path of the application icon."""
+    candidate_bases = []
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        candidate_bases.append(getattr(sys, "_MEIPASS"))
+    candidate_bases.extend([
+        os.path.dirname(os.path.abspath(__file__)),
+        os.getcwd(),
+    ])
+    for base in candidate_bases:
+        for fname in ("twittui.png", "twittui.ico", "twittui"):
+            target = os.path.join(base, "resources", fname)
+            if os.path.isfile(target) or os.path.isfile(f"{target}.png"):
+                return os.path.join(base, "resources", "twittui")
+    return None
+
+
 class TwitTUIForm(toga.App):
     def __init__(self, formal_name='TwitTUI', app_id='org.twit.twittui', **kwargs):
         self.show_ids = {}
@@ -486,6 +503,10 @@ class TwitTUIForm(toga.App):
         self.api_key_cmd = None
         self._is_downloading = False
         self._cancel_download = False
+        if "icon" not in kwargs or kwargs["icon"] is None:
+            resolved_icon = resolve_app_icon()
+            if resolved_icon:
+                kwargs["icon"] = resolved_icon
         super().__init__(formal_name=formal_name, app_id=app_id, **kwargs)
 
     def set_tooltip(self, widget: Any, tooltip_text: str | None) -> Any:

@@ -14,6 +14,7 @@ This document serves two primary audiences:
 - [End-User Guide](#end-user-guide)
   - [System Requirements](#system-requirements)
   - [Installation](#installation)
+  - [Standalone Binary Packaging & Installation](#standalone-binary-packaging--installation)
   - [Configuration (.env & UI)](#configuration-env--ui)
   - [User Interface & Usage Walkthrough](#user-interface--usage-walkthrough)
     - [Show Selection & Episode Browsing](#show-selection--episode-browsing)
@@ -24,7 +25,9 @@ This document serves two primary audiences:
     - [Club TWiT Member Features](#club-twit-member-features)
 - [Developer & Technical Architecture Reference](#developer--technical-architecture-reference)
   - [Project Structure](#project-structure)
-  - [Execution Lifecycle & Runtime Sanitization (`main.py`)](#execution-lifecycle--runtime-sanitization-mainpy)
+  - [Application Icon & Branding Asset Pipeline](#application-icon--branding-asset-pipeline)
+  - [Execution Lifecycle & GTK Namespace Locking (`main.py`)](#execution-lifecycle--gtk-namespace-locking-mainpy)
+  - [Installer & Packaging Engine (`installer.py`)](#installer--packaging-engine-installerpy)
   - [UI Architecture & Widget Tree (`twittui_form.py`)](#ui-architecture--widget-tree-twittui_formpy)
   - [Data Ingestion & 5-Tier Fallback Cascade](#data-ingestion--5-tier-fallback-cascade)
   - [Media Resolution Engine & Extraction Heuristics](#media-resolution-engine--extraction-heuristics)
@@ -32,8 +35,10 @@ This document serves two primary audiences:
   - [Filesystem Sanitization & Naming Pipeline](#filesystem-sanitization--naming-pipeline)
   - [REST API Blueprint Integration (`twittv.apib`)](#rest-api-blueprint-integration-twittvapib)
   - [Environment Variables & Configuration Schema](#environment-variables--configuration-schema)
+  - [Automated Testing & Quality Assurance](#automated-testing--quality-assurance)
 - [Known Issues & Troubleshooting](#known-issues--troubleshooting)
   - [GTK Module & Backend Warnings](#gtk-module--backend-warnings)
+  - [PyGObject & Gdk Introspection Namespace Collisions](#pygobject--gdk-introspection-namespace-collisions)
   - [Missing API Credentials Fallback](#missing-api-credentials-fallback)
   - [VLC / Streamer Path Resolution](#vlc--streamer-path-resolution)
 - [License & Credits](#license--credits)
@@ -104,6 +109,52 @@ This document serves two primary audiences:
      python main.py -b gtk       # Alternative syntax (-b gtk / -b textual)
      python main.py --help       # Display all backend options and switches
      ```
+
+5. **Install as a Standalone Command-Line / Desktop Executable**:
+   TwitTUI features an automated packaging and installation pipeline using PyInstaller. It compiles the entry point into a single, optimized standalone executable (`twittui` on POSIX systems or `twittui.exe` on Windows), embeds the application icon set, bundles all backend libraries (`toga-gtk`, `toga-textual`, `gi`), and installs the binary to a directory on your system's executable `$PATH`:
+   ```bash
+   python main.py --install
+   ```
+   Or use the dedicated installer script:
+   ```bash
+   python installer.py --install
+   ```
+
+   **Targeting a Custom Installation Directory (`--install-dir`)**:
+   By default, the installer queries system directories (`~/.local/bin`, `~/bin`, `/usr/local/bin`, or Windows Apps paths) and selects the best writable path. You can explicitly override the target destination:
+   ```bash
+   python main.py --install --install-dir ~/.local/bin
+   # Or for system-wide installation (requires appropriate permissions):
+   sudo python main.py --install --install-dir /usr/local/bin
+   ```
+
+   **Automatic Cleanup & Build Artifact Management**:
+   To preserve disk space and keep your workspace clean, the installation routine automatically removes intermediate PyInstaller `build/`, `dist/`, and `.spec` files after copying the binary.
+   - To preserve build artifacts during installation, pass `--no-clean`:
+     ```bash
+     python main.py --install --no-clean
+     ```
+   - To manually clean build artifacts at any time:
+     ```bash
+     python main.py --clean
+     # Or:
+     python installer.py --clean
+     ```
+   - To clean artifacts and also remove the PyInstaller package from your virtual environment:
+     ```bash
+     python main.py --clean --uninstall-pyinstaller
+     ```
+
+   **Execution & PATH Precedence**:
+   Once installed, run TwitTUI from any terminal or application launcher:
+   ```bash
+   twittui
+   ```
+   If a binary named `twittui` already exists on your system:
+   - **In the target install directory**: The installer replaces the existing executable in place and re-applies executable permissions (`chmod +x`).
+   - **Across multiple PATH folders**: Operating systems execute the first match found in `$PATH`. To verify which executable takes precedence, run:
+     - Linux / macOS: `which -a twittui`
+     - Windows: `where twittui`
 
 ---
 
@@ -208,6 +259,13 @@ twitclubstreamer=env LC_ALL=C vlc %f
 twittui/
 ├── main.py                  # Process bootstrap, stderr filtering, and GTK environment patching
 ├── twittui_form.py          # Core application logic, Toga GUI/TUI layout, networking, and workers
+├── installer.py             # Packaging, executable installation, and artifact cleanup engine
+├── generate_icon.py         # Icon asset generator (PNG multi-size, Windows ICO, SVG)
+├── resources/               # Application icons and branding assets (PNG, ICO, SVG)
+│   ├── twittui.png          # Master 512x512 application icon
+│   ├── twittui.ico          # Multi-resolution Windows application icon
+│   ├── twittui.svg          # Scalable vector graphics icon
+│   └── twittui-*.png        # Sized raster icon variants (512, 256, 128, 72, 64, 48, 32, 16)
 ├── twittv.apib              # Full API Blueprint documentation for TWiT.tv REST API v1.0
 ├── Layout_spec_for_AI.txt   # UI specification and control layout blueprint
 ├── feed-style.css           # Modern, responsive CSS stylesheet for podcast RSS feeds
@@ -218,22 +276,55 @@ twittui/
 
 ---
 
-### Execution Lifecycle & UI Backend Selection (`main.py`)
+### Application Icon & Branding Asset Pipeline
 
-`main.py` is the execution entry point. Before importing GUI modules or initializing the main loop, it dynamically inspects available Toga backends (`toga-gtk`, `toga-textual`), processes command-line switches or interactive startup prompts, sets `TOGA_BACKEND`, and executes runtime environment stabilization:
+TwitTUI incorporates a custom, multi-layered visual emblem that unites TWiT's media broadcasting heritage with terminal aesthetic cues:
+- **Visual Composition**:
+  - Dark midnight squircle background badge framed by a TWiT Red-to-Cyan cyber rim gradient.
+  - Inset CRT terminal monitor featuring macOS/TUI traffic light status dots (Red, Amber, Green) and a title pill header.
+  - Dual broadcast signal wave arcs radiating outward representing audio/video podcast transmissions.
+  - Central TWiT Red/Orange media play beacon (`▶`).
+  - Vibrant phosphor cyan terminal prompt chevron (`>`) and blinking cyber cursor (`_`).
+
+- **Asset Generation Engine (`generate_icon.py`)**:
+  - **Vector Master**: Generates `resources/twittui.svg` (scalable vector graphics).
+  - **Raster Master & Sized Variants**: Renders high-resolution Cairo graphics at sizes `512`, `256`, `128`, `72`, `64`, `48`, `32`, and `16` pixels (`resources/twittui-*.png` and master `resources/twittui.png`).
+  - **Windows Icon Package**: Combines raster imagery into `resources/twittui.ico` via `GdkPixbuf`.
+
+- **Runtime Icon Resolution (`resolve_app_icon()`)**:
+  `twittui_form.py` dynamically resolves the application icon at runtime across all environments:
+  - Inside PyInstaller standalone bundles via `sys._MEIPASS/resources/twittui`.
+  - In direct Python interpreter execution via `<project_root>/resources/twittui`.
+  - Automatically binds icons into Toga application metadata during `TwitTUIForm.__init__()`.
+
+---
+
+### Execution Lifecycle & GTK Namespace Locking (`main.py`)
+
+`main.py` is the execution entry point. Before importing GUI modules or initializing the main loop, it dynamically inspects available Toga backends (`toga-gtk`, `toga-textual`), processes command-line switches or interactive startup prompts, locks GObject introspection namespaces to prevent version conflicts, sets `TOGA_BACKEND`, and executes runtime environment stabilization:
 
 ```
 [ Process Start ]
         │
         ▼
 [ Parse CLI Switches & Inspect Backends ]
-  ├── --gtk / --gui / -b gtk       ──► Force toga_gtk
-  ├── --textual / --tui / -b textual ──► Force toga_textual
-  └── (No Switch & Both Found)     ──► Interactive CLI prompt [1: GTK / 2: Textual]
+  ├── --gtk / --gui / -b gtk          ──► Force toga_gtk
+  ├── --textual / --tui / -b textual  ──► Force toga_textual
+  ├── --install / -i                  ──► Delegate to installer.py packaging pipeline
+  ├── --clean / -c                    ──► Delegate to installer.py artifact cleanup
+  └── (No Switch & Both Found)        ──► Interactive CLI prompt [1: GTK / 2: Textual]
         │
         ▼
 [ Set TOGA_BACKEND & Configure Environment ]
   ├── If toga_gtk:
+  │     ├── configure_gtk_environment()
+  │     │     ├── gi.require_version('Gtk', '3.0')
+  │     │     ├── gi.require_version('Gdk', '3.0')
+  │     │     ├── gi.require_version('GdkX11', '3.0')
+  │     │     ├── gi.require_version('GdkWayland', '3.0')
+  │     │     ├── gi.require_version('Pango', '1.0') / PangoCairo / GLib / GObject / Gio
+  │     │     ├── Import gi.overrides.Gtk & gi.overrides.Pango
+  │     │     └── Gtk.init_check()
   │     ├── Instantiate StderrRedirector (Filter xapp-gtk3-module warnings)
   │     ├── GTK_MODULES = '' (Suppress external modules)
   │     ├── del GTK_DEBUG (Prevent assertion crashes in non-debug GTK)
@@ -250,6 +341,9 @@ twittui/
 [ twittui_form.main() ] ──► Build Toga widget hierarchy & launch app.main_loop()
 ```
 
+#### `configure_gtk_environment()` Implementation
+To prevent runtime crashes where external modules or PyInstaller dynamic loaders prematurely import GTK 4 (`gi.RepositoryError: Requiring namespace 'Gdk' version '4.0', but '3.0' is already loaded`), `main.py` explicitly locks all GObject introspection versions and pre-initializes GTK bindings before any UI code runs.
+
 #### `StderrRedirector` Implementation
 ```python
 class StderrRedirector:
@@ -264,6 +358,28 @@ class StderrRedirector:
     def flush(self) -> None:
         self.original_stderr.flush()
 ```
+
+---
+
+### Installer & Packaging Engine (`installer.py`)
+
+`installer.py` provides standalone binary compilation, local `$PATH` discovery, and workspace hygiene management:
+
+1. **PyInstaller Automated Compilation (`build_executable`)**:
+   - Detects or installs `pyinstaller` dynamically within the active virtual environment.
+   - Bundles required data assets: `feed-style.css`, `feed-style.xsl`, `twittv.apib`, and `resources/` (icon suite).
+   - Embeds native platform application icons (`--icon=resources/twittui.ico` or `twittui.png`).
+   - Collects all dependencies and hidden imports for `toga`, `toga_textual`, `toga_gtk`, `gi`, `gi.overrides.Gtk`, `gi.overrides.Pango`, `dotenv`, and `requests`.
+   - Produces a single non-debug standalone executable in `dist/twittui` (or `dist/twittui.exe`).
+
+2. **System PATH Resolution & Installation (`install_twittui`)**:
+   - Queries standard user and system binary paths (`~/.local/bin`, `~/bin`, `/usr/local/bin`, etc.).
+   - Copies the compiled binary using `shutil.copy2` and grants POSIX executable permissions (`0o755`).
+   - Replaces pre-existing binary installations in place cleanly.
+
+3. **Artifact Cleanup Engine (`clean_build_artifacts`)**:
+   - Automatically purges temporary `build/`, distribution `dist/`, and PyInstaller `.spec` files.
+   - Supports optional package uninstallation (`--uninstall-pyinstaller`) to return the development environment to its pre-build state.
 
 ---
 
@@ -524,12 +640,39 @@ The `determine_download_filename(target, media_url)` method sanitizes filenames 
 
 ---
 
+### Automated Testing & Quality Assurance
+
+TwitTUI maintains a comprehensive automated unit test suite covering end-to-end functionality, GUI backend abstractions, packaging pipelines, security sanitization, and network operations:
+
+- **Test Suite Structure**:
+  - `test_install.py`: Tests for PyInstaller compilation, standalone executable installation, PATH discovery, artifact cleanup, and application icon generation.
+  - `test_backend_factory.py`: Tests for backend detection, CLI flag routing (`--gtk`, `--textual`), and environment variable configuration.
+  - `test_security.py`: Tests for markdown sanitization, HTML attribute stripping, and URI validation.
+  - `test_resolutions.py`: Tests for multi-resolution media extraction, format sorting, and batch resolution selection modals.
+  - `test_open_destination.py`: Tests for opening destination folders cross-platform.
+  - `test_show_folders.py`: Tests for show folder sub-directory hierarchy creation and file path resolution.
+  - `test_tooltips.py`: Tests for tooltip assignment across widgets.
+  - `test_youtube_download.py`: Tests for YouTube fallback extraction and download helpers.
+
+- **Running Tests**:
+  Execute the complete test suite using Python's standard `unittest` test discovery:
+  ```bash
+  python -m unittest discover
+  ```
+
+---
+
 ## Known Issues & Troubleshooting
 
 ### GTK Module & Backend Warnings
 - **Symptom**: Console outputs `Failed to load module "xapp-gtk3-module"` or `Gtk-Message: Failed to load module "canberra-gtk-module"`.
 - **Cause**: Linux systems with desktop environments like Cinnamon or MATE attempt to inject theme modules into GTK applications that lack matching runtime bindings.
 - **Resolution**: TwitTUI automatically filters this specific warning through `main.py`'s `StderrRedirector` and enforces `GDK_BACKEND=x11` and `NO_AT_BRIDGE=1`. No user action is required.
+
+### PyGObject & Gdk Introspection Namespace Collisions
+- **Symptom**: Standalone binary or desktop run fails with `gi.RepositoryError: Requiring namespace 'Gdk' version '4.0', but '3.0' is already loaded` or `ImportError: Requiring namespace 'Gdk' version '4.0'`.
+- **Cause**: PyInstaller binary hooks or system libraries may attempt to resolve the latest GTK 4.0 introspection typelibs when `toga-gtk` requires GTK 3.0 / Gdk 3.0.
+- **Resolution**: TwitTUI's `configure_gtk_environment()` in `main.py` explicitly locks GObject introspection namespaces (`Gtk 3.0`, `Gdk 3.0`, `GdkX11 3.0`, `GdkWayland 3.0`, `Pango 1.0`, `GLib`, `GObject`, `Gio`) prior to initializing Toga backends, eliminating namespace collisions.
 
 ### Missing API Credentials Fallback
 - **Symptom**: Console logs `API credentials not found in .env file, using default shows`.
