@@ -99,22 +99,33 @@ class TestInstallOption(unittest.TestCase):
 
     def test_is_pyinstaller_installed(self) -> None:
         """Verify pyinstaller detection function."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            self.assertTrue(is_pyinstaller_installed(python_executable="/usr/bin/python3"))
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1)
+            self.assertFalse(is_pyinstaller_installed(python_executable="/usr/bin/python3"))
+
         with patch("shutil.which", return_value="/usr/bin/pyinstaller"):
             self.assertTrue(is_pyinstaller_installed())
 
         with patch("shutil.which", return_value=None), patch.dict(sys.modules, {"PyInstaller": None}):
             # Should safely return False or handle import gracefully
-            with patch("importlib.util.find_spec", return_value=None):
+            with patch("subprocess.run", return_value=MagicMock(returncode=1)), patch("importlib.util.find_spec", return_value=None):
                 val = is_pyinstaller_installed()
                 self.assertIsInstance(val, bool)
 
     @patch("subprocess.run")
     def test_ensure_pyinstaller_installed_success(self, mock_run: MagicMock) -> None:
-        """Verify ensure_pyinstaller_installed executes pip upgrade command."""
-        mock_run.return_value = MagicMock(returncode=0, stdout="Successfully installed", stderr="")
+        """Verify ensure_pyinstaller_installed executes pip upgrade command when not already installed."""
+        mock_run.side_effect = [
+            MagicMock(returncode=1, stdout="", stderr=""),  # version check in is_pyinstaller_installed
+            MagicMock(returncode=0, stdout="Successfully installed", stderr=""),  # pip install
+        ]
         result = ensure_pyinstaller_installed(python_executable="python_mock")
         self.assertTrue(result)
-        mock_run.assert_called_once()
+        self.assertEqual(mock_run.call_count, 2)
         cmd = mock_run.call_args[0][0]
         self.assertIn("pip", cmd)
         self.assertIn("pyinstaller", cmd)

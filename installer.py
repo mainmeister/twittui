@@ -61,24 +61,37 @@ def check_python_shared_library(python_executable: str | None = None) -> tuple[b
         return True, ""
 
 
-def is_pyinstaller_installed() -> bool:
-    """Check if PyInstaller is available in the current Python environment or system PATH."""
+def is_pyinstaller_installed(python_executable: str | None = None) -> bool:
+    """Check if PyInstaller is available in the target Python environment or system PATH."""
+    py_exec = python_executable or sys.executable
     try:
-        import PyInstaller  # type: ignore # noqa: F401
-        return True
-    except ImportError:
+        res = subprocess.run([py_exec, "-m", "PyInstaller", "--version"], capture_output=True, text=True)
+        if res.returncode == 0:
+            return True
+    except Exception:
         pass
-    return shutil.which("pyinstaller") is not None
+    if python_executable is None or python_executable == sys.executable:
+        try:
+            import PyInstaller  # type: ignore # noqa: F401
+            return True
+        except ImportError:
+            pass
+        return shutil.which("pyinstaller") is not None
+    return False
 
 
 def ensure_pyinstaller_installed(python_executable: str | None = None) -> bool:
     """Download and install/upgrade PyInstaller for the current operating system."""
     py_exec = python_executable or sys.executable
-    print("Checking PyInstaller installation for current operating system...")
+    print(f"Checking PyInstaller installation for '{py_exec}'...")
+
+    if is_pyinstaller_installed(py_exec):
+        print("PyInstaller is installed and up to date.")
+        return True
 
     cmd_base = [py_exec, "-m", "pip", "install", "--upgrade", "pyinstaller"]
     try:
-        result = subprocess.run(cmd_base, check=True, capture_output=True, text=True)
+        subprocess.run(cmd_base, check=True, capture_output=True, text=True)
         print("PyInstaller is installed and up to date.")
         return True
     except subprocess.CalledProcessError as e:
@@ -91,17 +104,25 @@ def ensure_pyinstaller_installed(python_executable: str | None = None) -> bool:
                     return True
                 except subprocess.CalledProcessError:
                     continue
-        if is_pyinstaller_installed():
+        if is_pyinstaller_installed(py_exec):
             print("Warning: pip upgrade failed, but existing PyInstaller installation was found and will be used.")
             return True
-        err_msg = f"Failed to install PyInstaller via pip: {e.stderr or e.stdout or e}"
+        err_msg = (
+            f"Failed to install PyInstaller for interpreter '{py_exec}': {e.stderr or e.stdout or e}\n\n"
+            f"To resolve this, install PyInstaller into '{py_exec}' directly or create a virtual environment:\n"
+            f"  {py_exec} -m pip install pyinstaller\n"
+            f"  # or create a shared venv:\n"
+            f"  {py_exec} -m venv .venv\n"
+            f"  source .venv/bin/activate\n"
+            f"  pip install -r requirements.txt pyinstaller"
+        )
         print(f"Error: {err_msg}", file=sys.stderr)
         raise RuntimeError(err_msg) from e
     except Exception as e:
-        if is_pyinstaller_installed():
+        if is_pyinstaller_installed(py_exec):
             print("Warning: pip command encountered an issue, using existing PyInstaller.")
             return True
-        raise RuntimeError(f"Failed to install PyInstaller: {e}") from e
+        raise RuntimeError(f"Failed to install PyInstaller for '{py_exec}': {e}") from e
 
 
 def get_default_executable_name() -> str:
