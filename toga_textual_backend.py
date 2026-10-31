@@ -298,8 +298,7 @@ class TogaSelect(Select):
         self.interface = impl.interface
         self.impl = impl
 
-    def _on_mount(self, event: Any) -> None:
-        super()._on_mount(event)
+    def on_mount(self, event: Any = None) -> None:
         self.impl._sync_options_to_native()
 
     def on_select_changed(self, event: Select.Changed) -> None:
@@ -324,20 +323,27 @@ class TextualSelection(Widget):
         self.native = TogaSelect(self)
 
     def _sync_options_to_native(self) -> None:
-        if not getattr(self.native, 'is_mounted', False):
+        from textual.widgets._select import SelectOverlay
+        try:
+            self.native.query_one(SelectOverlay)
+        except Exception:
             return
         self._suppress_change = True
         try:
             native_opts = [(title, str(idx)) for idx, (title, val) in enumerate(self._options)]
             if native_opts:
+                self.native._allow_blank = False
                 self.native.set_options(native_opts)
                 if self._selected_index is not None and 0 <= self._selected_index < len(native_opts):
                     self.native.value = str(self._selected_index)
                 else:
+                    self._selected_index = 0
                     self.native.value = native_opts[0][1]
             else:
+                self.native._allow_blank = True
                 self.native.set_options([])
                 self.native.value = Select.BLANK
+                self._selected_index = None
         except Exception:
             pass
         finally:
@@ -374,7 +380,21 @@ class TextualSelection(Widget):
 
     def select_item(self, index: int, item: Any) -> None:
         self._selected_index = index
-        self._sync_options_to_native()
+        from textual.widgets._select import SelectOverlay
+        try:
+            self.native.query_one(SelectOverlay)
+        except Exception:
+            return
+        self._suppress_change = True
+        try:
+            if 0 <= index < len(self._options):
+                self.native.value = str(index)
+            else:
+                self.native.value = Select.BLANK
+        except Exception:
+            pass
+        finally:
+            self._suppress_change = False
 
     def get_selected_index(self) -> int | None:
         return self._selected_index
@@ -398,8 +418,7 @@ class TogaDataTable(DataTable):
         self.impl = impl
         self._marked_rows: set[int] = set()
 
-    def _on_mount(self, event: Any) -> None:
-        super()._on_mount(event)
+    def on_mount(self, event: Any = None) -> None:
         self.impl._sync_data_to_native()
 
     def action_toggle_row_select(self) -> None:
