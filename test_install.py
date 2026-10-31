@@ -13,9 +13,11 @@ from unittest.mock import MagicMock, patch
 
 from installer import (
     build_executable,
+    check_python_shared_library,
     clean_build_artifacts,
     ensure_pyinstaller_installed,
     find_local_executable_path,
+    format_shared_library_error,
     get_default_executable_name,
     install_twittui,
     is_pyinstaller_installed,
@@ -58,6 +60,10 @@ class TestInstallOption(unittest.TestCase):
         self.assertTrue(args8.install)
         self.assertTrue(args8.no_clean)
         self.assertTrue(args8.uninstall_pyinstaller)
+
+        args9 = parse_backend_args(["--install", "--python-executable", "/usr/bin/python3"])
+        self.assertTrue(args9.install)
+        self.assertEqual(args9.python_executable, "/usr/bin/python3")
 
     def test_default_executable_name(self) -> None:
         """Verify executable name is platform appropriate."""
@@ -129,8 +135,9 @@ class TestInstallOption(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 ensure_pyinstaller_installed()
 
+    @patch("installer.check_python_shared_library", return_value=(True, ""))
     @patch("subprocess.run")
-    def test_build_executable_command_flags(self, mock_run: MagicMock) -> None:
+    def test_build_executable_command_flags(self, mock_run: MagicMock, mock_check: MagicMock) -> None:
         """Verify PyInstaller is invoked with non-debug and standalone packaging flags."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             dist_dir = os.path.join(tmp_dir, "dist")
@@ -318,7 +325,7 @@ class TestInstallOption(unittest.TestCase):
         from main import resolve_toga_backend
         with patch("installer.clean_build_artifacts") as mock_clean, patch("sys.exit") as mock_exit:
             resolve_toga_backend(["--clean", "--uninstall-pyinstaller"])
-            mock_clean.assert_called_once_with(remove_pyinstaller=True)
+            mock_clean.assert_called_once_with(remove_pyinstaller=True, python_executable=None)
             mock_exit.assert_called_once_with(0)
 
     def test_resolve_toga_backend_install_flag(self) -> None:
@@ -326,7 +333,7 @@ class TestInstallOption(unittest.TestCase):
         from main import resolve_toga_backend
         with patch("installer.install_twittui") as mock_install, patch("sys.exit") as mock_exit:
             resolve_toga_backend(["--install", "--install-dir", "/tmp/testbin"])
-            mock_install.assert_called_once_with(target_dir="/tmp/testbin", clean_build_artifacts=True)
+            mock_install.assert_called_once_with(target_dir="/tmp/testbin", python_executable=None, clean_build_artifacts=True)
             mock_exit.assert_called_once_with(0)
 
     def test_configure_gtk_environment(self) -> None:
@@ -340,9 +347,10 @@ class TestInstallOption(unittest.TestCase):
             self.assertEqual(os.environ.get("GDK_BACKEND"), "x11")
             self.assertEqual(os.environ.get("G_MESSAGES_DEBUG"), "")
 
+    @patch("installer.check_python_shared_library", return_value=(True, ""))
     @patch("importlib.util.find_spec")
     @patch("subprocess.run")
-    def test_build_executable_collects_toga_gtk(self, mock_run: MagicMock, mock_find_spec: MagicMock) -> None:
+    def test_build_executable_collects_toga_gtk(self, mock_run: MagicMock, mock_find_spec: MagicMock, mock_check: MagicMock) -> None:
         """Verify build_executable includes --collect-all=toga_gtk when available."""
         mock_find_spec.return_value = MagicMock()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -358,8 +366,9 @@ class TestInstallOption(unittest.TestCase):
             cmd = mock_run.call_args[0][0]
             self.assertIn("--collect-all=toga_gtk", cmd)
 
+    @patch("installer.check_python_shared_library", return_value=(True, ""))
     @patch("subprocess.run")
-    def test_build_executable_includes_icon_and_resources(self, mock_run: MagicMock) -> None:
+    def test_build_executable_includes_icon_and_resources(self, mock_run: MagicMock, mock_check: MagicMock) -> None:
         """Verify build_executable includes --icon and --add-data for resources directory."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             dist_dir = os.path.join(tmp_dir, "dist")
@@ -409,6 +418,62 @@ class TestInstallOption(unittest.TestCase):
             self.assertTrue(os.path.isfile(os.path.join(res_dir, "twittui.png")))
             self.assertTrue(os.path.isfile(os.path.join(res_dir, "twittui.ico")))
             self.assertTrue(os.path.isfile(os.path.join(res_dir, "twittui-256.png")))
+
+    def test_format_shared_library_error(self) -> None:
+        """Verify format_shared_library_error outputs actionable instructions."""
+        msg = format_shared_library_error(python_executable="/usr/local/bin/python3.14")
+        self.assertIn("/usr/local/bin/python3.14", msg)
+        self.assertIn("--enable-shared", msg)
+        self.assertIn("PYTHON_CONFIGURE_OPTS", msg)
+        self.assertIn("--python-executable", msg)
+
+    @patch("platform.system", return_value="Windows")
+    def test_check_python_shared_library_windows(self, mock_system: MagicMock) -> None:
+        """Verify check_python_shared_library always returns True on Windows."""
+        is_supported, msg = check_python_shared_library()
+        self.assertTrue(is_supported)
+        self.assertEqual(msg, "")
+
+    @patch("platform.system", return_value="Linux")
+    @patch("subprocess.run")
+    def test_check_python_shared_library_linux_supported(self, mock_run: MagicMock, mock_system: MagicMock) -> None:
+        """Verify check_python_shared_library returns True when Py_ENABLE_SHARED is 1."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="1\n", stderr="")
+        is_supported, msg = check_python_shared_library(python_executable="python_mock")
+        self.assertTrue(is_supported)
+        self.assertEqual(msg, "")
+
+    @patch("platform.system", return_value="Linux")
+    @patch("subprocess.run")
+    def test_check_python_shared_library_linux_unsupported(self, mock_run: MagicMock, mock_system: MagicMock) -> None:
+        """Verify check_python_shared_library returns False and helpful message when Py_ENABLE_SHARED is 0."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="0\n", stderr="")
+        is_supported, msg = check_python_shared_library(python_executable="python_mock")
+        self.assertFalse(is_supported)
+        self.assertIn("--enable-shared", msg)
+
+    @patch("installer.check_python_shared_library", return_value=(False, "Missing shared library"))
+    def test_build_executable_raises_on_missing_shared_lib(self, mock_check: MagicMock) -> None:
+        """Verify build_executable raises RuntimeError with formatted message when shared lib is missing."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self.assertRaises(RuntimeError) as ctx:
+                build_executable(project_root=tmp_dir, python_executable="python_static")
+            self.assertIn("Missing shared library", str(ctx.exception))
+
+    @patch("installer.check_python_shared_library", return_value=(True, ""))
+    @patch("subprocess.run")
+    def test_build_executable_formats_pyinstaller_shared_lib_error(self, mock_run: MagicMock, mock_check: MagicMock) -> None:
+        """Verify build_executable intercepts PyInstaller shared library error output and formats it."""
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="ERROR: Python was built without a shared library, which is required by PyInstaller.",
+            stderr=""
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self.assertRaises(RuntimeError) as ctx:
+                build_executable(project_root=tmp_dir, python_executable="python_test")
+            self.assertIn("--enable-shared", str(ctx.exception))
+            self.assertIn("PYTHON_CONFIGURE_OPTS", str(ctx.exception))
 
 
 if __name__ == "__main__":

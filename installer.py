@@ -12,6 +12,55 @@ import subprocess
 import sys
 
 
+def format_shared_library_error(python_executable: str | None = None) -> str:
+    """Format actionable instructions for resolving missing Python shared library errors."""
+    py_exec = python_executable or sys.executable
+    return (
+        f"Python shared library (libpython) is missing for interpreter '{py_exec}'.\n"
+        "PyInstaller requires Python to be compiled with dynamic shared library support (--enable-shared) on Linux.\n\n"
+        "To resolve this error, use one of the following solutions:\n\n"
+        "1. Rebuild Python from source with --enable-shared:\n"
+        "   ./configure --enable-shared --enable-optimizations\n"
+        "   make -j$(nproc)\n"
+        "   sudo make altinstall\n"
+        "   sudo ldconfig\n\n"
+        "2. If using pyenv, reinstall Python with shared library support:\n"
+        '   env PYTHON_CONFIGURE_OPTS="--enable-shared" pyenv install <version>\n\n'
+        "3. If using Ubuntu/Debian system Python, install development headers:\n"
+        "   sudo apt update && sudo apt install -y python3-dev libpython3-dev\n\n"
+        "4. If another Python interpreter with shared library support is available, specify it via --python-executable:\n"
+        "   python main.py --install --python-executable /usr/bin/python3\n"
+        "   # or:\n"
+        "   python installer.py --install --python-executable /usr/bin/python3\n"
+    )
+
+
+def check_python_shared_library(python_executable: str | None = None) -> tuple[bool, str]:
+    """Check if the target Python interpreter was built with shared library support on Linux/Unix.
+
+    Returns:
+        A tuple of (is_supported: bool, error_message: str).
+    """
+    if platform.system() == "Windows":
+        return True, ""
+
+    py_exec = python_executable or sys.executable
+    try:
+        code = (
+            "import sysconfig;"
+            "val = sysconfig.get_config_var('Py_ENABLE_SHARED');"
+            "print('1' if val == 1 else '0')"
+        )
+        res = subprocess.run([py_exec, "-c", code], capture_output=True, text=True, check=True)
+        output = res.stdout.strip()
+        if output == "0":
+            return False, format_shared_library_error(py_exec)
+        return True, ""
+    except Exception:
+        # If unable to probe, allow build to proceed and let PyInstaller's output be handled
+        return True, ""
+
+
 def is_pyinstaller_installed() -> bool:
     """Check if PyInstaller is available in the current Python environment or system PATH."""
     try:
@@ -154,6 +203,14 @@ def build_executable(
 
     # Include resources folder containing application icons and assets
     resources_dir = os.path.join(root, "resources")
+    master_icon = os.path.join(resources_dir, "twittui.png")
+    if not os.path.isfile(master_icon):
+        try:
+            from generate_icon import generate_all_icons
+            generate_all_icons(resources_dir)
+        except Exception as e:
+            print(f"Warning: Could not auto-generate icon assets: {e}", file=sys.stderr)
+
     if os.path.isdir(resources_dir):
         cmd.append(f"--add-data={resources_dir}{os.pathsep}resources")
 
@@ -185,10 +242,20 @@ def build_executable(
     cmd.append("--hidden-import=gi.overrides.Pango")
     cmd.append(main_script)
 
+    # Verify Python shared library availability before building
+    is_shared, shared_err = check_python_shared_library(python_executable=py_exec)
+    if not is_shared:
+        print(f"Error: {shared_err}", file=sys.stderr)
+        raise RuntimeError(shared_err)
+
     print(f"Compiling non-debug executable with PyInstaller from '{main_script}'...")
     result = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
     if result.returncode != 0:
-        err_msg = f"PyInstaller build failed with exit code {result.returncode}:\n{result.stderr or result.stdout}"
+        combined_output = (result.stderr or "") + "\n" + (result.stdout or "")
+        if "without a shared library" in combined_output or "enable-shared" in combined_output:
+            err_msg = format_shared_library_error(py_exec)
+        else:
+            err_msg = f"PyInstaller build failed with exit code {result.returncode}:\n{result.stderr or result.stdout}"
         print(f"Error: {err_msg}", file=sys.stderr)
         raise RuntimeError(err_msg)
 
@@ -393,15 +460,25 @@ if __name__ == "__main__":
         action="store_true",
         help="Also uninstall PyInstaller package when cleaning up",
     )
+    parser.add_argument(
+        "--python-executable",
+        type=str,
+        default=None,
+        help="Path to Python interpreter to use for PyInstaller compilation (e.g. /usr/bin/python3)",
+    )
 
     args = parser.parse_args()
 
     if args.clean and not args.install:
-        clean_build_artifacts(remove_pyinstaller=args.uninstall_pyinstaller)
+        clean_build_artifacts(
+            remove_pyinstaller=args.uninstall_pyinstaller,
+            python_executable=args.python_executable,
+        )
         sys.exit(0)
     elif args.install:
         install_twittui(
             target_dir=args.install_dir,
+            python_executable=args.python_executable,
             clean_build_artifacts=not args.no_clean,
         )
         if args.uninstall_pyinstaller:
@@ -410,10 +487,14 @@ if __name__ == "__main__":
                 remove_build=False,
                 remove_spec=False,
                 remove_pyinstaller=True,
+                python_executable=args.python_executable,
             )
         sys.exit(0)
     elif args.clean:
-        clean_build_artifacts(remove_pyinstaller=args.uninstall_pyinstaller)
+        clean_build_artifacts(
+            remove_pyinstaller=args.uninstall_pyinstaller,
+            python_executable=args.python_executable,
+        )
         sys.exit(0)
     else:
         parser.print_help()

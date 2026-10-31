@@ -39,6 +39,7 @@ This document serves two primary audiences:
 - [Known Issues & Troubleshooting](#known-issues--troubleshooting)
   - [GTK Module & Backend Warnings](#gtk-module--backend-warnings)
   - [PyGObject & Gdk Introspection Namespace Collisions](#pygobject--gdk-introspection-namespace-collisions)
+  - [Python Built Without Shared Library (`--enable-shared`)](#python-built-without-shared-library---enable-shared)
   - [Missing API Credentials Fallback](#missing-api-credentials-fallback)
   - [VLC / Streamer Path Resolution](#vlc--streamer-path-resolution)
 - [License & Credits](#license--credits)
@@ -126,6 +127,12 @@ This document serves two primary audiences:
    python main.py --install --install-dir ~/.local/bin
    # Or for system-wide installation (requires appropriate permissions):
    sudo python main.py --install --install-dir /usr/local/bin
+   ```
+
+   **Specifying an Alternative Python Interpreter (`--python-executable`)**:
+   If your active virtual environment is based on a static Python build (e.g. without `--enable-shared`), you can compile the standalone binary using another Python interpreter on your system:
+   ```bash
+   python main.py --install --python-executable /usr/bin/python3
    ```
 
    **Automatic Cleanup & Build Artifact Management**:
@@ -673,6 +680,15 @@ TwitTUI maintains a comprehensive automated unit test suite covering end-to-end 
 - **Symptom**: Standalone binary or desktop run fails with `gi.RepositoryError: Requiring namespace 'Gdk' version '4.0', but '3.0' is already loaded` or `ImportError: Requiring namespace 'Gdk' version '4.0'`.
 - **Cause**: PyInstaller binary hooks or system libraries may attempt to resolve the latest GTK 4.0 introspection typelibs when `toga-gtk` requires GTK 3.0 / Gdk 3.0.
 - **Resolution**: TwitTUI's `configure_gtk_environment()` in `main.py` explicitly locks GObject introspection namespaces (`Gtk 3.0`, `Gdk 3.0`, `GdkX11 3.0`, `GdkWayland 3.0`, `Pango 1.0`, `GLib`, `GObject`, `Gio`) prior to initializing Toga backends, eliminating namespace collisions.
+
+### Python Built Without Shared Library (`--enable-shared`)
+- **Symptom**: `python main.py --install` or `python installer.py --install` fails with `ERROR: Python was built without a shared library, which is required by PyInstaller. If you built Python from source, rebuild it with the '--enable-shared' option.`
+- **Cause**: On Linux, PyInstaller's bootloader requires dynamic link support via Python's shared library (`libpythonX.Y.so`). If Python was built statically from source or without shared libraries, PyInstaller cannot bundle the runtime.
+- **Resolution**:
+  1. **Source Builds**: Recompile Python with `./configure --enable-shared --enable-optimizations && make -j$(nproc) && sudo make altinstall && sudo ldconfig`.
+  2. **pyenv**: Reinstall your Python version with shared libraries enabled: `env PYTHON_CONFIGURE_OPTS="--enable-shared" pyenv install <version>`.
+  3. **Ubuntu/Debian**: Ensure development headers are installed: `sudo apt update && sudo apt install -y python3-dev libpython3-dev`.
+  4. **Target Alternative Python**: Pass `--python-executable` pointing to an interpreter with shared libraries: `python main.py --install --python-executable /usr/bin/python3`.
 
 ### Missing API Credentials Fallback
 - **Symptom**: Console logs `API credentials not found in .env file, using default shows`.

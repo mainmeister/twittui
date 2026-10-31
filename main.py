@@ -114,6 +114,13 @@ def parse_backend_args(argv: list[str] | None = None) -> argparse.Namespace:
         action='store_true',
         help="Also uninstall PyInstaller package when cleaning up"
     )
+    parser.add_argument(
+        '--python-executable',
+        dest='python_executable',
+        type=str,
+        default=None,
+        help="Path to Python interpreter to use for PyInstaller compilation (e.g. /usr/bin/python3)"
+    )
     return parser.parse_args(argv)
 
 def resolve_toga_backend(argv: list[str] | None = None, prompt_interactive: bool = True) -> str:
@@ -122,13 +129,17 @@ def resolve_toga_backend(argv: list[str] | None = None, prompt_interactive: bool
 
     if getattr(args, 'clean', False) and not getattr(args, 'install', False):
         from installer import clean_build_artifacts
-        clean_build_artifacts(remove_pyinstaller=getattr(args, 'uninstall_pyinstaller', False))
+        clean_build_artifacts(
+            remove_pyinstaller=getattr(args, 'uninstall_pyinstaller', False),
+            python_executable=getattr(args, 'python_executable', None),
+        )
         sys.exit(0)
 
     if args.install:
         from installer import clean_build_artifacts, install_twittui
         install_twittui(
             target_dir=args.install_dir,
+            python_executable=getattr(args, 'python_executable', None),
             clean_build_artifacts=not getattr(args, 'no_clean', False),
         )
         if getattr(args, 'uninstall_pyinstaller', False):
@@ -137,6 +148,7 @@ def resolve_toga_backend(argv: list[str] | None = None, prompt_interactive: bool
                 remove_build=False,
                 remove_spec=False,
                 remove_pyinstaller=True,
+                python_executable=getattr(args, 'python_executable', None),
             )
         sys.exit(0)
     backends = get_installed_toga_backends()
