@@ -83,6 +83,29 @@ class TestBackendFactoryIsolation(unittest.TestCase):
 
         asyncio.run(run_selection_test())
 
+    def test_backend_resolution_headless_defaults_textual(self) -> None:
+        """Verify resolve_toga_backend defaults to Textual when no graphical display is present."""
+        from unittest.mock import patch
+        from main import is_graphical_display_available, resolve_toga_backend
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DISPLAY", None)
+            os.environ.pop("WAYLAND_DISPLAY", None)
+            self.assertFalse(is_graphical_display_available())
+
+            backend = resolve_toga_backend(argv=[], prompt_interactive=False)
+            self.assertEqual(backend, "toga_textual")
+
+    def test_backend_resolution_with_display_defaults_gtk(self) -> None:
+        """Verify resolve_toga_backend defaults to GTK when DISPLAY is present."""
+        from unittest.mock import patch
+        from main import is_graphical_display_available, resolve_toga_backend
+
+        with patch.dict(os.environ, {"DISPLAY": ":0"}):
+            self.assertTrue(is_graphical_display_available())
+            backend = resolve_toga_backend(argv=[], prompt_interactive=False)
+            self.assertEqual(backend, "toga_gtk")
+
 
 if __name__ == '__main__':
     unittest.main()

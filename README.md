@@ -14,6 +14,7 @@ This document serves two primary audiences:
 - [End-User Guide](#end-user-guide)
   - [System Requirements](#system-requirements)
   - [Installation](#installation)
+  - [Snap Package (Cross-Distribution Linux)](#snap-package-cross-distribution-linux)
   - [Standalone Binary Packaging & Installation](#standalone-binary-packaging--installation)
   - [Configuration (.env & UI)](#configuration-env--ui)
   - [User Interface & Usage Walkthrough](#user-interface--usage-walkthrough)
@@ -110,6 +111,70 @@ This document serves two primary audiences:
      python main.py -b gtk       # Alternative syntax (-b gtk / -b textual)
      python main.py --help       # Display all backend options and switches
      ```
+
+### Snap Package (Cross-Distribution Linux)
+
+TwitTUI provides official Snap packaging support for universal installation on Ubuntu, Debian, Fedora, Arch Linux, openSUSE, and any Linux distribution with `snapd` enabled. The Snap package bundles Python, PyGObject, GTK 3, BeeWare Toga, Textual, VLC/MPV media players, and desktop icons in a strictly confined, secure sandbox.
+
+#### 1. Building the Snap Package
+
+To build the Snap locally on any system with `snapcraft` installed:
+
+```bash
+# Install snapcraft and multipass / LXD build provider if needed
+sudo snap install snapcraft --classic
+
+# Build the .snap package
+snapcraft
+```
+
+This generates `twittui_1.0.0_<arch>.snap` (e.g. `twittui_1.0.0_amd64.snap`) in the root directory.
+
+#### 2. Installing the Snap
+
+Install the locally built snap with `--dangerous` (since it is self-signed locally):
+
+```bash
+sudo snap install --dangerous twittui_1.0.0_amd64.snap
+```
+
+Once published to the Snap Store:
+```bash
+sudo snap install twittui
+```
+
+#### 3. Running the Application
+
+- **Launch Graphical Desktop UI (GTK)**:
+  ```bash
+  twittui
+  ```
+  Or search for **TwitTUI** in your desktop environment's application launcher.
+
+- **Launch Terminal User Interface (TUI)**:
+  ```bash
+  twittui.tui
+  # Or:
+  twittui --textual
+  ```
+
+#### 4. Snap Permissions & Removable Drives
+
+By default, TwitTUI can access your home directory and network. To allow downloading podcast episodes directly to external USB drives or SD cards, connect the `removable-media` plug:
+
+```bash
+sudo snap connect twittui:removable-media
+```
+
+#### 5. Snap Configuration File (.env)
+
+When running inside Snap confinement, user configuration settings and API keys are automatically persisted to:
+```text
+~/snap/twittui/current/.env
+```
+You can edit this file directly or change settings in the application UI.
+
+---
 
 5. **Install as a Standalone Command-Line / Desktop Executable**:
    TwitTUI features an automated packaging and installation pipeline using PyInstaller. It compiles the entry point into a single, optimized standalone executable (`twittui` on POSIX systems or `twittui.exe` on Windows), embeds the application icon set, bundles all backend libraries (`toga-gtk`, `toga-textual`, `gi`), and installs the binary to a directory on your system's executable `$PATH`:

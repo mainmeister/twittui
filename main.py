@@ -53,6 +53,12 @@ def configure_gtk_environment() -> None:
     except (ImportError, Exception):
         pass
 
+def is_graphical_display_available() -> bool:
+    """Check if an active graphical display (X11 or Wayland) is available."""
+    if sys.platform in ('win32', 'darwin'):
+        return True
+    return bool(os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'))
+
 def get_installed_toga_backends() -> dict[str, bool]:
     """Detect whether toga-gtk and toga-textual are installed."""
     has_gtk = importlib.util.find_spec('toga_gtk') is not None
@@ -154,6 +160,7 @@ def resolve_toga_backend(argv: list[str] | None = None, prompt_interactive: bool
     backends = get_installed_toga_backends()
     has_gtk = backends['gtk']
     has_textual = backends['textual']
+    has_display = is_graphical_display_available()
 
     chosen_backend = None
 
@@ -177,30 +184,41 @@ def resolve_toga_backend(argv: list[str] | None = None, prompt_interactive: bool
             print("Error: Textual backend ('toga-textual') was requested but is not installed.", file=sys.stderr)
             print("Please install it with: pip install toga-textual", file=sys.stderr)
             sys.exit(1)
+        if chosen_backend == 'toga_gtk' and not has_display:
+            print("Warning: No active graphical display ($DISPLAY or $WAYLAND_DISPLAY) detected.", file=sys.stderr)
     else:
         # No CLI backend switch provided
         if has_gtk and has_textual:
+            default_label = '1 - GTK' if has_display else '2 - Textual'
             if prompt_interactive and sys.stdin.isatty():
                 print("\nMultiple Toga UI backends detected:")
-                print("  1) GTK (Graphical Desktop UI)")
+                display_note = "" if has_display else " [No active DISPLAY detected]"
+                print(f"  1) GTK (Graphical Desktop UI){display_note}")
                 print("  2) Textual (Terminal User Interface)")
                 try:
                     while True:
-                        choice = input("Select backend [1/2] (default: 1 - GTK): ").strip().lower()
-                        if choice in ('1', 'gtk', 'gui', 'g', ''):
+                        choice = input(f"Select backend [1/2] (default: {default_label}): ").strip().lower()
+                        if choice in ('1', 'gtk', 'gui', 'g'):
+                            if not has_display:
+                                print("Warning: No active graphical display detected. GTK desktop UI may fail.", file=sys.stderr)
                             chosen_backend = 'toga_gtk'
                             break
                         elif choice in ('2', 'textual', 'tui', 't', 'text'):
                             chosen_backend = 'toga_textual'
                             break
+                        elif choice == '':
+                            chosen_backend = 'toga_gtk' if has_display else 'toga_textual'
+                            break
                         else:
                             print("Invalid choice. Please enter 1 for GTK or 2 for Textual.")
                 except (EOFError, KeyboardInterrupt):
-                    chosen_backend = 'toga_gtk' if os.environ.get('DISPLAY') else 'toga_textual'
+                    chosen_backend = 'toga_gtk' if has_display else 'toga_textual'
             else:
-                chosen_backend = 'toga_gtk' if os.environ.get('DISPLAY') else 'toga_textual'
+                chosen_backend = 'toga_gtk' if has_display else 'toga_textual'
         elif has_gtk:
             chosen_backend = 'toga_gtk'
+            if not has_display:
+                print("Warning: No active graphical display ($DISPLAY or $WAYLAND_DISPLAY) detected.", file=sys.stderr)
         elif has_textual:
             chosen_backend = 'toga_textual'
         else:
@@ -218,11 +236,36 @@ def resolve_toga_backend(argv: list[str] | None = None, prompt_interactive: bool
 
     return chosen_backend
 
-if __name__ == '__main__':
-    backend = resolve_toga_backend()
+def main(argv: list[str] | None = None) -> None:
+    """TwitTUI application entry point."""
+    backend = resolve_toga_backend(argv)
 
-    from twittui_form import load_twittui_dotenv, main
+    from twittui_form import load_twittui_dotenv, main as create_app
     load_twittui_dotenv()
 
-    app = main()
-    app.main_loop()
+    try:
+        app = create_app()
+        app.main_loop()
+    except (RuntimeError, Exception) as e:
+        err_msg = str(e)
+        if ("Cannot identify an active display" in err_msg or "DISPLAY" in err_msg or "Couldn’t recognize the image file format" in err_msg or "gdk-pixbuf-error-quark" in err_msg or "Unable to load icon" in err_msg or "maximum recursion depth" in err_msg) and backend != "toga_textual":
+            backends = get_installed_toga_backends()
+            if backends.get("textual"):
+                print(f"\n[!] GTK desktop backend failed: {e}", file=sys.stderr)
+                print("[*] Automatically falling back to Textual (Terminal User Interface) backend...\n", file=sys.stderr)
+                import toga.platform
+                os.environ["TOGA_BACKEND"] = "toga_textual"
+                try:
+                    toga.platform.get_backend.cache_clear()
+                    toga.platform.get_factory.cache_clear()
+                except Exception:
+                    pass
+                from toga_textual_backend import patch_toga_textual
+                patch_toga_textual()
+                app = create_app()
+                app.main_loop()
+                return
+        raise
+
+if __name__ == '__main__':
+    main()
