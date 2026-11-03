@@ -350,9 +350,9 @@ class TestInstallOption(unittest.TestCase):
     def test_configure_gtk_environment(self) -> None:
         """Verify configure_gtk_environment configures env vars and GI namespace versions."""
         from main import configure_gtk_environment
-        with patch.dict(os.environ, {"GTK_DEBUG": "1", "GDK_BACKEND": "wayland"}):
+        with patch.dict(os.environ, {"GTK_DEBUG": "1", "GDK_BACKEND": "wayland", "GTK_MODULES": "xapp-gtk3-module"}):
             configure_gtk_environment()
-            self.assertEqual(os.environ.get("GTK_MODULES"), "")
+            self.assertFalse(os.environ.get("GTK_MODULES"))
             self.assertNotIn("GTK_DEBUG", os.environ)
             self.assertEqual(os.environ.get("NO_AT_BRIDGE"), "1")
             self.assertEqual(os.environ.get("GDK_BACKEND"), "x11")

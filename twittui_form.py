@@ -33,7 +33,14 @@ except ImportError:
 def load_twittui_dotenv() -> None:
     """Ensure environment variables are loaded from .env with override=True so file values take precedence."""
     try:
-        dotenv_path = find_dotenv(usecwd=True)
+        dotenv_path = None
+        snap_data = os.environ.get('SNAP_USER_DATA') or os.environ.get('SNAP_USER_COMMON')
+        if snap_data:
+            snap_env = os.path.join(snap_data, '.env')
+            if os.path.exists(snap_env):
+                dotenv_path = snap_env
+        if not dotenv_path:
+            dotenv_path = find_dotenv(usecwd=True)
         if not dotenv_path:
             candidate = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
             if os.path.exists(candidate):
@@ -109,8 +116,97 @@ def patch_toga_tooltips() -> None:
         toga.Widget._twittui_tooltips_patched = True
 
 
-# Initialize Toga tooltip support
+def patch_toga_icons() -> None:
+    """Patch Toga and Toga-GTK Icon classes to prevent infinite recursion if icon loading fails."""
+    try:
+        import toga.icons
+
+        orig_cached_get = toga.icons.CachedIcon.__get__
+
+        def safe_cached_get(self: Any, obj: object, owner: type[toga.icons.Icon]) -> Any:
+            cls = owner if obj is None else obj.__class__
+            attr_name = f"_{self.name}"
+            if hasattr(cls, attr_name):
+                return getattr(cls, attr_name)
+            try:
+                placeholder = toga.icons.Icon.__new__(toga.icons.Icon)
+                placeholder.factory = toga.platform.get_factory()
+                placeholder.path = getattr(self, "name", "toga")
+                placeholder.system = getattr(self, "system", False)
+                try:
+                    placeholder._impl = placeholder.factory.Icon(interface=placeholder, path={})
+                except Exception:
+                    pass
+                setattr(cls, attr_name, placeholder)
+
+                value = orig_cached_get(self, obj, owner)
+                setattr(cls, attr_name, value)
+                return value
+            except Exception:
+                return getattr(cls, attr_name, None)
+
+        toga.icons.CachedIcon.__get__ = safe_cached_get
+    except Exception:
+        pass
+
+    try:
+        import toga_gtk.icons
+        from gi.repository import GdkPixbuf
+
+        orig_gtk_icon_init = toga_gtk.icons.Icon.__init__
+
+        def safe_gtk_icon_init(self: Any, interface: Any, path: Any) -> None:
+            self.interface = interface
+            self.path = path or {}
+            self._native = {}
+            try:
+                orig_gtk_icon_init(self, interface, path)
+            except Exception:
+                for size in getattr(toga_gtk.icons.Icon, "SIZES", [512, 256, 128, 72, 64, 32, 16]):
+                    try:
+                        self._native[size] = GdkPixbuf.Pixbuf.new(
+                            GdkPixbuf.Colorspace.RGB, True, 8, size, size
+                        )
+                    except Exception:
+                        pass
+
+        toga_gtk.icons.Icon.__init__ = safe_gtk_icon_init
+    except Exception:
+        pass
+
+
+def patch_toga_gtk_app() -> None:
+    """Patch toga_gtk.app.App to use None application_id and NON_UNIQUE flags, preventing AppArmor D-Bus ownership denials in sandboxes."""
+    try:
+        import toga_gtk.app
+        from gi.repository import Gio
+
+        orig_init = toga_gtk.app.App.__init__
+
+        def safe_gtk_app_init(self: Any, interface: Any) -> None:
+            orig_app_id = getattr(interface, '_app_id', None)
+            try:
+                interface._app_id = None
+                orig_init(self, interface)
+            finally:
+                interface._app_id = orig_app_id
+            try:
+                current_flags = self.native.get_flags()
+                self.native.set_flags(current_flags | Gio.ApplicationFlags.NON_UNIQUE)
+            except Exception:
+                pass
+
+        if not getattr(toga_gtk.app.App, "_twittui_non_unique_patched", False):
+            toga_gtk.app.App.__init__ = safe_gtk_app_init
+            toga_gtk.app.App._twittui_non_unique_patched = True
+    except Exception:
+        pass
+
+
+# Initialize Toga tooltip and icon resilience support
 patch_toga_tooltips()
+patch_toga_icons()
+patch_toga_gtk_app()
 
 # Apply Textual backend widget extensions if available
 try:
@@ -438,6 +534,8 @@ def resolve_app_icon() -> str | None:
     candidate_bases = []
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         candidate_bases.append(getattr(sys, "_MEIPASS"))
+    if os.environ.get("SNAP"):
+        candidate_bases.append(os.environ["SNAP"])
     candidate_bases.extend([
         os.path.dirname(os.path.abspath(__file__)),
         os.getcwd(),
@@ -507,7 +605,18 @@ class TwitTUIForm(toga.App):
             resolved_icon = resolve_app_icon()
             if resolved_icon:
                 kwargs["icon"] = resolved_icon
-        super().__init__(formal_name=formal_name, app_id=app_id, **kwargs)
+        try:
+            super().__init__(formal_name=formal_name, app_id=app_id, **kwargs)
+        except Exception as e:
+            # If icon creation triggered a backend error or recursion, retry without explicit icon
+            if "icon" in kwargs:
+                kwargs.pop("icon", None)
+                try:
+                    super().__init__(formal_name=formal_name, app_id=app_id, **kwargs)
+                except Exception:
+                    raise
+            else:
+                raise
 
     def set_tooltip(self, widget: Any, tooltip_text: str | None) -> Any:
         """Helper to assign a tooltip to any UI widget or command."""
@@ -549,18 +658,32 @@ class TwitTUIForm(toga.App):
 
     def save_env_setting(self, key: str, value: str) -> None:
         """Persist a configuration setting key-value pair to the .env file with restricted permissions."""
-        candidate_paths = [
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'),
-            os.path.join(os.getcwd(), '.env'),
-            os.path.abspath('.env')
-        ]
-        target_path = None
-        for path in candidate_paths:
-            if os.path.isfile(path):
-                target_path = path
-                break
-        if not target_path:
-            target_path = candidate_paths[0]
+        snap_data = os.environ.get('SNAP_USER_DATA') or os.environ.get('SNAP_USER_COMMON')
+        if snap_data:
+            try:
+                os.makedirs(snap_data, exist_ok=True)
+            except Exception:
+                pass
+            target_path = os.path.join(snap_data, '.env')
+        else:
+            candidate_paths = [
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'),
+                os.path.join(os.getcwd(), '.env'),
+                os.path.abspath('.env')
+            ]
+            target_path = None
+            for path in candidate_paths:
+                if os.path.isfile(path) and os.access(path, os.W_OK):
+                    target_path = path
+                    break
+            if not target_path:
+                for path in candidate_paths:
+                    parent = os.path.dirname(path) or '.'
+                    if os.path.exists(parent) and os.access(parent, os.W_OK):
+                        target_path = path
+                        break
+            if not target_path:
+                target_path = candidate_paths[0]
 
         try:
             set_key(target_path, key, str(value))
@@ -2031,10 +2154,12 @@ class TwitTUIForm(toga.App):
     def show_document_viewer(self, filename: str, doc_title: str) -> None:
         """Display a Markdown/APIB document using the Hybrid Resilient Pattern (WebView with Browser fallback)."""
         candidate_paths = [
+            os.path.join(os.environ["SNAP"], filename) if os.environ.get("SNAP") else None,
             os.path.join(os.path.dirname(os.path.abspath(__file__)), filename),
             os.path.join(os.getcwd(), filename),
             os.path.abspath(filename)
         ]
+        candidate_paths = [p for p in candidate_paths if p]
 
         doc_path = None
         for path in candidate_paths:
@@ -2146,10 +2271,12 @@ class TwitTUIForm(toga.App):
         # Load CSS file if available
         css_content = ""
         candidate_css_paths = [
+            os.path.join(os.environ["SNAP"], "feed-style.css") if os.environ.get("SNAP") else None,
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "feed-style.css"),
             os.path.join(os.getcwd(), "feed-style.css"),
             os.path.abspath("feed-style.css")
         ]
+        candidate_css_paths = [p for p in candidate_css_paths if p]
         for cpath in candidate_css_paths:
             if os.path.isfile(cpath):
                 try:
@@ -2161,10 +2288,12 @@ class TwitTUIForm(toga.App):
 
         # If lxml and feed-style.xsl are available, attempt XSLT transformation with hardened parser
         candidate_xsl_paths = [
+            os.path.join(os.environ["SNAP"], "feed-style.xsl") if os.environ.get("SNAP") else None,
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "feed-style.xsl"),
             os.path.join(os.getcwd(), "feed-style.xsl"),
             os.path.abspath("feed-style.xsl")
         ]
+        candidate_xsl_paths = [p for p in candidate_xsl_paths if p]
         xsl_path = None
         for xpath in candidate_xsl_paths:
             if os.path.isfile(xpath):
@@ -2368,7 +2497,15 @@ class TwitTUIForm(toga.App):
         """Get the configured download destination directory."""
         dest = self.dest_input.value if hasattr(self, 'dest_input') and self.dest_input and self.dest_input.value else ''
         if not dest:
-            dest = os.getenv('twitclubdestination') or os.getenv('TWITCLUBDESTINATION') or os.getenv('TWIT_CLUB_DESTINATION') or '.'
+            dest = os.getenv('twitclubdestination') or os.getenv('TWITCLUBDESTINATION') or os.getenv('TWIT_CLUB_DESTINATION') or ''
+        if not dest:
+            downloads_dir = os.path.expanduser('~/Downloads')
+            if os.path.isdir(downloads_dir) and os.access(downloads_dir, os.W_OK):
+                dest = downloads_dir
+            elif os.access('.', os.W_OK):
+                dest = '.'
+            else:
+                dest = os.environ.get('SNAP_USER_DATA') or os.path.expanduser('~')
         dest = os.path.expanduser(dest.strip())
         return dest or '.'
 

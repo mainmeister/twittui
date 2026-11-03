@@ -14,6 +14,7 @@ This document serves two primary audiences:
 - [End-User Guide](#end-user-guide)
   - [System Requirements](#system-requirements)
   - [Installation](#installation)
+  - [Snap Package (Cross-Distribution Linux)](#snap-package-cross-distribution-linux)
   - [Standalone Binary Packaging & Installation](#standalone-binary-packaging--installation)
   - [Configuration (.env & UI)](#configuration-env--ui)
   - [User Interface & Usage Walkthrough](#user-interface--usage-walkthrough)
@@ -28,6 +29,7 @@ This document serves two primary audiences:
   - [Application Icon & Branding Asset Pipeline](#application-icon--branding-asset-pipeline)
   - [Execution Lifecycle & GTK Namespace Locking (`main.py`)](#execution-lifecycle--gtk-namespace-locking-mainpy)
   - [Installer & Packaging Engine (`installer.py`)](#installer--packaging-engine-installerpy)
+  - [Snap Packaging & Confinement Architecture (`snap/`)](#snap-packaging--confinement-architecture-snap)
   - [UI Architecture & Widget Tree (`twittui_form.py`)](#ui-architecture--widget-tree-twittui_formpy)
   - [Data Ingestion & 5-Tier Fallback Cascade](#data-ingestion--5-tier-fallback-cascade)
   - [Media Resolution Engine & Extraction Heuristics](#media-resolution-engine--extraction-heuristics)
@@ -110,6 +112,125 @@ This document serves two primary audiences:
      python main.py -b gtk       # Alternative syntax (-b gtk / -b textual)
      python main.py --help       # Display all backend options and switches
      ```
+
+### Snap Package (Cross-Distribution Linux)
+
+TwitTUI provides official Snap packaging support for universal installation on Ubuntu, Debian, Fedora, Arch Linux, openSUSE, and any Linux distribution with `snapd` enabled. Built on Ubuntu Core 24 (`core24`), the Snap package bundles Python, PyGObject, GTK 3, BeeWare Toga, Textual, audio subsystems, and desktop icons in a strictly confined, secure sandbox.
+
+#### 1. Prerequisites & Build Tools
+
+To build the Snap locally, install `snapcraft` from the Snap Store:
+
+```bash
+# Install snapcraft with classic confinement
+sudo snap install snapcraft --classic
+
+# (Optional) Install LXD container manager if using LXD as build provider
+sudo snap install lxd
+sudo lxd init --auto
+```
+
+#### 2. Building the Snap Package
+
+Execute `snapcraft` from the repository root directory:
+
+```bash
+# Standard containerized build (using Multipass or LXD container provider)
+snapcraft
+
+# Alternatively, force LXD container build provider
+snapcraft --use-lxd
+
+# Alternatively, build directly on the host (e.g. in dedicated CI/CD build environments)
+snapcraft --destructive-mode
+
+# Clean previous build artifacts and virtual parts when rebuilding
+snapcraft clean
+```
+
+This compiles all dependencies, GLib schemas, GObject typelibs, and virtual environments, producing `twittui_1.0.0_<arch>.snap` (e.g., `twittui_1.0.0_amd64.snap`) in the project root directory.
+
+#### 3. Installing the Snap
+
+- **Install Local Build**:
+  Install the locally compiled `.snap` package using the `--dangerous` flag (required for locally built, self-signed packages):
+  ```bash
+  sudo snap install --dangerous twittui_1.0.0_amd64.snap
+  ```
+
+- **Install for Development & Debugging** (Optional):
+  To test without confinement restrictions during development:
+  ```bash
+  sudo snap install --dangerous --devmode twittui_1.0.0_amd64.snap
+  ```
+
+- **Install from Snap Store** (Once Published):
+  ```bash
+  sudo snap install twittui
+  ```
+
+#### 4. Running the Application
+
+TwitTUI exposes two entry points within the Snap package:
+
+- **Launch Graphical Desktop UI (GTK 3)**:
+  ```bash
+  twittui
+  ```
+  Or select **TwitTUI** from your desktop environment's application menu (GNOME, KDE Plasma, XFCE, Cinnamon, etc.).
+
+- **Launch Terminal User Interface (TUI)**:
+  ```bash
+  twittui.tui
+  # Or pass backend switch to main command:
+  twittui --textual
+  ```
+
+- **Command-Line Options & Help**:
+  ```bash
+  twittui --gtk        # Force GTK graphical desktop backend
+  twittui --textual    # Force Textual terminal backend
+  twittui --help       # Display all startup options
+  ```
+
+#### 5. Snap Permissions & Interface Plugs
+
+TwitTUI operates under strict confinement (`confinement: strict`) and requests standard desktop interfaces:
+
+| Plug Interface | Default Status | Purpose |
+| :--- | :--- | :--- |
+| `desktop`, `desktop-legacy` | Connected | Native windowing, GTK themes, and font rendering |
+| `wayland`, `x11` | Connected | Wayland and X11 display server communication |
+| `opengl` | Connected | Hardware-accelerated graphics rendering |
+| `audio-playback` | Connected | PulseAudio / PipeWire audio playback for podcast streams |
+| `network`, `network-bind` | Connected | REST API querying, RSS feed parsing, and media streaming/downloading |
+| `home` | Connected | Accessing standard user directories (`~/Downloads`) |
+| `removable-media` | Disconnected (Manual) | Accessing external USB drives and SD cards (`/media`, `/run/media`) |
+
+To allow downloading podcast episodes directly to external USB hard drives or SD cards, connect the `removable-media` interface:
+
+```bash
+sudo snap connect twittui:removable-media
+```
+
+To verify active interface connections:
+```bash
+snap connections twittui
+```
+
+#### 6. Snap Configuration File (.env) & Persistence
+
+In strict Snap confinement, user settings, API credentials, and download preferences are saved inside the application's isolated writable user data directory:
+```text
+~/snap/twittui/current/.env
+```
+*(corresponds to `$SNAP_USER_DATA/.env`)*
+
+- Upon first launch, TwitTUI automatically initializes this configuration file.
+- If no custom download destination is set, TwitTUI defaults to `~/Downloads` (or `~/snap/twittui/current/` if `~/Downloads` is unavailable).
+- You can edit `~/snap/twittui/current/.env` with any text editor or modify settings live via the in-app configuration panel.
+
+---
 
 5. **Install as a Standalone Command-Line / Desktop Executable**:
    TwitTUI features an automated packaging and installation pipeline using PyInstaller. It compiles the entry point into a single, optimized standalone executable (`twittui` on POSIX systems or `twittui.exe` on Windows), embeds the application icon set, bundles all backend libraries (`toga-gtk`, `toga-textual`, `gi`), and installs the binary to a directory on your system's executable `$PATH`:
@@ -273,6 +394,16 @@ twittui/
 │   ├── twittui.ico          # Multi-resolution Windows application icon
 │   ├── twittui.svg          # Scalable vector graphics icon
 │   └── twittui-*.png        # Sized raster icon variants (512, 256, 128, 72, 64, 48, 32, 16)
+├── snap/                    # Ubuntu Snapcraft packaging recipes, desktop assets, and launchers
+│   ├── snapcraft.yaml       # Core24 strict confinement build recipe and part definitions
+│   ├── gui/                 # Desktop integration and Freedesktop menu entry
+│   │   ├── twittui.desktop  # Desktop entry launcher specification
+│   │   └── twittui.png      # Application branding icon for snap package (256x256)
+│   └── local/               # Runtime sandboxing and environment isolation
+│       └── launcher.sh      # Subprocess launcher, GTK module filter, and cache initializer
+├── test_snap.py             # Snapcraft recipe, desktop entry, launcher, and sandbox tests
+├── setup.py                 # Standard Python package setup and metadata definition
+├── pyproject.toml           # Modern Python build-system configuration
 ├── twittv.apib              # Full API Blueprint documentation for TWiT.tv REST API v1.0
 ├── Layout_spec_for_AI.txt   # UI specification and control layout blueprint
 ├── feed-style.css           # Modern, responsive CSS stylesheet for podcast RSS feeds
@@ -387,6 +518,75 @@ class StderrRedirector:
 3. **Artifact Cleanup Engine (`clean_build_artifacts`)**:
    - Automatically purges temporary `build/`, distribution `dist/`, and PyInstaller `.spec` files.
    - Supports optional package uninstallation (`--uninstall-pyinstaller`) to return the development environment to its pre-build state.
+
+---
+
+### Snap Packaging & Confinement Architecture (`snap/`)
+
+TwitTUI's Snap package provides containerized, cross-distribution deployment on Ubuntu Core 24 (`core24`) with strict sandboxing and complete environment isolation.
+
+#### 1. Snapcraft Recipe Specification (`snap/snapcraft.yaml`)
+
+- **Base Runtime**: Ubuntu 24.04 LTS (`core24`), ensuring modern Python 3.12, GTK 3.24, and PulseAudio/PipeWire runtimes.
+- **Strict Confinement**: Isolates application execution from host system files while granting controlled access through explicit interface plugs (`desktop`, `wayland`, `x11`, `audio-playback`, `network`, `home`, `removable-media`).
+- **Dual Application Definitions**:
+  - `twittui`: GTK graphical desktop application executing `bin/twittui-launcher --gtk`, associated with `snap/gui/twittui.desktop` and registering D-Bus session slot `org.beeware.twittui`.
+  - `tui`: Textual terminal application executing `bin/twittui-launcher --textual` directly in the user's terminal.
+- **System Stage Packages**:
+  Bundles native shared libraries and typelib introspections: `gir1.2-gtk-3.0`, `gir1.2-pango-1.0`, `gir1.2-glib-2.0`, `gir1.2-gdkpixbuf-2.0`, `libgtk-3-0`, `libgdk-pixbuf-2.0-0`, `librsvg2-common`, `shared-mime-info`, `libgirepository-1.0-1`, `libpulse0`.
+- **Custom Build Lifecycle (`override-build`)**:
+  - Initializes a standalone Python virtual environment inside `$CRAFT_PART_INSTALL`.
+  - Upgrades `pip` and installs dependencies from `requirements.txt` and `setup.py`.
+  - Compiles GLib schemas via `glib-compile-schemas` and generates MIME type index via `update-mime-database`.
+  - Copies launcher script (`launcher.sh` -> `bin/twittui-launcher`), desktop entry, application icons, stylesheets, and API blueprint assets.
+
+#### 2. Sandboxed Runtime Launcher (`snap/local/launcher.sh`)
+
+When the application launches inside Snap confinement, `launcher.sh` configures runtime environment variables and sanitizes host desktop overrides:
+
+```
+[ snap run twittui / twittui.tui ]
+                 │
+                 ▼
+[ Ensure SNAP_USER_DATA Directory Exists ]
+                 │
+                 ▼
+[ Initialize User Config ($SNAP_USER_DATA/.env) ]
+                 │
+                 ▼
+[ Set Default Download Path ($HOME/Downloads or $SNAP_USER_DATA) ]
+                 │
+                 ▼
+[ Sanitize Incompatible Host Theme Variables ]
+  ├── unset GTK_MODULES / GTK3_MODULES / GTK_PATH
+  ├── unset UBUNTU_MENUPROXY
+  └── unset QT_STYLE_OVERRIDE / QT_QPA_PLATFORMTHEME
+                 │
+                 ▼
+[ Architecture Detection (x86_64, aarch64, armhf) ]
+                 │
+                 ▼
+[ Export Library, Schema, Typelib & Python Paths ]
+  ├── LD_LIBRARY_PATH (usr/lib/$ARCH, pulseaudio)
+  ├── GI_TYPELIB_PATH (girepository-1.0)
+  ├── GSETTINGS_SCHEMA_DIR (usr/share/glib-2.0/schemas)
+  ├── XDG_DATA_DIRS (usr/share)
+  └── PYTHONPATH ($SNAP/lib/python3.12/site-packages, $SNAP)
+                 │
+                 ▼
+[ Dynamic GDK Pixbuf Loaders Cache Generation ]
+  └── $SNAP/usr/lib/$ARCH/gdk-pixbuf-query-loaders > $SNAP_USER_DATA/.loaders.cache
+                 │
+                 ▼
+[ Execute Application: python3 $SNAP/main.py "$@" ]
+```
+
+#### 3. Desktop Entry & Freedesktop Metadata (`snap/gui/twittui.desktop`)
+
+The desktop launcher file registers TwitTUI in system application menus:
+- Sets `Categories=AudioVideo;Audio;Video;Player;Network;` for standard audio/video and podcast indexing.
+- Declares `StartupWMClass=twittui` ensuring application windows correctly map to the application icon in GNOME Shell and KDE taskbars.
+- Provides standard search keywords for podcast discovery.
 
 ---
 
@@ -653,6 +853,7 @@ TwitTUI maintains a comprehensive automated unit test suite covering end-to-end 
 
 - **Test Suite Structure**:
   - `test_install.py`: Tests for PyInstaller compilation, standalone executable installation, PATH discovery, artifact cleanup, and application icon generation.
+  - `test_snap.py`: Tests for Snapcraft YAML structure, base core24 specification, strict confinement, plugs and slots, desktop entry Freedesktop validity, launcher shell script permissions and environment isolation logic, requirements/setup synchronization, SNAP_USER_DATA .env loading/saving, and runtime resource resolution.
   - `test_backend_factory.py`: Tests for backend detection, CLI flag routing (`--gtk`, `--textual`), and environment variable configuration.
   - `test_security.py`: Tests for markdown sanitization, HTML attribute stripping, and URI validation.
   - `test_resolutions.py`: Tests for multi-resolution media extraction, format sorting, and batch resolution selection modals.
