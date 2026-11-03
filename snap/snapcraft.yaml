@@ -1,0 +1,106 @@
+name: twittui
+base: core24
+version: '1.0.0'
+summary: TWiT.tv Terminal & Desktop Media Browser
+description: |
+  TwitTUI is an efficiency-focused, cross-platform media client for browsing,
+  streaming, and batch-downloading podcast episodes from the TWiT.tv network.
+  Built upon BeeWare Toga, it provides both a GTK desktop graphical user
+  interface and a Textual terminal user interface.
+
+grade: stable
+confinement: strict
+
+icon: snap/gui/twittui.png
+
+environment:
+  PYTHONPATH: ${SNAP}/lib/python3.12/site-packages:${SNAP}/lib/python3.10/site-packages:${SNAP}/usr/lib/python3/dist-packages:${SNAP}:${PYTHONPATH}
+  LD_LIBRARY_PATH: ${SNAP}/usr/lib/${CRAFT_ARCH_TRIPLET_BUILD_FOR}:${SNAP}/usr/lib:${SNAP}/usr/lib/${CRAFT_ARCH_TRIPLET_BUILD_FOR}/pulseaudio:${LD_LIBRARY_PATH}
+  GI_TYPELIB_PATH: ${SNAP}/usr/lib/${CRAFT_ARCH_TRIPLET_BUILD_FOR}/girepository-1.0:${SNAP}/usr/lib/girepository-1.0:${GI_TYPELIB_PATH}
+  XDG_DATA_DIRS: ${SNAP}/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}
+  GDK_PIXBUF_MODULEDIR: ${SNAP}/usr/lib/${CRAFT_ARCH_TRIPLET_BUILD_FOR}/gdk-pixbuf-2.0/2.10.0/loaders
+  GSETTINGS_SCHEMA_DIR: ${SNAP}/usr/share/glib-2.0/schemas
+  GTK_MODULES: ""
+  GTK_PATH: ""
+  GTK3_MODULES: ""
+  UBUNTU_MENUPROXY: ""
+
+apps:
+  twittui:
+    command: bin/twittui-launcher --gtk
+    desktop: snap/gui/twittui.desktop
+    plugs:
+      - desktop
+      - desktop-legacy
+      - wayland
+      - x11
+      - opengl
+      - audio-playback
+      - network
+      - network-bind
+      - home
+      - removable-media
+    slots:
+      - dbus-twittui
+  tui:
+    command: bin/twittui-launcher --textual
+    plugs:
+      - network
+      - network-bind
+      - audio-playback
+      - home
+      - removable-media
+
+slots:
+  dbus-twittui:
+    interface: dbus
+    bus: session
+    name: org.beeware.twittui
+
+parts:
+  twittui:
+    plugin: nil
+    source: .
+    build-packages:
+      - libgirepository1.0-dev
+      - libcairo2-dev
+      - pkg-config
+      - python3-dev
+      - python3-pip
+      - python3-venv
+      - python3-wheel
+      - libglib2.0-bin
+      - shared-mime-info
+    stage-packages:
+      - gir1.2-gtk-3.0
+      - gir1.2-pango-1.0
+      - gir1.2-glib-2.0
+      - gir1.2-gdkpixbuf-2.0
+      - libgtk-3-0
+      - libgdk-pixbuf-2.0-0
+      - librsvg2-common
+      - shared-mime-info
+      - libgirepository-1.0-1
+      - libgirepository-2.0-0
+      - libpulse0
+    override-build: |
+      /usr/bin/python3 -m venv $CRAFT_PART_INSTALL
+      $CRAFT_PART_INSTALL/bin/pip install --upgrade pip
+      $CRAFT_PART_INSTALL/bin/pip install -r requirements.txt
+      $CRAFT_PART_INSTALL/bin/pip install .
+      glib-compile-schemas $CRAFT_PART_INSTALL/usr/share/glib-2.0/schemas/ 2>/dev/null || true
+      update-mime-database $CRAFT_PART_INSTALL/usr/share/mime/ 2>/dev/null || true
+      mkdir -p $CRAFT_PART_INSTALL/snap/gui
+      cp snap/local/launcher.sh $CRAFT_PART_INSTALL/bin/twittui-launcher
+      chmod +x $CRAFT_PART_INSTALL/bin/twittui-launcher
+      if [ -f resources/twittui-256.png ]; then
+        cp resources/twittui-256.png $CRAFT_PART_INSTALL/snap/gui/twittui.png
+      elif [ -f resources/twittui.png ]; then
+        cp resources/twittui.png $CRAFT_PART_INSTALL/snap/gui/twittui.png
+      fi
+      cp snap/gui/twittui.desktop $CRAFT_PART_INSTALL/snap/gui/twittui.desktop
+      cp -a *.py $CRAFT_PART_INSTALL/
+      cp -a resources $CRAFT_PART_INSTALL/ 2>/dev/null || true
+      cp -a feed-style.* $CRAFT_PART_INSTALL/ 2>/dev/null || true
+      cp -a twittv.apib $CRAFT_PART_INSTALL/ 2>/dev/null || true
+      cp -a README.md $CRAFT_PART_INSTALL/ 2>/dev/null || true
