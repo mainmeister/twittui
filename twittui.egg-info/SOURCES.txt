@@ -1,0 +1,14 @@
+README.md
+generate_icon.py
+installer.py
+main.py
+pyproject.toml
+setup.py
+toga_textual_backend.py
+twittui_form.py
+twittui.egg-info/PKG-INFO
+twittui.egg-info/SOURCES.txt
+twittui.egg-info/dependency_links.txt
+twittui.egg-info/entry_points.txt
+twittui.egg-info/requires.txt
+twittui.egg-info/top_level.txt

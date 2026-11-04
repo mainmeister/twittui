@@ -30,6 +30,32 @@ import toga.platform
 from toga_textual.widgets.base import Widget
 
 
+class RateLimitScreen(ModalScreen):
+    DEFAULT_CSS = """
+    RateLimitScreen { align: center middle; background: rgba(0, 0, 0, 0.7); }
+    RateLimitScreen Vertical { width: 60; height: auto; border: solid $accent; background: $surface; padding: 1 2; }
+    RateLimitScreen LoadingIndicator { height: 3; }
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._close_requested = False
+
+    def compose(self) -> Any:
+        with Vertical():
+            yield Label('Waiting for the TWiT API. Please wait.')
+            yield LoadingIndicator()
+
+    def close_wait(self) -> None:
+        self._close_requested = True
+        if self.app.screen is self:
+            self.dismiss()
+
+    def on_screen_resume(self) -> None:
+        if self._close_requested:
+            self.dismiss()
+
+
 class TextualDialogScreen(ModalScreen):
     """Textual modal screen for displaying Toga dialogs."""
 
