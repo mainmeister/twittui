@@ -57,7 +57,7 @@ This document serves two primary audiences:
 - **Direct Video/Audio Streaming**: Spawn external media players (e.g., VLC, MPV) asynchronously using customizable command templates without stalling the UI.
 - **Background Batch Downloader**: Download selected episodes sequentially in a background worker with configurable byte buffers. Existing non-identical files can be overwritten without confirmation.
 - **Download Deduplication**: Uses available size and ETag information as heuristics to skip existing files; identity is not guaranteed.
-- **Club TWiT Integration**: Native support for subscriber Memberful authentication keys, giving direct access to ad-free streams and subscriber-exclusive shows.
+- **Club TWiT Integration**: Supports Memberful authentication keys for configured subscriber feeds; available episodes depend on the feed and network.
 - **Backend Choices**: Uses BeeWare Toga with GTK and Textual backend selection. Native macOS and Windows operation is not guaranteed.
 
 ---
@@ -146,20 +146,20 @@ snapcraft --destructive-mode
 snapcraft clean
 ```
 
-This compiles all dependencies, GLib schemas, GObject typelibs, and virtual environments, producing `twittui_1.0.0_<arch>.snap` (e.g., `twittui_1.0.0_amd64.snap`) in the project root directory.
+This compiles all dependencies, GLib schemas, GObject typelibs, and virtual environments, producing `twittui_1.0.1_<arch>.snap` (e.g., `twittui_1.0.1_amd64.snap`) in the project root directory.
 
 #### 3. Installing the Snap
 
 - **Install Local Build**:
   Install the locally compiled `.snap` package using the `--dangerous` flag (required for locally built, self-signed packages):
   ```bash
-  sudo snap install --dangerous twittui_1.0.0_amd64.snap
+  sudo snap install --dangerous twittui_1.0.1_amd64.snap
   ```
 
 - **Install for Development & Debugging** (Optional):
   To test without confinement restrictions during development:
   ```bash
-  sudo snap install --dangerous --devmode twittui_1.0.0_amd64.snap
+  sudo snap install --dangerous --devmode twittui_1.0.1_amd64.snap
   ```
 
 
@@ -179,6 +179,7 @@ TwitTUI exposes two entry points within the Snap package:
   ```
 
 The Snap entry points supply their own backend switches; use `twittui.tui` for the terminal UI.
+The Snap does not bundle VLC; streaming requires an accessible external player, which may be restricted by confinement. Verify the configured player works in your installation.
 
 #### 5. Snap Permissions & Interface Plugs
 
@@ -247,7 +248,7 @@ In strict Snap confinement, user settings, API credentials, and download prefere
    ```
 
    **Automatic Cleanup & Build Artifact Management**:
-   To preserve disk space and keep your workspace clean, the installation routine automatically removes intermediate PyInstaller `build/`, `dist/`, and `.spec` files after copying the binary.
+   After copying the binary, the installation routine recursively removes the project's entire `build/` and `dist/` directories and all root-level `.spec` files, including unrelated content. The manual cleanup command removes the same paths; move anything you need elsewhere first.
    - To preserve build artifacts during installation, pass `--no-clean`:
      ```bash
      python main.py --install --no-clean
@@ -278,7 +279,7 @@ In strict Snap confinement, user settings, API credentials, and download prefere
 
 ### Configuration (.env & UI)
 
-TwitTUI reads default configuration values from a local `.env` file upon launch, which can also be modified in real time via the application settings panel.
+TwitTUI reads configuration from `.env` on launch; values in that file override existing process environment values. Outside Snap, discovery starts from the working directory, while saving settings prefers a writable `.env` beside the application module, so the file read and file saved can differ. The application settings panel can also modify settings.
 
 Create a `.env` file in the project root directory:
 
@@ -335,6 +336,7 @@ TWITAUDIOONLY=0
 - The episode list refreshes automatically upon selection.
 - Click **Fetch** to refresh the show catalog and episodes; the show catalog falls back to the built-in list if the API is unavailable.
 - **Next** fetches another page when the active source has a next page; it is not always available.
+- The API status message reports loading and credential status; requests may display a wait dialog while the API rate limiter is active.
 - **Episode Metadata Inspection**: On supported GTK tables, hovering for 3 seconds can show the metadata and links available for that episode; not all fields or links are present.
 
 #### Searching Episodes
@@ -348,26 +350,28 @@ TWITAUDIOONLY=0
   - **☑ Episode Number**: Sorts numerically by episode number.
   - **☑ Episode Title**: Sorts alphabetically by episode title.
 - Toggle the sort direction button:
-  - **▼ Descending**: Queries the TWiT REST API with descending sort (`-airingDate`, `-episodeNumber`, `-label`) to display newest/highest first.
-  - **▲ Ascending**: Queries the TWiT REST API with ascending sort (`airingDate`, `episodeNumber`, `label`) to fetch and display oldest/lowest first (e.g., Episode 1 forward).
+  - **▼ Descending**: Displays newer or higher values first.
+  - **▲ Ascending**: Displays older or lower values first.
+  - Changing direction reloads episodes; the source may be the API, RSS, or an archive, and the displayed list is also sorted locally.
 
 #### Streaming an Episode
 1. Click on an episode in the list table to highlight it.
 2. Double-click the row or press the **Stream** button.
-3. TwitTUI resolves an available media stream and launches your configured media player in a separate process. Use **Audio Only** to prefer audio; the preference is saved as `TWITAUDIOONLY`.
+3. If prompted, choose an available format or resolution. TwitTUI resolves the stream and launches your configured media player in a separate process. **Audio Only** refreshes the episode list and prefers audio for streaming and downloads; the preference is saved as `TWITAUDIOONLY`.
 
 #### Batch Downloading Episodes
 1. Highlight one or more episodes in the table (hold `Shift` or `Ctrl` for multiple selections).
-2. Ensure **Download Destination** is set to your preferred folder (use **Browse** to select).
+2. Ensure **Download Destination** is set to your preferred folder (use **Browse** to select). **Open** creates the destination if necessary and opens it in your file manager.
 3. Optionally toggle **Show Folders** if you want downloaded episodes organized into dedicated subfolders named after each show (e.g., `<Download Destination>/Security Now/Security Now 1000.mp4`).
-4. Click **Download**. The batch runs sequentially in a background worker. Existing non-identical files may be overwritten without confirmation.
+4. Click **Download**. If prompted, choose a format for a single episode or a resolution preference for the batch. The batch runs sequentially in a background worker. Existing non-identical files may be overwritten without confirmation.
 5. Files are saved directly to your destination path (or show subfolder) with normalized, clean filenames (e.g., `This Week in Tech 1001 AI in the Fast Lane.mp4`).
 6. A completion dialog appears if at least one item succeeded, including skipped existing files; it may appear after partial cancellation. **Cancel** requests cancellation of an active download, or exits the app if none is active.
 
 #### Club TWiT Member Features
 - Paste your unique Memberful key into the **TWIT Club URL** box.
-- When configured, TwitTUI automatically checks your Club TWiT feed for commercial-free and subscriber-exclusive episodes.
-- Click the **Show** button next to the URL input to fetch, format, and view your Club TWiT feed as a styled webpage directly in your default web browser (styled with `feed-style.css`).
+- When configured, TwitTUI can check Club TWiT feeds for available subscriber episodes.
+- Click **Show** next to the URL to view the feed in your browser. TwitTUI attempts to fetch and format it with `feed-style.css`; if fetching fails, it opens the direct feed URL instead.
+- Use **Test API** to test the entered API credentials asynchronously and display the result.
 
 ---
 
@@ -506,7 +510,7 @@ class StderrRedirector:
    - Replaces pre-existing binary installations in place cleanly.
 
 3. **Artifact Cleanup Engine (`clean_build_artifacts`)**:
-   - Automatically purges temporary `build/`, distribution `dist/`, and PyInstaller `.spec` files.
+   - Recursively removes the project `build/` and `dist/` directories and all root-level `.spec` files, including unrelated content.
    - Supports optional package uninstallation (`--uninstall-pyinstaller`) to return the development environment to its pre-build state.
 
 ---

@@ -43,7 +43,7 @@ class TestEpisodeSearch(unittest.TestCase):
         form.search_input = SimpleNamespace(value='AI User Group')
         form._cancel_hover_timer = MagicMock()
         form.update_episodes_display = MagicMock()
-        worker = SimpleNamespace(_episodes_from_api=True, _episodes_all_loaded=False,
+        worker = SimpleNamespace(_episodes_from_api=True, _episodes_all_loaded=True,
                                  fetch_episodes=lambda *args, **kwargs: [
                                      {'title': 'AI User Group'}, {'title': 'Other'}])
         form._network_snapshot = MagicMock(return_value=worker)

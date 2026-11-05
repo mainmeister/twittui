@@ -155,15 +155,69 @@ class TestBackgroundEpisodes(unittest.TestCase):
         form.load_episodes_for_selected_show()
         form.show_combo.value = 'Second'
         form.load_episodes_for_selected_show()
-        jobs[1][1]([{'title': 'Second'}])
-        jobs[0][1]([{'title': 'First'}])
+        jobs[1][1](([{'title': 'Second'}], 1))
+        jobs[0][1](([{'title': 'First'}], 1))
         self.assertEqual(form.current_episodes, [{'title': 'Second'}])
 
 
 class TestRateLimitModal(unittest.TestCase):
+    def test_desktop_wait_window_is_centered_on_main_window(self):
+        form = TwitTUIForm('TestApp', 'org.twit.test')
+        form._main_window = MagicMock()
+        form._main_window.position = (300, 200)
+        form._main_window.size = (1000, 700)
+        form._impl.native = SimpleNamespace()
+        window = MagicMock()
+        window.size = (440, 220)
+        window._impl.native = SimpleNamespace(set_decorated=MagicMock())
+        with patch('twittui_form.toga.Window', return_value=window) as create, \
+                patch('twittui_form.toga.Box'), patch('twittui_form.toga.Label'), \
+                patch('twittui_form.toga.ActivityIndicator') as indicator:
+            form._set_rate_limit_wait(True)
+        self.assertFalse(create.call_args.kwargs['closable'])
+        self.assertFalse(create.call_args.kwargs['resizable'])
+        self.assertFalse(create.call_args.kwargs['minimizable'])
+        self.assertEqual(window.position, (580, 440))
+        style = indicator.call_args.kwargs['style']
+        self.assertEqual((style.width, style.height), (128, 128))
+        self.assertEqual(str(style.color), 'rgb(255 0 0 / 1.0)')
+        window._impl.native.set_decorated.assert_called_once_with(True)
+        window.show.assert_called_once()
+
+    def test_gtk_wait_window_hides_title_buttons(self):
+        for existing_header in (False, True):
+            with self.subTest(existing_header=existing_header):
+                form = TwitTUIForm('TestApp', 'org.twit.test')
+                form._main_window = MagicMock()
+                form._main_window.position = (0, 0)
+                form._main_window.size = (800, 600)
+                form._impl.native = SimpleNamespace()
+                native = MagicMock()
+                header = MagicMock()
+                impl = type('GtkWindow', (), {'__module__': 'toga_gtk.window'})()
+                impl.native = native
+                if existing_header:
+                    impl.headerbar = header
+                window = MagicMock()
+                window._impl = impl
+                gtk = SimpleNamespace(HeaderBar=MagicMock(return_value=header))
+                with patch.dict('sys.modules', {'toga_gtk.libs': SimpleNamespace(Gtk=gtk)}), \
+                        patch('twittui_form.toga.Window', return_value=window), \
+                        patch('twittui_form.toga.Box'), patch('twittui_form.toga.Label'), \
+                        patch('twittui_form.toga.ActivityIndicator'):
+                    form._set_rate_limit_wait(True)
+                header.set_decoration_layout.assert_called_once_with(':')
+                if existing_header:
+                    native.set_titlebar.assert_not_called()
+                else:
+                    native.set_titlebar.assert_called_once_with(header)
+                window.show.assert_called_once()
+
     def test_reentrant_show_creates_only_one_window(self):
         form = TwitTUIForm('TestApp', 'org.twit.test')
         form._main_window = MagicMock()
+        form._main_window.position = (0, 0)
+        form._main_window.size = (800, 600)
         form._impl.native = SimpleNamespace()
         window = MagicMock(spec=['_impl', 'content', 'show', 'hide', 'close'])
         window._impl = MagicMock()

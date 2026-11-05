@@ -113,7 +113,7 @@ class TestShowCatalog(unittest.TestCase):
 
     @patch('twittui_form.load_twittui_dotenv')
     @patch('twittui_form.requests.get')
-    def test_episode_catalog_requests_all_once(self, get, _load):
+    def test_episode_catalog_requests_bounded_page(self, get, _load):
         self.form.show_combo = MagicMock(value='Test')
         get.return_value.status_code = 200
         get.return_value.json.return_value = {'episodes': [{'label': 'First'}, {'label': 'Second'}]}
@@ -122,18 +122,24 @@ class TestShowCatalog(unittest.TestCase):
             self.assertEqual([e['title'] for e in episodes], ['First', 'Second'])
             self.assertEqual(self.form.fetch_episodes(123, page=2), [])
         get.assert_called_once()
-        self.assertIn('range=1000000', get.call_args.args[0])
+        self.assertIn('range=50&page=1', get.call_args.args[0])
         self.assertIn('sort=-airingDate', get.call_args.args[0])
 
     @patch('twittui_form.load_twittui_dotenv')
     @patch('twittui_form.requests.get')
-    def test_incomplete_episodes_use_rss_without_following_next(self, get, _load):
+    def test_episode_next_page_is_loaded_on_demand(self, get, _load):
         self.form.show_combo = MagicMock(value='Test')
-        get.return_value.status_code = 200
-        get.return_value.json.return_value = {'episodes': [{'label': 'Partial'}], '_links': {'next': {'href': '?page=2'}}}
-        with patch.object(self.form, 'get_api_app_id', return_value='id'), patch.object(self.form, 'get_api_app_key', return_value='key'), patch.object(self.form, 'fetch_show_rss_items', return_value=[{'title': 'Fallback'}]):
-            self.assertEqual(self.form.fetch_episodes(123)[0]['title'], 'Fallback')
-        get.assert_called_once()
+        first, second = MagicMock(status_code=200), MagicMock(status_code=200)
+        first.json.return_value = {'episodes': [{'label': 'First'}], '_links': {'next': {'href': '?page=2'}}}
+        second.json.return_value = {'episodes': [{'label': 'Second'}]}
+        get.side_effect = [first, second]
+        with patch.object(self.form, 'get_api_app_id', return_value='id'), patch.object(self.form, 'get_api_app_key', return_value='key'):
+            self.assertEqual(self.form.fetch_episodes(123)[0]['title'], 'First')
+            self.assertFalse(self.form._episodes_all_loaded)
+            self.assertEqual(self.form.fetch_episodes(123, page=2)[0]['title'], 'Second')
+            self.assertEqual(self.form.fetch_episodes(123, page=3), [])
+        self.assertEqual(get.call_count, 2)
+        self.assertIn('page=2', get.call_args.args[0])
 
     @patch('twittui_form.load_twittui_dotenv')
     @patch('twittui_form.requests.get')
@@ -150,14 +156,43 @@ class TestShowCatalog(unittest.TestCase):
 
     @patch('twittui_form.load_twittui_dotenv')
     @patch('twittui_form.requests.get')
-    def test_episode_count_detects_truncation_without_next_link(self, get, _load):
+    def test_episode_count_detects_additional_pages_without_next_link(self, get, _load):
         self.form.show_combo = MagicMock(value='Security Now')
         get.return_value.status_code = 200
-        get.return_value.json.return_value = {'count': 2, 'episodes': [{'label': 'Partial'}]}
-        with patch.object(self.form, 'get_api_app_id', return_value='id'), patch.object(self.form, 'get_api_app_key', return_value='key'), patch.object(self.form, 'fetch_show_rss_items', return_value=[{'title': 'Fallback'}]):
-            self.assertEqual(self.form.fetch_episodes(1636)[0]['title'], 'Fallback')
-        self.assertIn('incomplete', self.form._episode_api_status.lower())
+        get.return_value.json.return_value = {'count': 100, 'episodes': [{'label': 'Partial'}]}
+        with patch.object(self.form, 'get_api_app_id', return_value='id'), patch.object(self.form, 'get_api_app_key', return_value='key'):
+            self.assertEqual(self.form.fetch_episodes(1636)[0]['title'], 'Partial')
+        self.assertFalse(self.form._episodes_all_loaded)
         get.assert_called_once()
+
+    @patch('twittui_form.load_twittui_dotenv')
+    @patch('twittui_form.requests.get')
+    def test_later_episode_page_failure_preserves_api_source(self, get, _load):
+        self.form.show_combo = MagicMock(value='Test')
+        first, second = MagicMock(status_code=200), MagicMock(status_code=500)
+        first.json.return_value = {'episodes': [{'label': 'First'}], '_links': {'next': {'href': '?page=2'}}}
+        get.side_effect = [first, second]
+        with patch.object(self.form, 'get_api_app_id', return_value='id'), patch.object(self.form, 'get_api_app_key', return_value='key'), patch.object(self.form, 'fetch_show_rss_items') as rss:
+            self.form.fetch_episodes(123)
+            self.assertEqual(self.form.fetch_episodes(123, page=2), [])
+        rss.assert_not_called()
+        self.assertIn('500', self.form._episode_api_status)
+
+    def test_next_page_failure_is_displayed_without_losing_episodes(self):
+        self.form.show_combo = MagicMock(value='Test')
+        self.form.show_ids = {'Test': 123}
+        self.form.current_page = 1
+        self.form.current_episodes = [{'title': 'First'}]
+        self.form.api_status_label = MagicMock(text='')
+        worker = MagicMock()
+        worker._episodes_all_loaded = False
+        worker._episode_api_status = 'Episodes API failed (HTTP 500)'
+        worker.fetch_episodes.return_value = []
+        with patch.object(self.form, '_network_snapshot', return_value=worker), patch.object(self.form, '_run_network', side_effect=lambda work, done: done(work())):
+            self.form.on_next_press(None)
+        self.assertEqual(self.form.current_page, 1)
+        self.assertEqual(self.form.current_episodes, [{'title': 'First'}])
+        self.assertIn('500', self.form.api_status_label.text)
 
     def test_episode_source_propagates_from_worker(self):
         self.form.show_combo = MagicMock(value='Test')
@@ -169,6 +204,43 @@ class TestShowCatalog(unittest.TestCase):
         with patch.object(self.form, '_network_snapshot', return_value=worker), patch.object(self.form, '_run_network', side_effect=lambda work, done: done(work())), patch.object(self.form, 'update_episodes_display'):
             self.form.load_episodes_for_selected_show()
         self.assertTrue(self.form._episodes_from_api)
+
+    def test_selected_show_loads_all_pages(self):
+        self.form.show_combo = MagicMock(value='Test')
+        self.form.show_ids = {'Test': 123}
+        self.form.search_input = MagicMock(value='')
+        worker = MagicMock()
+        worker._episodes_all_loaded = False
+        def fetch(show_id, page):
+            worker._episodes_all_loaded = page == 3
+            return [{'title': f'Episode {page}'}]
+        worker.fetch_episodes.side_effect = fetch
+        with patch.object(self.form, '_network_snapshot', return_value=worker), patch.object(self.form, '_run_network', side_effect=lambda work, done: done(work())), patch.object(self.form, 'update_episodes_display'):
+            self.form.load_episodes_for_selected_show()
+        self.assertEqual([ep['title'] for ep in self.form.current_episodes], ['Episode 1', 'Episode 2', 'Episode 3'])
+        self.assertEqual(self.form.current_page, 3)
+
+    def test_select_show_with_search_loads_catalog(self):
+        self.form.search_input = MagicMock(value='query')
+        with patch.object(self.form, 'load_episodes_for_selected_show') as load:
+            self.form.on_show_select(None)
+        load.assert_called_once()
+
+    @patch('twittui_form.load_twittui_dotenv')
+    @patch('twittui_form.requests.get')
+    def test_selected_show_preserves_pages_on_api_failure(self, get, _load):
+        self.form.show_combo = MagicMock(value='Test')
+        self.form.show_ids = {'Test': 123}
+        self.form.search_input = MagicMock(value='first')
+        self.form.api_status_label = MagicMock(text='')
+        first, second = MagicMock(status_code=200), MagicMock(status_code=500)
+        first.json.return_value = {'episodes': [{'label': 'First'}], '_links': {'next': {'href': '?page=2'}}}
+        get.side_effect = [first, second]
+        with patch.object(self.form, 'get_api_app_id', return_value='id'), patch.object(self.form, 'get_api_app_key', return_value='key'), patch.object(self.form, '_run_network', side_effect=lambda work, done: done(work())), patch.object(self.form, 'update_episodes_display'):
+            self.form.load_episodes_for_selected_show()
+        self.assertEqual([ep['title'] for ep in self.form.current_episodes], ['First'])
+        self.assertIn('500', self.form.api_status_label.text)
+        self.assertEqual(get.call_count, 2)
 
     @patch('twittui_form.load_twittui_dotenv')
     @patch('twittui_form.requests.get')

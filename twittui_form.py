@@ -756,18 +756,34 @@ class TwitTUIForm(toga.App):
                     self._rate_limit_window = screen
                     native_app.push_screen(screen)
                 else:
-                    window = toga.Window(title='Waiting for TWiT API', size=(440, 150), closable=False)
+                    window = toga.Window(title='Waiting for TWiT API', size=(440, 220),
+                                         closable=False, resizable=False, minimizable=False)
                     self._rate_limit_window = window
+                    x, y = self.main_window.position
+                    width, height = self.main_window.size
+                    window.position = (x + (width - 440) // 2, y + (height - 220) // 2)
                     box = toga.Box(style=Pack(direction=COLUMN, margin=20))
-                    box.add(toga.Label('Waiting for the TWiT API. Please wait.'))
-                    indicator = toga.ActivityIndicator(style=Pack(margin=10))
+                    box.add(toga.Label('Please wait.'))
+                    indicator = toga.ActivityIndicator(style=Pack(margin=10, width=128, height=128, color='red'))
                     box.add(indicator)
                     window.content = box
                     native = window._impl.native
                     if hasattr(native, 'set_decorated'):
-                        native.set_decorated(False)
+                        native.set_decorated(True)
+                    if window._impl.__class__.__module__.startswith('toga_gtk'):
+                        from toga_gtk.libs import Gtk
+                        headerbar = getattr(window._impl, 'headerbar', None)
+                        if headerbar is None:
+                            headerbar = Gtk.HeaderBar()
+                            if hasattr(headerbar, 'set_title'):
+                                headerbar.set_title('Waiting for TWiT API')
+                            native.set_titlebar(headerbar)
+                        headerbar.set_decoration_layout(':')
                     if hasattr(native, 'set_transient_for'):
                         native.set_transient_for(self.main_window._impl.native)
+                    if native.__class__.__module__.startswith('gi.repository') and hasattr(native, 'set_position'):
+                        from toga_gtk.libs import Gtk
+                        native.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
                     if hasattr(native, 'set_modal'):
                         native.set_modal(True)
                     window.show()
@@ -816,10 +832,7 @@ class TwitTUIForm(toga.App):
                     self.show_combo.value = selection
             finally:
                 self._setting_catalog = False
-            if getattr(self, 'search_input', None) and (self.search_input.value or '').strip():
-                self.on_search_press()
-            else:
-                self.load_episodes_for_selected_show()
+            self.load_episodes_for_selected_show()
 
         self._run_network(worker.fetch_shows, done)
 
@@ -1739,7 +1752,7 @@ class TwitTUIForm(toga.App):
         self.episodes_list = toga.Table(
             columns=['Episode', 'Title', 'Date', 'Length', 'Size'],
             multiple_select=True,
-            on_activate=lambda widget, row: self.on_stream_press(widget),
+            on_activate=self.on_episode_activate,
             style=Pack(flex=1, margin=5, height=200),
             tooltip='Episode list: select episodes to download, or double-click / press Enter to stream'
         )
@@ -4243,6 +4256,9 @@ class TwitTUIForm(toga.App):
             print(f"Error presenting resolution choice dialog: {e}")
             return resolutions[0]
 
+    async def on_episode_activate(self, widget, row, **kwargs) -> None:
+        await self.on_stream_press(widget)
+
     async def on_stream_press(self, widget=None) -> None:
         """Process selected episode for streaming with resolution prompt if multiple are available."""
         try:
@@ -4467,6 +4483,7 @@ class TwitTUIForm(toga.App):
                                  'cleanPath': path.split('?', 1)[0]})
             if not episodes:
                 return None
+            self._episodes_all_loaded = page >= last_page
             return list(reversed(episodes)) if self.is_sort_ascending() else episodes
         except (requests.RequestException, ValueError, TypeError) as e:
             print(f"Error fetching Triangulation archive: {e}")
@@ -4474,7 +4491,7 @@ class TwitTUIForm(toga.App):
 
     def fetch_episodes(self, show_id, page=1, sort=None):
         """Fetch episodes for a specific show ID, with fallback to Show and Club RSS feeds."""
-        if page and int(page) > 1 and (getattr(self, '_episodes_from_api', False) or getattr(self, '_episodes_all_loaded', False)):
+        if page and int(page) > 1 and getattr(self, '_episodes_all_loaded', False):
             return []
         if not page or int(page) <= 1:
             self._episodes_from_api = False
@@ -4491,7 +4508,7 @@ class TwitTUIForm(toga.App):
             app_id = self.get_api_app_id()
             app_key = self.get_api_app_key()
 
-            if app_id and app_key and show_id and (not page or int(page) <= 1):
+            if app_id and app_key and show_id and (not page or int(page) <= 1 or getattr(self, '_episodes_from_api', False)):
                 headers = {
                     'Accept': 'application/json',
                     'app-id': app_id,
@@ -4501,19 +4518,18 @@ class TwitTUIForm(toga.App):
                 if sort is None:
                     sort = self.get_current_sort_param()
 
-                url = f'https://twit.tv/api/v1.0/episodes?filter[shows]={show_id}&range=1000000'
+                page = int(page or 1)
+                page_size = 50
+                url = f'https://twit.tv/api/v1.0/episodes?filter[shows]={show_id}&range={page_size}&page={page}'
                 if sort:
                     url += f'&sort={sort}'
                 response = api_rate_limiter.get(url, headers=headers, timeout=(10, 60))
 
                 if response.status_code == 200:
                     data = response.json()
-                    if not isinstance(data.get('episodes'), list):
+                    if not isinstance(data, dict) or not isinstance(data.get('episodes'), list):
                         raise ValueError('Invalid episodes API response')
                     count = data.get('count')
-                    if (data.get('_links', {}).get('next') or
-                            (str(count).isdigit() and int(count) > len(data['episodes']))):
-                        raise ValueError('Incomplete episodes API response')
                     episodes = []
                     if 'episodes' in data and isinstance(data['episodes'], list):
                         for episode in data['episodes']:
@@ -4550,11 +4566,20 @@ class TwitTUIForm(toga.App):
                             episodes.append(episode_info)
 
                     self._episodes_from_api = True
+                    next_link = (data.get('_links') or {}).get('next')
+                    self._episodes_all_loaded = not next_link and (
+                        int(count) <= page * page_size if str(count).isdigit()
+                        else len(episodes) < page_size
+                    )
+                    self._episode_api_status = ''
                     return episodes
                 self._episode_api_status = f'Episodes API failed (HTTP {response.status_code}); RSS may not contain the full archive.'
         except Exception as e:
             print(f"Error fetching episodes from API: {e}")
             self._episode_api_status = f'Episodes API failed ({e}); RSS may not contain the full archive.'
+
+        if page and int(page) > 1 and getattr(self, '_episodes_from_api', False):
+            return []
 
         if selected_show.strip().lower() == 'triangulation':
             if not page or int(page) <= 1:
@@ -5745,8 +5770,24 @@ class TwitTUIForm(toga.App):
             show_id = self.show_ids[selected_show]
             worker = self._network_snapshot()
 
-            def done(episodes):
+            def fetch_all():
+                episodes = []
+                page = 1
+                batch = []
+                while token == self._episode_request:
+                    batch = worker.fetch_episodes(show_id, page=page)
+                    if not batch:
+                        break
+                    episodes.extend(batch)
+                    if getattr(worker, '_episodes_all_loaded', False):
+                        break
+                    page += 1
+                return episodes, page if batch else max(1, page - 1)
+
+            def done(result):
                 if token == self._episode_request:
+                    episodes, page = result
+                    self.current_page = page
                     self._triangulation_rss_fallback = getattr(worker, '_triangulation_rss_fallback', False)
                     self._episodes_from_api = getattr(worker, '_episodes_from_api', False)
                     self._episodes_all_loaded = getattr(worker, '_episodes_all_loaded', False)
@@ -5756,12 +5797,19 @@ class TwitTUIForm(toga.App):
                             self.api_status_label.text = status
                     self._episode_api_status = status
                     self.current_episodes = episodes
-                    if self._episodes_from_api or self._episodes_all_loaded:
+                    if self._episodes_all_loaded:
                         self._search_catalog = list(episodes)
                         self._search_catalog_show = selected_show
+                    query = (self.search_input.value or '').strip() if getattr(self, 'search_input', None) else ''
+                    if query:
+                        words = query.lower().split()
+                        self.current_episodes = [ep for ep in episodes if all(
+                            word in ' '.join(str(ep.get(field) or '') for field in
+                                             ('title', 'description', 'summary', 'body', 'number')).lower()
+                            for word in words)]
                     self.update_episodes_display()
 
-            self._run_network(lambda: worker.fetch_episodes(show_id, page=1), done)
+            self._run_network(fetch_all, done)
         else:
             self.current_episodes = []
             self.update_episodes_display()
@@ -5771,10 +5819,7 @@ class TwitTUIForm(toga.App):
         if getattr(self, '_setting_catalog', False):
             return
         self.current_page = 1
-        if hasattr(self, 'search_input') and self.search_input and self.search_input.value and self.search_input.value.strip():
-            self.on_search_press()
-        else:
-            self.load_episodes_for_selected_show()
+        self.load_episodes_for_selected_show()
 
     def on_fetch_press(self, widget) -> None:
         """Fetch episodes for the selected show and refresh the show list."""
@@ -5790,8 +5835,18 @@ class TwitTUIForm(toga.App):
         next_page = getattr(self, 'current_page', 1) + 1
         token = self._next_episode_request()
         worker = self._network_snapshot()
-        self._run_network(lambda: worker.fetch_episodes(show_id, page=next_page),
-                          lambda episodes: self._append_episode_page(token, next_page, episodes))
+        def done(episodes):
+            if token != self._episode_request:
+                return
+            self._episodes_all_loaded = getattr(worker, '_episodes_all_loaded', False)
+            status = getattr(worker, '_episode_api_status', '')
+            if getattr(self, 'api_status_label', None):
+                if status or self.api_status_label.text == getattr(self, '_episode_api_status', None):
+                    self.api_status_label.text = status
+            self._episode_api_status = status
+            self._append_episode_page(token, next_page, episodes)
+
+        self._run_network(lambda: worker.fetch_episodes(show_id, page=next_page), done)
 
     def _append_episode_page(self, token, next_page, new_episodes):
         if token != self._episode_request:

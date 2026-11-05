@@ -34,7 +34,7 @@ class RateLimitScreen(ModalScreen):
     DEFAULT_CSS = """
     RateLimitScreen { align: center middle; background: rgba(0, 0, 0, 0.7); }
     RateLimitScreen Vertical { width: 60; height: auto; border: solid $accent; background: $surface; padding: 1 2; }
-    RateLimitScreen LoadingIndicator { height: 3; }
+    RateLimitScreen LoadingIndicator { height: 3; color: red; }
     """
 
     def __init__(self) -> None:

@@ -1,6 +1,6 @@
 name: twittui
 base: core24
-version: '1.0.0'
+version: '1.0.1'
 summary: TWiT.tv Terminal & Desktop Media Browser
 description: |
   TwitTUI is an efficiency-focused, cross-platform media client for browsing,
