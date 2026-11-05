@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: twittui
-Version: 1.0.0
+Version: 1.0.1
 Summary: TWiT.tv Terminal & Desktop Media Browser
 Author: TWiT Community
 Requires-Python: >=3.10
@@ -16,7 +16,7 @@ Dynamic: requires-python
 
 # TwitTUI: TWiT.tv Terminal & Desktop Media Browser
 
-TwitTUI is an efficiency-focused, cross-platform media client for browsing, streaming, and batch-downloading podcast episodes from the [TWiT.tv](https://twit.tv) network. Built upon the [BeeWare Toga](https://beeware.org/) framework, TwitTUI operates seamlessly across terminal environments and graphical desktop environments with minimal resource overhead.
+TwitTUI is a media client for browsing, streaming, and batch-downloading podcast episodes from the [TWiT.tv](https://twit.tv) network. Built on [BeeWare Toga](https://beeware.org/), it offers terminal and GTK desktop interfaces.
 
 This document serves two primary audiences:
 1. **[End-User Guide](#end-user-guide)**: Practical, step-by-step instructions for installing, configuring, and operating the application.
@@ -47,7 +47,7 @@ This document serves two primary audiences:
   - [Installer & Packaging Engine (`installer.py`)](#installer--packaging-engine-installerpy)
   - [Snap Packaging & Confinement Architecture (`snap/`)](#snap-packaging--confinement-architecture-snap)
   - [UI Architecture & Widget Tree (`twittui_form.py`)](#ui-architecture--widget-tree-twittui_formpy)
-  - [Data Ingestion & 5-Tier Fallback Cascade](#data-ingestion--5-tier-fallback-cascade)
+  - [Data Ingestion & Fallbacks](#data-ingestion--fallbacks)
   - [Media Resolution Engine & Extraction Heuristics](#media-resolution-engine--extraction-heuristics)
   - [Asynchronous Streaming & Multi-Threaded Batch Downloader](#asynchronous-streaming--multi-threaded-batch-downloader)
   - [Filesystem Sanitization & Naming Pipeline](#filesystem-sanitization--naming-pipeline)
@@ -67,14 +67,14 @@ This document serves two primary audiences:
 ## Core Capabilities
 
 - **Show Catalog Navigation**: Browse active and legacy TWiT.tv productions with automatic fallback to static show catalogs when offline or unauthenticated.
-- **In-Show Episode & Topic Search**: Search episodes within the currently selected show by keywords or topics using the official TWiT REST API search endpoint (`/search/{keywords}`) with automatic fallback to Show and Club RSS feed matching.
-- **Episode Metadata Hover Preview**: Hovering over any episode row for 3 seconds triggers a detailed metadata modal revealing complete show notes, guest and host lists, topics, duration, direct media stream links, and episode transcripts with clickable buttons for Web Link, Transcript, and Media URL that launch the default browser.
-- **Resilient Episode Ingestion**: Automatic multi-tier failover across the official TWiT REST API v1.0, public XML/RSS feeds (`feeds.twit.tv`), authenticated Club TWiT Memberful RSS feeds, and webpage media scrapers.
+- **In-Show Episode & Topic Search**: Search a loaded complete episode catalog locally, or use asynchronous API and RSS fallback searches when needed. Results depend on available sources.
+- **Episode Metadata Hover Preview**: On supported GTK tables, hovering over a row for 3 seconds can display available metadata and links; fields such as notes, guests, transcripts and media URLs are optional.
+- **Resilient Episode Ingestion**: Show and episode fetching and media resolution use different API, RSS and webpage fallbacks.
 - **Direct Video/Audio Streaming**: Spawn external media players (e.g., VLC, MPV) asynchronously using customizable command templates without stalling the UI.
-- **Concurrent Batch Downloader**: Download single or multiple episodes in non-blocking background daemon threads with configurable byte buffers, duplicate file confirmation, and atomic file writes.
-- **Smart Download Deduplication**: Automatically skips re-downloading files if a complete local copy already exists and is confirmed identical via HTTP HEAD `Content-Length` and MD5 cryptographic checksum verification (`ETag`).
-- **Club TWiT Integration**: Native support for subscriber Memberful authentication keys, giving direct access to ad-free streams and subscriber-exclusive shows.
-- **Cross-Platform Portability**: Developed on BeeWare's Toga widget toolkit, supporting terminal execution (`toga-textual`) and native desktop GUI backends (`toga-gtk`, `toga-cocoa`, `toga-winforms`).
+- **Background Batch Downloader**: Download selected episodes sequentially in a background worker with configurable byte buffers. Existing non-identical files can be overwritten without confirmation.
+- **Download Deduplication**: Uses available size and ETag information as heuristics to skip existing files; identity is not guaranteed.
+- **Club TWiT Integration**: Supports Memberful authentication keys for configured subscriber feeds; available episodes depend on the feed and network.
+- **Backend Choices**: Uses BeeWare Toga with GTK and Textual backend selection. Native macOS and Windows operation is not guaranteed.
 
 ---
 
@@ -84,14 +84,15 @@ This document serves two primary audiences:
 
 - **Python**: Version 3.10, 3.11, or 3.12+
 - **Media Player**: [VLC Media Player](https://www.videolan.org/vlc/) (default) or any player that accepts stream URLs via CLI (such as `mpv` or `ffplay`).
-- **Operating System**: Linux, macOS, or Windows.
-  - *Linux note*: If running via GTK backend, ensure standard GTK libraries are installed (`libgirepository1.0-dev`, `gir1.2-gtk-3.0`).
+- **Operating System**: Linux is the primary target. Native macOS and Windows support is not guaranteed; the supplied requirements include Linux GTK dependencies.
+- **Linux prerequisites**: Install GTK 3 and its introspection typelibs, GObject introspection development headers, Cairo development headers, Python development headers, `pkg-config`, and a C compiler. Package names vary by distribution and PyGObject version (for example, Debian/Ubuntu packages include `gir1.2-gtk-3.0`, `libgirepository1.0-dev`, `libcairo2-dev`, `python3-dev`, and `pkg-config`).
+- **YouTube downloads**: `yt-dlp` or `youtube-dl` is required; `requirements.txt` includes `yt-dlp`. Optional `ffmpeg` enables merging video/audio and audio conversion.
 
 ### Installation
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/your-username/twittui.git
+   git clone https://github.com/mainmeister/twittui.git
    cd twittui
    ```
 
@@ -103,25 +104,22 @@ This document serves two primary audiences:
 
 3. **Install dependencies**:
    ```bash
-   pip install toga requests python-dotenv
+   pip install -r requirements.txt
    ```
-   *(Install GTK desktop UI, Textual terminal UI, or both simultaneously)*:
-   ```bash
-   pip install toga-gtk toga-textual  # Both backends can be installed concurrently
-   ```
+   This installs both backends and dependencies including `yt-dlp`, PyGObject, and pycairo; their native prerequisites must be installed separately.
 
 4. **Launch the application**:
    ```bash
    python main.py
    ```
-   - When both `toga-gtk` and `toga-textual` are installed, TwitTUI prompts you at startup to choose your preferred UI interface:
+   - When both backends are installed and stdin is interactive, TwitTUI prompts for a backend. The default is GTK when a graphical display is detected and Textual otherwise; non-interactive startup uses that default without prompting. For example, with a display:
      ```text
      Multiple Toga UI backends detected:
        1) GTK (Graphical Desktop UI)
        2) Textual (Terminal User Interface)
      Select backend [1/2] (default: 1 - GTK):
      ```
-   - You can also bypass the startup prompt using command line switches:
+   - You can also bypass the startup prompt using command line switches. Certain GTK startup failures fall back to Textual if it is installed:
      ```bash
      python main.py --gtk        # Launch GTK desktop GUI
      python main.py --textual    # Launch Textual terminal UI (TUI)
@@ -164,26 +162,22 @@ snapcraft --destructive-mode
 snapcraft clean
 ```
 
-This compiles all dependencies, GLib schemas, GObject typelibs, and virtual environments, producing `twittui_1.0.0_<arch>.snap` (e.g., `twittui_1.0.0_amd64.snap`) in the project root directory.
+This compiles all dependencies, GLib schemas, GObject typelibs, and virtual environments, producing `twittui_1.0.1_<arch>.snap` (e.g., `twittui_1.0.1_amd64.snap`) in the project root directory.
 
 #### 3. Installing the Snap
 
 - **Install Local Build**:
   Install the locally compiled `.snap` package using the `--dangerous` flag (required for locally built, self-signed packages):
   ```bash
-  sudo snap install --dangerous twittui_1.0.0_amd64.snap
+  sudo snap install --dangerous twittui_1.0.1_amd64.snap
   ```
 
 - **Install for Development & Debugging** (Optional):
   To test without confinement restrictions during development:
   ```bash
-  sudo snap install --dangerous --devmode twittui_1.0.0_amd64.snap
+  sudo snap install --dangerous --devmode twittui_1.0.1_amd64.snap
   ```
 
-- **Install from Snap Store** (Once Published):
-  ```bash
-  sudo snap install twittui
-  ```
 
 #### 4. Running the Application
 
@@ -198,30 +192,26 @@ TwitTUI exposes two entry points within the Snap package:
 - **Launch Terminal User Interface (TUI)**:
   ```bash
   twittui.tui
-  # Or pass backend switch to main command:
-  twittui --textual
   ```
 
-- **Command-Line Options & Help**:
-  ```bash
-  twittui --gtk        # Force GTK graphical desktop backend
-  twittui --textual    # Force Textual terminal backend
-  twittui --help       # Display all startup options
-  ```
+The Snap entry points supply their own backend switches; use `twittui.tui` for the terminal UI.
+The Snap does not bundle VLC; streaming requires an accessible external player, which may be restricted by confinement. Verify the configured player works in your installation.
 
 #### 5. Snap Permissions & Interface Plugs
 
 TwitTUI operates under strict confinement (`confinement: strict`) and requests standard desktop interfaces:
 
-| Plug Interface | Default Status | Purpose |
-| :--- | :--- | :--- |
-| `desktop`, `desktop-legacy` | Connected | Native windowing, GTK themes, and font rendering |
-| `wayland`, `x11` | Connected | Wayland and X11 display server communication |
-| `opengl` | Connected | Hardware-accelerated graphics rendering |
-| `audio-playback` | Connected | PulseAudio / PipeWire audio playback for podcast streams |
-| `network`, `network-bind` | Connected | REST API querying, RSS feed parsing, and media streaming/downloading |
-| `home` | Connected | Accessing standard user directories (`~/Downloads`) |
-| `removable-media` | Disconnected (Manual) | Accessing external USB drives and SD cards (`/media`, `/run/media`) |
+| Plug Interface | Purpose |
+| :--- | :--- |
+| `desktop`, `desktop-legacy` | Native windowing, GTK themes, and font rendering |
+| `wayland`, `x11` | Wayland and X11 display server communication |
+| `opengl` | Hardware-accelerated graphics rendering |
+| `audio-playback` | Audio playback |
+| `network`, `network-bind` | Network access |
+| `home` | Access to permitted user files |
+| `removable-media` | Access to external drives |
+
+Connections depend on snapd policy and the local installation; inspect them with `snap connections twittui`.
 
 To allow downloading podcast episodes directly to external USB hard drives or SD cards, connect the `removable-media` interface:
 
@@ -242,14 +232,15 @@ In strict Snap confinement, user settings, API credentials, and download prefere
 ```
 *(corresponds to `$SNAP_USER_DATA/.env`)*
 
-- Upon first launch, TwitTUI automatically initializes this configuration file.
-- If no custom download destination is set, TwitTUI defaults to `~/Downloads` (or `~/snap/twittui/current/` if `~/Downloads` is unavailable).
+- The launcher copies `$SNAP/.env.example` only if it is bundled and no user `.env` exists. Settings saved by the application may override the launcher's destination environment value.
+- The launcher suggests `$HOME/Downloads` if it exists, otherwise `$SNAP_USER_DATA`; Snap's `$HOME` need not be the host home directory. Check the in-app destination rather than assuming host Downloads.
 - You can edit `~/snap/twittui/current/.env` with any text editor or modify settings live via the in-app configuration panel.
 
 ---
 
-5. **Install as a Standalone Command-Line / Desktop Executable**:
-   TwitTUI features an automated packaging and installation pipeline using PyInstaller. It compiles the entry point into a single, optimized standalone executable (`twittui` on POSIX systems or `twittui.exe` on Windows), embeds the application icon set, bundles all backend libraries (`toga-gtk`, `toga-textual`, `gi`), and installs the binary to a directory on your system's executable `$PATH`:
+### Standalone Binary Packaging & Installation
+
+   The PyInstaller pipeline builds a single executable (`twittui` on POSIX or `twittui.exe` on Windows). GTK and assets are included conditionally when available; the selected installation directory may not be on `PATH`:
    ```bash
    python main.py --install
    ```
@@ -267,13 +258,13 @@ In strict Snap confinement, user settings, API credentials, and download prefere
    ```
 
    **Specifying an Alternative Python Interpreter (`--python-executable`)**:
-   If your active virtual environment is based on a static Python build (e.g. without `--enable-shared`), you can compile the standalone binary using another Python interpreter on your system:
+   If your active virtual environment is based on a static Python build (e.g. without `--enable-shared`), you can compile using another interpreter. That interpreter must have the application dependencies and PyInstaller available:
    ```bash
    python main.py --install --python-executable /usr/bin/python3
    ```
 
    **Automatic Cleanup & Build Artifact Management**:
-   To preserve disk space and keep your workspace clean, the installation routine automatically removes intermediate PyInstaller `build/`, `dist/`, and `.spec` files after copying the binary.
+   After copying the binary, the installation routine recursively removes the project's entire `build/` and `dist/` directories and all root-level `.spec` files, including unrelated content. The manual cleanup command removes the same paths; move anything you need elsewhere first.
    - To preserve build artifacts during installation, pass `--no-clean`:
      ```bash
      python main.py --install --no-clean
@@ -290,7 +281,7 @@ In strict Snap confinement, user settings, API credentials, and download prefere
      ```
 
    **Execution & PATH Precedence**:
-   Once installed, run TwitTUI from any terminal or application launcher:
+   If the installation directory is on `PATH`, run TwitTUI from a terminal; otherwise add it to `PATH` or invoke the executable by its full path:
    ```bash
    twittui
    ```
@@ -304,7 +295,7 @@ In strict Snap confinement, user settings, API credentials, and download prefere
 
 ### Configuration (.env & UI)
 
-TwitTUI reads default configuration values from a local `.env` file upon launch, which can also be modified in real time via the application settings panel.
+TwitTUI reads configuration from `.env` on launch; values in that file override existing process environment values. Outside Snap, discovery starts from the working directory, while saving settings prefers a writable `.env` beside the application module, so the file read and file saved can differ. The application settings panel can also modify settings.
 
 Create a `.env` file in the project root directory:
 
@@ -325,6 +316,9 @@ twitclubblocksize=8192
 
 # Media Player Streaming Command Template (%f or {url} will be replaced by stream URL)
 twitclubstreamer=env LC_ALL=C vlc %f
+
+# Prefer audio when available (1 or 0)
+TWITAUDIOONLY=0
 ```
 
 ---
@@ -345,8 +339,8 @@ twitclubstreamer=env LC_ALL=C vlc %f
 | [ Download ]  [ Stream ]  [ Cancel ]  [ Close ]                                 |
 |                                                                                 |
 | API Application ID:   [ 3edec74c                 ]                              |
-| API Application Key:  [ 36a22e422f0f8773e03b8... ] [ Test API ]                |
-| TWIT Club URL: https://twit.memberfulcontent.com/rss/9041?auth= [ KEY ] [ Show ]|
+| API Application Key:  [ *********************** ] [ Test API ]                |
+| TWIT Club URL: https://twit.memberfulcontent.com/rss/9041?auth= [ *** ] [ Show ]|
 | Download Destination: [/home/user/Podcasts       ] [ Browse ] [ Open ] [X Show Folders] |
 | Block Size:           [8192                      ]                              |
 | Streamer:             [env LC_ALL=C vlc %f       ]                              |
@@ -356,15 +350,15 @@ twitclubstreamer=env LC_ALL=C vlc %f
 #### Show Selection & Episode Browsing
 - Click the **Show** dropdown menu to select a show.
 - The episode list refreshes automatically upon selection.
-- Click **Fetch** to force a catalog refresh against the TWiT API or fallback feeds.
-- Click **Next** to fetch and append the next page of episodes for the active show.
-- **Episode Metadata Inspection**: Hovering your mouse cursor over any episode row in the list for more than 3 seconds displays a modal dialog showing comprehensive episode metadata including show name, episode number, title, airing date, duration, episode ID, web links, transcript links, media stream URLs, available formats, hosts/guests, topics, and complete show notes. Web links, transcript links, and media URLs are clickable to open directly in your system's default web browser.
+- Click **Fetch** to refresh the show catalog and episodes; the show catalog falls back to the built-in list if the API is unavailable.
+- **Next** fetches another page when the active source has a next page; it is not always available.
+- The API status message reports loading and credential status; requests may display a wait dialog while the API rate limiter is active.
+- **Episode Metadata Inspection**: On supported GTK tables, hovering for 3 seconds can show the metadata and links available for that episode; not all fields or links are present.
 
 #### Searching Episodes
 - Enter keywords or topics (e.g., `OpenAI`, `Surface`, `Security`) into the **Search** text box.
-- Click **Search** or press `Enter` to query the TWiT REST API search endpoint and fallback RSS feeds scoped to the active show.
-- The table populates immediately with all matching episodes across the selected show.
-- Click **Clear** (or submit an empty search) to clear the search input and restore the complete episode list for the selected show.
+- Click **Search** or press `Enter`. A loaded complete catalog is searched locally; otherwise an asynchronous API search and RSS fallback may be used. Results are limited by the sources and are not guaranteed complete.
+- Click **Clear** (or submit an empty search) to restore the episode list.
 
 #### Sorting Episodes
 - Select one of the three sort mode buttons:
@@ -372,26 +366,28 @@ twitclubstreamer=env LC_ALL=C vlc %f
   - **☑ Episode Number**: Sorts numerically by episode number.
   - **☑ Episode Title**: Sorts alphabetically by episode title.
 - Toggle the sort direction button:
-  - **▼ Descending**: Queries the TWiT REST API with descending sort (`-airingDate`, `-episodeNumber`, `-label`) to display newest/highest first.
-  - **▲ Ascending**: Queries the TWiT REST API with ascending sort (`airingDate`, `episodeNumber`, `label`) to fetch and display oldest/lowest first (e.g., Episode 1 forward).
+  - **▼ Descending**: Displays newer or higher values first.
+  - **▲ Ascending**: Displays older or lower values first.
+  - Changing direction reloads episodes; the source may be the API, RSS, or an archive, and the displayed list is also sorted locally.
 
 #### Streaming an Episode
 1. Click on an episode in the list table to highlight it.
 2. Double-click the row or press the **Stream** button.
-3. TwitTUI resolves the high-definition media stream and launches your configured media player in a detached process.
+3. If prompted, choose an available format or resolution. TwitTUI resolves the stream and launches your configured media player in a separate process. **Audio Only** refreshes the episode list and prefers audio for streaming and downloads; the preference is saved as `TWITAUDIOONLY`.
 
 #### Batch Downloading Episodes
 1. Highlight one or more episodes in the table (hold `Shift` or `Ctrl` for multiple selections).
-2. Ensure **Download Destination** is set to your preferred folder (use **Browse** to select).
+2. Ensure **Download Destination** is set to your preferred folder (use **Browse** to select). **Open** creates the destination if necessary and opens it in your file manager.
 3. Optionally toggle **Show Folders** if you want downloaded episodes organized into dedicated subfolders named after each show (e.g., `<Download Destination>/Security Now/Security Now 1000.mp4`).
-4. Click **Download**. Downloads execute concurrently in the background without freezing the UI.
+4. Click **Download**. If prompted, choose a format for a single episode or a resolution preference for the batch. The batch runs sequentially in a background worker. Existing non-identical files may be overwritten without confirmation.
 5. Files are saved directly to your destination path (or show subfolder) with normalized, clean filenames (e.g., `This Week in Tech 1001 AI in the Fast Lane.mp4`).
-6. When the batch completes, a modal dialog appears displaying the target download folder at the top and the list of downloaded filenames (one per line) with a **Close** button.
+6. A completion dialog appears if at least one item succeeded, including skipped existing files; it may appear after partial cancellation. **Cancel** requests cancellation of an active download, or exits the app if none is active.
 
 #### Club TWiT Member Features
 - Paste your unique Memberful key into the **TWIT Club URL** box.
-- When configured, TwitTUI automatically checks your Club TWiT feed for commercial-free and subscriber-exclusive episodes.
-- Click the **Show** button next to the URL input to fetch, format, and view your Club TWiT feed as a styled webpage directly in your default web browser (styled with `feed-style.css`).
+- When configured, TwitTUI can check Club TWiT feeds for available subscriber episodes.
+- Click **Show** next to the URL to view the feed in your browser. TwitTUI attempts to fetch and format it with `feed-style.css`; if fetching fails, it opens the direct feed URL instead.
+- Use **Test API** to test the entered API credentials asynchronously and display the result.
 
 ---
 
@@ -466,24 +462,22 @@ TwitTUI incorporates a custom, multi-layered visual emblem that unites TWiT's me
   ├── --textual / --tui / -b textual  ──► Force toga_textual
   ├── --install / -i                  ──► Delegate to installer.py packaging pipeline
   ├── --clean / -c                    ──► Delegate to installer.py artifact cleanup
-  └── (No Switch & Both Found)        ──► Interactive CLI prompt [1: GTK / 2: Textual]
+  └── (No Switch & Both Found)        ──► Prompt only on interactive stdin; otherwise use display-based default
         │
         ▼
 [ Set TOGA_BACKEND & Configure Environment ]
   ├── If toga_gtk:
   │     ├── configure_gtk_environment()
-  │     │     ├── gi.require_version('Gtk', '3.0')
-  │     │     ├── gi.require_version('Gdk', '3.0')
-  │     │     ├── gi.require_version('GdkX11', '3.0')
-  │     │     ├── gi.require_version('GdkWayland', '3.0')
+  │     │     ├── Attempt Gtk, Gdk, GdkX11 and GdkWayland 3.0
+  │     │     │   (4.0 when TOGA_GTK=4)
   │     │     ├── gi.require_version('Pango', '1.0') / PangoCairo / GLib / GObject / Gio
   │     │     ├── Import gi.overrides.Gtk & gi.overrides.Pango
   │     │     └── Gtk.init_check()
   │     ├── Instantiate StderrRedirector (Filter xapp-gtk3-module warnings)
-  │     ├── GTK_MODULES = '' (Suppress external modules)
+  │     ├── Unset GTK_MODULES and other conflicting host overrides
   │     ├── del GTK_DEBUG (Prevent assertion crashes in non-debug GTK)
   │     ├── NO_AT_BRIDGE = '1' (Bypass accessibility D-Bus bridge overhead)
-  │     ├── GDK_BACKEND = 'x11' (Enforce stable X11 protocol)
+  │     ├── GDK_BACKEND = 'x11' only with DISPLAY and without WAYLAND_DISPLAY
   │     └── G_MESSAGES_DEBUG = '' (Mute Glib debug logging)
   └── If toga_textual:
         └── Initialize Textual terminal rendering loop
@@ -496,7 +490,7 @@ TwitTUI incorporates a custom, multi-layered visual emblem that unites TWiT's me
 ```
 
 #### `configure_gtk_environment()` Implementation
-To prevent runtime crashes where external modules or PyInstaller dynamic loaders prematurely import GTK 4 (`gi.RepositoryError: Requiring namespace 'Gdk' version '4.0', but '3.0' is already loaded`), `main.py` explicitly locks all GObject introspection versions and pre-initializes GTK bindings before any UI code runs.
+To reduce namespace conflicts, `main.py` attempts to bind GObject introspection versions and initialize GTK before UI startup. It uses GTK 3 by default or GTK 4 when `TOGA_GTK=4`; namespace and initialization failures are swallowed, so this is not a guarantee against collisions. Certain GTK startup errors can fall back to Textual when installed.
 
 #### `StderrRedirector` Implementation
 ```python
@@ -521,9 +515,9 @@ class StderrRedirector:
 
 1. **PyInstaller Automated Compilation (`build_executable`)**:
    - Detects or installs `pyinstaller` dynamically within the active virtual environment.
-   - Bundles required data assets: `feed-style.css`, `feed-style.xsl`, `twittv.apib`, and `resources/` (icon suite).
-   - Embeds native platform application icons (`--icon=resources/twittui.ico` or `twittui.png`).
-   - Collects all dependencies and hidden imports for `toga`, `toga_textual`, `toga_gtk`, `gi`, `gi.overrides.Gtk`, `gi.overrides.Pango`, `dotenv`, and `requests`.
+   - Adds `feed-style.css`, `feed-style.xsl`, `twittv.apib`, `README.md`, and `resources/` when present; icon generation is attempted if needed.
+   - Embeds a platform application icon if available.
+   - Collects `toga`, `toga_textual`, `textual`, `dotenv`, and `requests`; `toga_gtk` and `gi` are collected when detected. GTK override imports are also specified.
    - Produces a single non-debug standalone executable in `dist/twittui` (or `dist/twittui.exe`).
 
 2. **System PATH Resolution & Installation (`install_twittui`)**:
@@ -532,7 +526,7 @@ class StderrRedirector:
    - Replaces pre-existing binary installations in place cleanly.
 
 3. **Artifact Cleanup Engine (`clean_build_artifacts`)**:
-   - Automatically purges temporary `build/`, distribution `dist/`, and PyInstaller `.spec` files.
+   - Recursively removes the project `build/` and `dist/` directories and all root-level `.spec` files, including unrelated content.
    - Supports optional package uninstallation (`--uninstall-pyinstaller`) to return the development environment to its pre-build state.
 
 ---
@@ -567,10 +561,10 @@ When the application launches inside Snap confinement, `launcher.sh` configures 
 [ Ensure SNAP_USER_DATA Directory Exists ]
                  │
                  ▼
-[ Initialize User Config ($SNAP_USER_DATA/.env) ]
+[ Copy bundled .env.example to $SNAP_USER_DATA/.env if available and missing ]
                  │
                  ▼
-[ Set Default Download Path ($HOME/Downloads or $SNAP_USER_DATA) ]
+[ Suggest Download Path ($HOME/Downloads or $SNAP_USER_DATA) if unset ]
                  │
                  ▼
 [ Sanitize Incompatible Host Theme Variables ]
@@ -650,12 +644,12 @@ toga.MainWindow (title='TWIT.tv TUI')
         │   └── toga.TextInput (value=initial_app_id) [app_id_input]
         ├── toga.Box (direction=ROW) [app_key_box]
         │   ├── toga.Label ('API Application Key:')
-        │   ├── toga.TextInput (value=initial_app_key) [app_key_input]
+        │   ├── toga.PasswordInput (value=initial_app_key) [app_key_input]
         │   └── toga.Button ('Test API', on_press=on_test_api_press)
         ├── toga.Box (direction=ROW) [url_box]
         │   ├── toga.Label ('TWIT Club URL:')
         │   ├── toga.Label ('https://twit.memberfulcontent.com/rss/9041?auth=')
-        │   ├── toga.TextInput (value=initial_url_key) [url_input]
+        │   ├── toga.PasswordInput (value=initial_url_key) [url_input]
         │   └── toga.Button ('Show', on_press=on_show_club_url_press)
         ├── toga.Box (direction=ROW) [dest_box]
         │   ├── toga.Label ('Download Destination:')
@@ -674,44 +668,22 @@ toga.MainWindow (title='TWIT.tv TUI')
 
 ---
 
-### Data Ingestion & 5-Tier Fallback Cascade
+### Data Ingestion & Fallbacks
 
-To ensure continuous operation regardless of API authentication status, network outages, or rate limiting, `TwitTUIForm` executes a five-tier resolution cascade for shows, episodes, and direct media URLs:
+There is no single fallback cascade for every operation:
+- **Show catalog**: Fetches paginated API shows with credentials, falling back to 26 built-in default shows if unavailable. Offline fallback supplies a show list, not offline episodes or media.
+- **Episodes and search**: Use API episode pages or search when available, with public show RSS and configured Club RSS alternatives. A fully loaded catalog can be searched locally; incomplete or unavailable sources need not produce complete results.
+- **Media resolution**: Examines available episode formats and links, RSS enclosures, webpage media or YouTube links, and potentially API episode details. The path depends on the data and requested format rather than a universal tier order.
 
-```
-[ Request Episode Data / Media URL ]
-                │
-                ▼
-      ┌───────────────────┐
-      │ Tier 1: REST API  │ ──► GET https://twit.tv/api/v1.0/episodes?filter[shows]={id}
-      └─────────┬─────────┘     (Requires TWITAPI_APPLICATIONID / TWITAPI_APPLICATIONKEYS)
-                │ (Fails or No Direct Media)
-                ▼
-      ┌───────────────────┐
-      │ Tier 2: Show RSS  │ ──► GET https://feeds.twit.tv/{show_feed}.xml
-      └─────────┬─────────┘     (Mapped via KNOWN_SHOW_FEEDS or show slug heuristic)
-                │ (Fails or Not Found)
-                ▼
-      ┌───────────────────┐
-      │ Tier 3: Club RSS  │ ──► GET https://twit.memberfulcontent.com/rss/9041?auth={key}
-      └─────────┬─────────┘     (Parses XML enclosure tags & matches title/episode number)
-                │ (Fails or Not Found)
-                ▼
-      ┌───────────────────┐
-      │ Tier 4: Scrape Web│ ──► GET https://twit.tv/{cleanPath}
-      └─────────┬─────────┘     (Regex extraction of .mp4/.mp3 URLs or YouTube links)
-                │ (Fails or Not Found)
-                ▼
-      ┌───────────────────┐
-      │ Tier 5: Ep Detail │ ──► GET https://twit.tv/api/v1.0/episodes/{episode_id}
-      └───────────────────┘     (Deep HAL+JSON object graph traversal)
-```
+API requests share a process-wide limiter: at least one second between request starts and at most five starts per rolling minute. An HTTP 500 response containing `usage limits are exceeded` triggers one retry after 60 seconds.
 
 #### In-Memory Caching
 To eliminate redundant HTTP traffic and improve responsiveness:
-- `self._club_rss_cache`: Stores parsed Memberful XML items for the duration of the process lifecycle.
-- `self._show_rss_cache`: Dict keyed by normalized show name (`show_name.lower().strip()`), caching parsed XML items from `feeds.twit.tv`.
-- `self.show_ids`: Dict storing active show mappings with fallback to `DEFAULT_SHOWS` (containing 17 primary TWiT productions).
+- `self._memberful_feeds_cache`: Caches parsed Memberful items per feed.
+- `self._club_rss_cache`: Holds aggregated Club items when fetched without a specific show.
+- `self._show_rss_cache`: Caches public feed items by normalized show name plus an `_audio` or `_video` suffix.
+- `self.show_ids`: Stores active show mappings with fallback to `DEFAULT_SHOWS` (26 entries).
+- Network workers use snapshots containing copies of caches rather than a single shared mutable cache.
 
 ---
 
@@ -733,7 +705,10 @@ VIDEO_PREFERENCE = [
 AUDIO_PREFERENCE = [
     'video_audio',    # Standard MP3 / M4A audio stream
     'audio',          # Direct audio enclosure
-    'video_hd'        # Video fallback if no audio stream exists
+    'video_hd',       # Video fallbacks if no audio stream exists
+    'video_large',
+    'video_small',
+    'video_youtube'
 ]
 ```
 
@@ -742,13 +717,13 @@ When **Audio Only** is enabled:
 - Public RSS queries check `.xml` audio feeds before `_video_hd.xml`.
 - Webpage scraping extracts `.mp3` and `.m4a` URLs before `.mp4`.
 - Download filenames automatically preserve `.mp3` / `.m4a` file extensions.
-- State is persisted persistently across restarts via the `TWITAUDIOONLY` environment setting in `.env`.
+- State is persisted across restarts via the `TWITAUDIOONLY` setting in `.env`.
 
 #### Validation Filter (`is_valid_media_url`)
 Every candidate URL passes through `is_valid_media_url(url)` to prevent opening API metadata endpoints or HTML web pages as media streams:
 - Protocol check: Must start with `http://`, `https://`, `rtsp://`, or `mms://`.
 - API blacklist: Rejects URLs containing `/api/` or `twit.tv/api`.
-- Webpage blacklist: Rejects `twit.tv/shows/...`, `twit.tv/episodes/...`, `twit.tv/node/...` unless ending in an explicit media extension (`.mp4`, `.mp3`, `.m4a`, `.webm`, `.ogg`, `.m4v`, `.mov`, `.flv`, `.m3u8`, `.aac`).
+- Webpage blacklist: Rejects matching TWiT page paths such as `shows`, `episodes`, `node`, `credits`, and `people` unless a media extension is recognized. Query strings are not categorically rejected; webpage scraping uses a regex that extracts the extension portion and may omit a URL's query string.
 
 ---
 
@@ -762,12 +737,12 @@ subprocess.Popen(args, shell=False)  # Non-blocking, secure detached execution
 ```
 
 #### Dynamic Multi-Resolution Selection
-When streaming or downloading an episode that offers multiple media resolutions (e.g., HD Video 1080p/720p, Large Video 540p/480p, Small Video 360p, Audio Only MP3/M4A), TwitTUI presents an interactive modal prompt allowing the user to choose their preferred format:
+When multiple media resolutions are available (e.g., HD, large, small, or audio), TwitTUI can present a modal prompt to choose a format:
 - For single-episode downloads and streaming, the modal lists each available stream format along with its human-readable file size.
 - For batch downloads with multiple selected episodes, users can pick a batch resolution preference (HD, Large, Small, or Audio) applied across all queued downloads.
 
 #### Multi-Threaded Batch Download Architecture
-Downloads run on background daemon threads (`threading.Thread`) to keep Toga's main event loop fully responsive.
+Each batch runs sequentially in a background daemon thread (`threading.Thread`), keeping transfers off Toga's main event loop.
 
 ```
 [ on_download_press ]
@@ -783,34 +758,34 @@ Downloads run on background daemon threads (`threading.Thread`) to keep Toga's m
  │ download_episodes_batch loop:                          │
  │   1. Initialize batch progress (0% to 100%)            │
  │   2. For each episode:                                 │
- │      a. Resolve Media URL via 5-tier cascade           │
+ │      a. Resolve an available Media URL                  │
  │      b. Determine sanitized target filename            │
  │      c. Verify existing file (is_existing_file_same): │
  │         • Compare local size against RSS / Content-Len │
- │         • Verify MD5 hash against remote ETag          │
- │         • If confirmed identical: SKIP download!       │
+ │         • Sometimes compare MD5 against remote ETag    │
+ │         • If heuristic matches: SKIP download         │
  │      d. Stream via requests.get(url, stream=True)      │
  │      e. Update progress bar with batch percentage      │
  │      f. Write chunks (size=block_size) to .part file   │
- │      g. Atomic rename: dest.part -> dest               │
+ │      g. Remove existing destination, rename .part      │
  │   3. On batch completion:                              │
- │      Display modal dialog with destination folder &    │
- │      downloaded files list (one per line) + Close btn  │
+ │      Show dialog only if at least one item succeeded   │
  └────────────────────────────────────────────────────────┘
 ```
 
 #### Smart File Verification & Deduplication
 To conserve network bandwidth, prevent unnecessary disk wear, and avoid redundant transfers:
-1. **Metadata & Size Check**: Verifies if the local target file exists and non-empty, matching expected RSS enclosure length or HTTP `Content-Length`.
-2. **HTTP HEAD / Conditional Request**: Issues a lightweight `HEAD` request to inspect remote file size and `ETag`.
-3. **Cryptographic MD5 Checksum**: When the remote server returns a hex `ETag`, computes the local file's MD5 checksum. If they match bit-for-bit, download is safely skipped.
+1. **Metadata & Size Check**: A matching expected enclosure size or HTTP `Content-Length` can be enough to skip a file, without proving identical content.
+2. **HTTP HEAD / Conditional Request**: May inspect remote size and `ETag`, or accept a not-modified response.
+3. **ETag Check**: A 32-hex-character ETag may be interpreted as an MD5 checksum and compared with the local file, but servers do not guarantee that ETags are MD5 hashes.
+4. **YouTube**: An existing file over 1 MiB can be treated as already downloaded without proving identity.
 
-#### Atomic Write Guarantee
-To prevent corrupt files when a download is aborted or interrupted:
+#### Direct Download Writes
+For direct downloads:
 1. Chunks are written to `<filename>.part`.
 2. Existing target files at the destination are removed upon completion.
-3. `<filename>.part` is atomically renamed to `<filename>`.
-4. If an exception occurs, `<filename>.part` is deleted automatically.
+3. `<filename>.part` is renamed to `<filename>`. Removing the destination first means replacement is not guaranteed atomic, and an existing non-identical file can be overwritten without confirmation.
+4. On cancellation or exceptions, cleanup of `<filename>.part` is attempted. YouTube downloads use a separate downloader path.
 
 ---
 
@@ -854,12 +829,14 @@ The `determine_download_filename(target, media_url)` method sanitizes filenames 
 | :--- | :--- | :--- | :--- |
 | `TWITAPI_APPLICATIONID` | String | *None* | 3Scale Application Identifier for TWiT.tv REST API access. |
 | `TWITAPI_APPLICATIONKEYS` | String | *None* | 3Scale Application Secret Key for TWiT.tv REST API access. |
-| `twitcluburl` / `TWITCLUBURL` | String | `""` | Full Memberful RSS feed URL or unique authorization key token. |
-| `twitclubdestination` / `TWITCLUBDESTINATION` | String | `.` (Current dir) | Filesystem directory path for storing downloaded podcast files. |
+| `twitcluburl` / `TWITCLUBURL` / `TWIT_CLUB_URL` | String | `""` | Full Memberful RSS feed URL or unique authorization key token. |
+| `twitclubdestination` / `TWITCLUBDESTINATION` / `TWIT_CLUB_DESTINATION` | String | See below | Filesystem directory path for storing downloaded podcast files. |
 | `twitclubblocksize` / `TWITCLUBBLOCKSIZE` | Integer | `8192` (8 KB) | Buffer chunk size in bytes for network download streaming. |
-| `twitclubstreamer` / `TWITCLUBSTREAMER` | String | `env LC_ALL=C vlc %f` | Command template string used to spawn the external streaming player. |
-| `TWITAUDIOONLY` / `twitaudioonly` | Integer / Boolean | `0` (False) | Flag (`1`/`0`) persisting the Audio Only streaming/download preference across sessions. |
+| `twitclubstreamer` / `TWITCLUBSTREAMER` / `TWIT_CLUB_STREAMER` | String | `env LC_ALL=C vlc %f` | Command template string used to spawn the external streaming player. |
+| `TWITAUDIOONLY` / `twitaudioonly` / `TWIT_AUDIO_ONLY` | Integer / Boolean | `0` (False) | Flag (`1`/`0`) persisting the Audio Only streaming/download preference across sessions. |
 | `TWITCLUBSHOWFOLDERS` / `twitclubshowfolders` | Integer / Boolean | `0` (False) | Flag (`1`/`0`) persisting the Show Folders organization preference across sessions. |
+
+Without a configured destination, the application prefers a writable `~/Downloads`, then the current working directory, then `SNAP_USER_DATA` or the home directory. Snap's launcher can supply its own default as described above; saved settings may override it.
 
 ---
 
@@ -891,12 +868,12 @@ TwitTUI maintains a comprehensive automated unit test suite covering end-to-end 
 ### GTK Module & Backend Warnings
 - **Symptom**: Console outputs `Failed to load module "xapp-gtk3-module"` or `Gtk-Message: Failed to load module "canberra-gtk-module"`.
 - **Cause**: Linux systems with desktop environments like Cinnamon or MATE attempt to inject theme modules into GTK applications that lack matching runtime bindings.
-- **Resolution**: TwitTUI automatically filters this specific warning through `main.py`'s `StderrRedirector` and enforces `GDK_BACKEND=x11` and `NO_AT_BRIDGE=1`. No user action is required.
+- **Handling**: `main.py` filters only the `xapp-gtk3-module` failed-load warning, not the `canberra-gtk-module` warning. It sets `NO_AT_BRIDGE=1` and sets `GDK_BACKEND=x11` only when `DISPLAY` is set and `WAYLAND_DISPLAY` is not.
 
 ### PyGObject & Gdk Introspection Namespace Collisions
 - **Symptom**: Standalone binary or desktop run fails with `gi.RepositoryError: Requiring namespace 'Gdk' version '4.0', but '3.0' is already loaded` or `ImportError: Requiring namespace 'Gdk' version '4.0'`.
 - **Cause**: PyInstaller binary hooks or system libraries may attempt to resolve the latest GTK 4.0 introspection typelibs when `toga-gtk` requires GTK 3.0 / Gdk 3.0.
-- **Resolution**: TwitTUI's `configure_gtk_environment()` in `main.py` explicitly locks GObject introspection namespaces (`Gtk 3.0`, `Gdk 3.0`, `GdkX11 3.0`, `GdkWayland 3.0`, `Pango 1.0`, `GLib`, `GObject`, `Gio`) prior to initializing Toga backends, eliminating namespace collisions.
+- **Handling**: `configure_gtk_environment()` attempts to select compatible introspection namespaces (GTK 3 by default, GTK 4 with `TOGA_GTK=4`). Failures are swallowed and collisions remain possible; check installed libraries and backend versions. Some GTK startup failures fall back to Textual if installed.
 
 ### Python Built Without Shared Library (`--enable-shared`)
 - **Symptom**: `python main.py --install` or `python installer.py --install` fails with `ERROR: Python was built without a shared library, which is required by PyInstaller. If you built Python from source, rebuild it with the '--enable-shared' option.`
@@ -909,7 +886,7 @@ TwitTUI maintains a comprehensive automated unit test suite covering end-to-end 
 
 ### Missing API Credentials Fallback
 - **Symptom**: Console logs `API credentials not found in .env file, using default shows`.
-- **Impact**: TwitTUI operates without issue by loading its hardcoded list of TWiT shows and resolving all episode media directly through public RSS feeds (`feeds.twit.tv`) and Club TWiT RSS feeds.
+- **Impact**: TwitTUI loads its built-in show list and can try public RSS and configured Club RSS feeds. Episode and media availability depends on those sources; offline operation does not provide an episode catalog.
 
 ### VLC / Streamer Path Resolution
 - **Symptom**: Pressing **Stream** produces no visible media window.

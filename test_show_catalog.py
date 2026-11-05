@@ -1,5 +1,6 @@
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault('TOGA_BACKEND', 'toga_textual')
@@ -48,7 +49,7 @@ class TestShowCatalog(unittest.TestCase):
         self.assertEqual(self.form.show_ids['Alpha'], 2)
         self.assertIsNone(self.form.show_ids['No ID'])
         get.assert_called_once()
-        self.assertEqual(get.call_args.args[0], 'https://twit.tv/api/v1.0/shows')
+        self.assertEqual(get.call_args.args[0], 'https://twit.tv/api/v1.0/shows?page=1&range=1000')
 
     @patch('twittui_form.load_twittui_dotenv')
     @patch('twittui_form.requests.get')
@@ -60,6 +61,284 @@ class TestShowCatalog(unittest.TestCase):
             self.assertEqual(self.form.fetch_shows(), ['Alpha', 'beta', 'Triangulation', 'zebra'])
         with patch('twittui_form.DEFAULT_SHOWS', shows), patch.object(self.form, 'get_api_app_id', return_value=''):
             self.assertEqual(self.form.fetch_shows(), ['Alpha', 'beta', 'zebra'])
+
+    @patch('twittui_form.load_twittui_dotenv')
+    @patch('twittui_form.requests.get')
+    def test_api_catalog_preserves_show_active_flags(self, get, _load):
+        get.return_value.status_code = 200
+        get.return_value.json.return_value = {
+            'shows': [
+                {'label': 'Active Show', 'id': 1, 'active': True},
+                {'label': 'Ended Show', 'id': 2, 'active': False},
+                {'label': 'Unknown Show', 'id': 3},
+            ]
+        }
+        with patch.object(self.form, 'get_api_app_id', return_value='id'), patch.object(self.form, 'get_api_app_key', return_value='key'):
+            self.form.fetch_shows()
+        self.assertEqual(self.form.show_active, {'Active Show': True, 'Ended Show': False, 'Unknown Show': None, 'Triangulation': None})
+
+    @patch('twittui_form.load_twittui_dotenv')
+    @patch('twittui_form.requests.get')
+    def test_api_catalog_extracts_created_showdate_and_active(self, get, _load):
+        get.return_value.status_code = 200
+        get.return_value.json.return_value = {
+            'shows': [
+                {
+                    'label': 'Security Now',
+                    'id': 1636,
+                    'created': '2005-08-18T22:06:55Z',
+                    'showDate': 'New episodes every Tuesday.',
+                    'active': True,
+                },
+                {
+                    'label': 'Abby\'s Road',
+                    'id': 1652,
+                    'created': '2009-07-08T06:58:29Z',
+                    'showDate': 'Although the show is no longer in production, you can enjoy episodes from the TWiT Archives.',
+                    'active': False,
+                },
+            ]
+        }
+        with patch.object(self.form, 'get_api_app_id', return_value='id'), patch.object(self.form, 'get_api_app_key', return_value='key'):
+            names = self.form.fetch_shows()
+        self.assertEqual(self.form.show_active['Security Now'], True)
+        self.assertEqual(self.form.show_active['Abby\'s Road'], False)
+        self.assertEqual(self.form.show_date_bounds['Security Now'], ('2005-08-18T22:06:55Z', None))
+        self.assertEqual(self.form.show_date_bounds['Abby\'s Road'], ('2009-07-08T06:58:29Z', None))
+        self.assertEqual(self.form.show_date_bounds['Triangulation'], (None, None))
+        self.assertEqual(self.form._show_date_cache['1636'], ('2005-08-18T22:06:55Z', None))
+
+    def test_show_option_formats_fixed_width_metadata_before_name(self):
+        self.form.show_active = {'Running': True, 'Finished': False}
+        self.form.show_date_bounds = {
+            'Running': ('2020-01-02', '2025-03-04'),
+            'Finished': (None, None),
+        }
+        active = self.form._format_show_option('Running')
+        ended = self.form._format_show_option('Finished')
+        self.assertEqual(active[:10], '2020-01-02')
+        self.assertEqual(active[13:23], '2025-03-04')
+        self.assertEqual(active[25:32], 'Active ')
+        self.assertTrue(active.endswith('Running'))
+        self.assertEqual(ended[:10], 'Unknown   ')
+        self.assertEqual(ended[13:23], 'Unknown   ')
+        self.assertEqual(ended[25:32], 'Ended  ')
+        self.assertTrue(ended.endswith('Finished'))
+
+    @patch('twittui_form.requests.get')
+    def test_show_date_bounds_single_page_archive(self, get):
+        page = MagicMock(status_code=200)
+        page.text = ('<a href="/shows/example/episodes/1"><span class="date">Jan 02 2010</span><br /></a>'
+                     '<a href="/shows/example/episodes/2"><span class="date">Mar 04 2025</span><br /></a>')
+        get.return_value = page
+        self.assertEqual(self.form.fetch_show_date_bounds(123), ('2010-01-02', '2025-03-04'))
+        get.assert_called_once()
+
+    @patch('twittui_form.requests.get')
+    def test_show_date_bounds_use_oldest_and_newest_archive_pages(self, get):
+        oldest = MagicMock(status_code=200)
+        oldest.text = ('<input class="page-number-input" max="2">'
+                       '<a href="/shows/example/episodes/1"><span class="date">Jan 02 2010</span> - Oldest<br /></a>')
+        newest = MagicMock(status_code=200)
+        newest.text = ('<input class="page-number-input" max="2">'
+                       '<a href="/shows/example/episodes/2"><span class="date">Mar 04 2025</span> - Newest<br /></a>')
+        get.side_effect = [newest, oldest]
+        self.assertEqual(self.form.fetch_show_date_bounds(123), ('2010-01-02', '2025-03-04'))
+        self.assertEqual([call.kwargs['params']['page'] for call in get.call_args_list], [1, 2])
+
+    @patch('twittui_form.requests.get')
+    def test_show_date_bounds_are_unknown_without_id_or_archive(self, get):
+        self.assertIsNone(self.form.fetch_show_date_bounds(None))
+        get.assert_not_called()
+        get.return_value.raise_for_status.side_effect = twittui_form.requests.RequestException('offline')
+        self.assertIsNone(self.form.fetch_show_date_bounds(123))
+
+    def test_display_selection_resolves_back_to_real_show_name(self):
+        self.form.show_ids = {'Security Now': 1636}
+        self.form.show_active = {'Security Now': True}
+        self.form.show_date_bounds = {'Security Now': ('2010-01-01', '2025-01-01')}
+        self.form.show_combo = SimpleNamespace(value='Security Now', items=[])
+        self.form._set_show_selector_items(['Security Now'], 'Security Now')
+        self.assertNotEqual(self.form.show_combo.value, 'Security Now')
+        self.assertEqual(self.form._selected_show_name(), 'Security Now')
+        self.assertEqual(self.form.show_ids[self.form._selected_show_name()], 1636)
+
+    def test_stale_show_date_refresh_does_not_update_catalog(self):
+        self.form._catalog_request = 1
+        self.form.show_ids = {'Show': 1}
+        self.form.show_active = {'Show': True}
+        self.form.show_date_bounds = {'Show': (None, None)}
+        self.form.show_combo = SimpleNamespace(value='Show', items=[])
+        worker = MagicMock()
+        worker.fetch_show_date_bounds.return_value = ('2020-01-01', '2024-01-01')
+        self.form._network_snapshot = MagicMock(return_value=worker)
+        jobs = []
+        self.form._run_network = lambda work, done: jobs.append((work, done))
+        self.form._refresh_show_dates(1, ['Show'])
+        self.form._catalog_request = 2
+        jobs[0][1](jobs[0][0]())
+        self.assertEqual(self.form.show_date_bounds['Show'], (None, None))
+
+    def test_refresh_show_dates_preserves_created_start_and_populates_scraped_end(self):
+        self.form._catalog_request = 1
+        self.form.show_ids = {'Security Now': 1636}
+        self.form.show_active = {'Security Now': True}
+        self.form.show_date_bounds = {'Security Now': ('2005-08-18T22:06:55Z', None)}
+        self.form.show_combo = SimpleNamespace(value='Security Now', items=[])
+        worker = MagicMock()
+        worker.fetch_show_date_bounds.return_value = ('2005-08-19', '2025-03-04')
+        self.form._network_snapshot = MagicMock(return_value=worker)
+        jobs = []
+        self.form._run_network = lambda work, done: jobs.append((work, done))
+        self.form._refresh_show_dates(1, ['Security Now'])
+        jobs[0][1](jobs[0][0]())
+        self.assertEqual(self.form.show_date_bounds['Security Now'], ('2005-08-18T22:06:55Z', '2025-03-04'))
+        self.assertEqual(self.form._show_date_cache['1636'], ('2005-08-18T22:06:55Z', '2025-03-04'))
+
+    def test_refresh_catalog_holds_wait_dialog_until_dates_and_episodes_finish(self):
+        self.form.show_combo = SimpleNamespace(value='Security Now', items=[])
+        self.form.show_ids = {'Security Now': 1636}
+        self.form.show_active = {'Security Now': True}
+        self.form.show_date_bounds = {'Security Now': ('2005-08-18', None)}
+        self.form._set_rate_limit_wait = MagicMock()
+        self.form.update_episodes_display = MagicMock()
+
+        worker = MagicMock()
+        worker.show_ids = {'Security Now': 1636}
+        worker.show_active = {'Security Now': True}
+        worker.show_date_bounds = {'Security Now': ('2005-08-18', None)}
+        worker._show_date_cache = {}
+        worker.fetch_shows.return_value = ['Security Now']
+        worker.fetch_show_date_bounds.return_value = ('2005-08-18', '2025-03-04')
+        worker.fetch_episodes.return_value = [{'title': 'SN 1'}]
+        worker._episodes_all_loaded = True
+        self.form._network_snapshot = MagicMock(return_value=worker)
+
+        network_jobs = []
+        self.form._run_network = lambda work, done: network_jobs.append((work, done))
+
+        self.form._refresh_catalog()
+        self.form._set_rate_limit_wait.assert_called_with(True)
+        self.form._set_rate_limit_wait.reset_mock()
+
+        # 1. Shows API finishes
+        network_jobs[0][1](['Security Now'])
+
+        # Verify dialog not closed yet
+        self.form._set_rate_limit_wait.assert_not_called()
+
+        episodes_job = [j for j in network_jobs[1:] if 'fetch_all' in getattr(j[0], '__name__', '')][0]
+        dates_job = [j for j in network_jobs[1:] if j != episodes_job][0]
+
+        # 2. Episode list finishes first
+        episodes_job[1](([{'title': 'SN 1'}], 1))
+        self.form._set_rate_limit_wait.assert_not_called()
+
+        # 3. Show dates finish second
+        dates_job[1](('2005-08-18', '2025-03-04'))
+        self.form._set_rate_limit_wait.assert_called_once_with(False)
+
+    def test_refresh_catalog_holds_wait_dialog_when_dates_finish_before_episodes(self):
+        self.form.show_combo = SimpleNamespace(value='Security Now', items=[])
+        self.form.show_ids = {'Security Now': 1636}
+        self.form.show_active = {'Security Now': True}
+        self.form.show_date_bounds = {'Security Now': ('2005-08-18', None)}
+        self.form._set_rate_limit_wait = MagicMock()
+        self.form.update_episodes_display = MagicMock()
+
+        worker = MagicMock()
+        worker.show_ids = {'Security Now': 1636}
+        worker.show_active = {'Security Now': True}
+        worker.show_date_bounds = {'Security Now': ('2005-08-18', None)}
+        worker._show_date_cache = {}
+        worker.fetch_shows.return_value = ['Security Now']
+        worker.fetch_show_date_bounds.return_value = ('2005-08-18', '2025-03-04')
+        worker.fetch_episodes.return_value = [{'title': 'SN 1'}]
+        worker._episodes_all_loaded = True
+        self.form._network_snapshot = MagicMock(return_value=worker)
+
+        network_jobs = []
+        self.form._run_network = lambda work, done: network_jobs.append((work, done))
+
+        self.form._refresh_catalog()
+        self.form._set_rate_limit_wait.assert_called_with(True)
+        self.form._set_rate_limit_wait.reset_mock()
+
+        # Shows API finishes
+        network_jobs[0][1](['Security Now'])
+
+        episodes_job = [j for j in network_jobs[1:] if 'fetch_all' in getattr(j[0], '__name__', '')][0]
+        dates_job = [j for j in network_jobs[1:] if j != episodes_job][0]
+
+        # Dates finish first
+        dates_job[1](('2005-08-18', '2025-03-04'))
+        self.form._set_rate_limit_wait.assert_not_called()
+
+        # Episodes finish second
+        episodes_job[1](([{'title': 'SN 1'}], 1))
+        self.form._set_rate_limit_wait.assert_called_once_with(False)
+
+    def test_show_list_display_and_selection_survive_date_refresh(self):
+        import asyncio
+        import toga
+        import toga.platform
+        from textual.app import App, ComposeResult
+        from toga_textual_backend import patch_toga_textual
+
+        os.environ['TOGA_BACKEND'] = 'toga_textual'
+        toga.platform.get_backend.cache_clear()
+        toga.platform.get_factory.cache_clear()
+        patch_toga_textual()
+
+        self.form.show_ids = {'Alpha': 1, 'A Much Longer Name': 2, 'Zulu': 3}
+        self.form.show_active = {'Alpha': True, 'A Much Longer Name': False}
+        self.form.show_date_bounds = {
+            'Alpha': ('2020-01-02', '2025-03-04'),
+            'A Much Longer Name': (None, None),
+            'Zulu': ('2018-05-06', '2024-07-08'),
+        }
+        shows = sorted(self.form.show_ids, key=str.casefold)
+        self.form.show_combo = toga.Selection(items=[])
+        self.form._set_show_selector_items(shows, 'Zulu')
+        selection = self.form.show_combo
+
+        class ShowListApp(App):
+            def compose(self) -> ComposeResult:
+                yield selection._impl.native
+
+        async def run_show_list_test():
+            async with ShowListApp().run_test() as pilot:
+                labels = [title for title, _ in selection._impl._options]
+                self.assertEqual(labels, [self.form._format_show_option(name) for name in shows])
+                self.assertTrue(all(label.endswith(name) for label, name in zip(labels, shows)))
+                self.assertTrue(all(label[10:13] == ' - ' for label in labels))
+                self.assertTrue(all(label[23:25] == '  ' for label in labels))
+                self.assertTrue(all(label[32:34] == '  ' for label in labels))
+
+                by_name = dict(zip(shows, labels))
+                self.assertEqual(by_name['Alpha'][25:32], 'Active ')
+                self.assertEqual(by_name['A Much Longer Name'][:10], 'Unknown   ')
+                self.assertEqual(by_name['A Much Longer Name'][13:23], 'Unknown   ')
+                self.assertEqual(by_name['A Much Longer Name'][25:32], 'Ended  ')
+                self.assertEqual(by_name['Zulu'][25:32], 'Unknown')
+
+                selection._impl.native.value = str(shows.index('A Much Longer Name'))
+                await pilot.pause()
+                self.assertEqual(self.form._selected_show_name(), 'A Much Longer Name')
+
+                self.form.show_date_bounds['A Much Longer Name'] = ('2012-03-04', '2023-04-05')
+                selected_show = self.form._selected_show_name()
+                self.form._set_show_selector_items(shows, selected_show)
+                await pilot.pause()
+
+                updated_labels = [title for title, _ in selection._impl._options]
+                updated_by_name = dict(zip(shows, updated_labels))
+                self.assertEqual(updated_by_name['A Much Longer Name'][:10], '2012-03-04')
+                self.assertEqual(updated_by_name['A Much Longer Name'][13:23], '2023-04-05')
+                self.assertEqual(self.form._selected_show_name(), 'A Much Longer Name')
+                self.assertEqual(self.form.show_ids[self.form._selected_show_name()], 2)
+
+        asyncio.run(run_show_list_test())
 
 
     @patch('twittui_form.load_twittui_dotenv')
@@ -122,7 +401,7 @@ class TestShowCatalog(unittest.TestCase):
             self.assertEqual([e['title'] for e in episodes], ['First', 'Second'])
             self.assertEqual(self.form.fetch_episodes(123, page=2), [])
         get.assert_called_once()
-        self.assertIn('range=50&page=1', get.call_args.args[0])
+        self.assertIn('page=1&range=2000', get.call_args.args[0])
         self.assertIn('sort=-airingDate', get.call_args.args[0])
 
     @patch('twittui_form.load_twittui_dotenv')
@@ -159,7 +438,7 @@ class TestShowCatalog(unittest.TestCase):
     def test_episode_count_detects_additional_pages_without_next_link(self, get, _load):
         self.form.show_combo = MagicMock(value='Security Now')
         get.return_value.status_code = 200
-        get.return_value.json.return_value = {'count': 100, 'episodes': [{'label': 'Partial'}]}
+        get.return_value.json.return_value = {'count': 2500, 'episodes': [{'label': 'Partial'}]}
         with patch.object(self.form, 'get_api_app_id', return_value='id'), patch.object(self.form, 'get_api_app_key', return_value='key'):
             self.assertEqual(self.form.fetch_episodes(1636)[0]['title'], 'Partial')
         self.assertFalse(self.form._episodes_all_loaded)

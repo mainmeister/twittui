@@ -604,6 +604,10 @@ def resolve_app_icon() -> str | None:
 class TwitTUIForm(toga.App):
     def __init__(self, formal_name='TwitTUI', app_id='org.twit.twittui', **kwargs):
         self.show_ids = {}
+        self.show_active = {}
+        self.show_date_bounds = {}
+        self._show_date_cache = {}
+        self._show_names_by_display = {}
         self.current_episodes = []
         self.current_page = 1
         self._club_rss_cache = None
@@ -696,7 +700,8 @@ class TwitTUIForm(toga.App):
                 values = {key: getattr(widget, key) for key in ('value', 'text')
                           if hasattr(widget, key)}
                 setattr(worker, name, SimpleNamespace(**values))
-        for name in ('show_ids', '_memberful_feeds_cache', '_show_rss_cache'):
+        for name in ('show_ids', 'show_active', 'show_date_bounds', '_show_date_cache',
+                     '_show_names_by_display', '_memberful_feeds_cache', '_show_rss_cache'):
             if isinstance(getattr(worker, name, None), dict):
                 setattr(worker, name, getattr(worker, name).copy())
         worker.current_episodes = copy.deepcopy(getattr(self, 'current_episodes', None))
@@ -818,23 +823,119 @@ class TwitTUIForm(toga.App):
             self.api_status_label.text = 'Loading shows; API rate limits may require a wait.'
         worker = self._network_snapshot()
 
-        def done(shows):
-            if token != self._catalog_request:
+        if getattr(self, '_catalog_wait_held', False):
+            pass
+        else:
+            self._catalog_wait_held = True
+            self._set_rate_limit_wait(True)
+
+        pending = {'shows': True, 'episodes': True}
+
+        def check_finished(task):
+            if token != getattr(self, '_catalog_request', 0):
                 return
+            pending[task] = False
+            if not pending['shows'] and not pending['episodes']:
+                if getattr(self, '_catalog_wait_held', False):
+                    self._catalog_wait_held = False
+                    self._set_rate_limit_wait(False)
+
+        def done(shows):
+            if token != getattr(self, '_catalog_request', 0):
+                if getattr(self, '_catalog_wait_held', False) and getattr(self, '_catalog_request', 0) == token:
+                    self._catalog_wait_held = False
+                    self._set_rate_limit_wait(False)
+                return
+            if shows is None:
+                shows = sorted(self.show_ids, key=str.casefold) if getattr(self, 'show_ids', None) else []
             self.show_ids = worker.show_ids
+            self.show_active = getattr(worker, 'show_active', {})
+            self.show_date_bounds = getattr(worker, 'show_date_bounds', {}) or {
+                name: self._show_date_cache.get(str(show_id), (None, None))
+                for name, show_id in self.show_ids.items()
+            }
+            if getattr(self, '_show_date_cache', None) is not None:
+                self._show_date_cache.update(getattr(worker, '_show_date_cache', {}))
             if getattr(self, 'api_status_label', None):
                 self.api_status_label.text = worker.api_status_label.text
-            selection = self.show_combo.value
+            selection = self._selected_show_name()
             self._setting_catalog = True
             try:
-                self.show_combo.items = shows
-                if selection in shows:
-                    self.show_combo.value = selection
+                self._set_show_selector_items(shows, selection)
             finally:
                 self._setting_catalog = False
-            self.load_episodes_for_selected_show()
+            if not shows:
+                check_finished('shows')
+                check_finished('episodes')
+                return
+            self.load_episodes_for_selected_show(callback=lambda: check_finished('episodes'))
+            self._refresh_show_dates(token, shows, callback=lambda: check_finished('shows'))
 
         self._run_network(worker.fetch_shows, done)
+
+    def _format_show_option(self, show_name):
+        first_date, last_date = self.show_date_bounds.get(show_name, (None, None))
+        active = self.show_active.get(show_name)
+        status = 'Active' if active is True else 'Ended' if active is False else 'Unknown'
+        first_date = str(first_date or 'Unknown')[:10].ljust(10)
+        last_date = str(last_date or 'Unknown')[:10].ljust(10)
+        return f'{first_date} - {last_date}  {status:<7}  {show_name}'
+
+    def _set_show_selector_items(self, shows, selected_show=None):
+        self._show_names_by_display = {
+            self._format_show_option(name): name for name in shows
+        }
+        self.show_combo.items = list(self._show_names_by_display)
+        if selected_show in self.show_ids:
+            self.show_combo.value = self._format_show_option(selected_show)
+
+    def _selected_show_name(self):
+        selected = self.show_combo.value if getattr(self, 'show_combo', None) else ''
+        return getattr(self, '_show_names_by_display', {}).get(selected, selected or '')
+
+    def _refresh_show_dates(self, token, shows, index=0, callback=None):
+        if token != getattr(self, '_catalog_request', 0):
+            return
+        while index < len(shows):
+            show_name = shows[index]
+            show_id = self.show_ids.get(show_name)
+            cached = self._show_date_cache.get(str(show_id)) if show_id and getattr(self, '_show_date_cache', None) is not None else None
+            if cached and cached[1] is not None:
+                current_start = self.show_date_bounds.get(show_name, (None, None))[0]
+                self.show_date_bounds[show_name] = (current_start or cached[0], cached[1])
+                index += 1
+                continue
+            if not show_id:
+                index += 1
+                continue
+            if self.show_date_bounds.get(show_name, (None, None))[1] is not None:
+                index += 1
+                continue
+            worker = self._network_snapshot()
+
+            def done(bounds, current_name=show_name, current_id=show_id, next_index=index + 1):
+                if token != getattr(self, '_catalog_request', 0):
+                    return
+                if bounds:
+                    current_start = self.show_date_bounds.get(current_name, (None, None))[0]
+                    resolved_bounds = (current_start or bounds[0], bounds[1])
+                    if getattr(self, '_show_date_cache', None) is not None:
+                        self._show_date_cache[str(current_id)] = resolved_bounds
+                    self.show_date_bounds[current_name] = resolved_bounds
+                    selected = self._selected_show_name()
+                    self._setting_catalog = True
+                    try:
+                        self._set_show_selector_items(shows, selected)
+                    finally:
+                        self._setting_catalog = False
+                self._refresh_show_dates(token, shows, next_index, callback=callback)
+
+            self._run_network(lambda: worker.fetch_show_date_bounds(show_id), done)
+            return
+
+        if index >= len(shows):
+            if callable(callback):
+                callback()
 
     def get_initial_streamer_setting(self) -> str:
         """Resolve and migrate streamer command template, persisting if migrating legacy defaults."""
@@ -1561,6 +1662,8 @@ class TwitTUIForm(toga.App):
                 print("API credentials not found in settings or .env file, using default shows")
                 set_status('Shows API credentials missing; using fallback show list.')
                 self.show_ids = {name: sid for name, sid in DEFAULT_SHOWS}
+                self.show_active = {name: None for name in self.show_ids}
+                self.show_date_bounds = {name: (None, None) for name in self.show_ids}
                 return sorted(self.show_ids, key=str.casefold)
 
             headers = {
@@ -1569,16 +1672,19 @@ class TwitTUIForm(toga.App):
                 'app-key': app_key
             }
 
-            url = 'https://twit.tv/api/v1.0/shows'
+            url = 'https://twit.tv/api/v1.0/shows?page=1&range=1000'
             visited = set()
             show_ids = {}
+            show_active = {}
+            show_date_bounds = {}
             while url:
                 parsed = urllib.parse.urlsplit(url)
                 query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
                 if (parsed.scheme != 'https' or parsed.netloc != 'twit.tv' or
                         parsed.path not in ('/api/v1.0/shows', '/api/v1.0/shows/') or
-                        parsed.fragment or set(query) - {'page'} or
-                        ('page' in query and (len(query['page']) != 1 or not query['page'][0].isdigit() or int(query['page'][0]) < 1))):
+                        parsed.fragment or set(query) - {'page', 'range'} or
+                        ('page' in query and (len(query['page']) != 1 or not query['page'][0].isdigit() or int(query['page'][0]) < 1)) or
+                        ('range' in query and (len(query['range']) != 1 or not query['range'][0].isdigit() or int(query['range'][0]) < 1))):
                     raise ValueError('Invalid shows API page link')
                 page = int(query['page'][0]) if 'page' in query else 1
                 if page in visited:
@@ -1588,31 +1694,97 @@ class TwitTUIForm(toga.App):
                 if response.status_code != 200:
                     set_status(f'Shows API failed (HTTP {response.status_code}); using fallback show list.')
                     self.show_ids = {name: sid for name, sid in DEFAULT_SHOWS}
+                    self.show_active = {name: None for name in self.show_ids}
+                    self.show_date_bounds = {name: (None, None) for name in self.show_ids}
                     return sorted(self.show_ids, key=str.casefold)
                 data = response.json()
                 if not isinstance(data, dict) or not isinstance(data.get('shows'), list):
                     raise ValueError('Invalid shows API response')
                 for show in data['shows']:
                     if isinstance(show, dict) and isinstance(show.get('label'), str) and show['label'].strip():
-                        show_ids[show['label']] = show.get('id')
+                        name = show['label']
+                        show_ids[name] = show.get('id')
+                        active = show.get('active')
+                        show_active[name] = active if isinstance(active, bool) else None
+                        created = show.get('created')
+                        show_id_str = str(show.get('id')) if show.get('id') is not None else None
+                        cached = self._show_date_cache.get(show_id_str) if (show_id_str and getattr(self, '_show_date_cache', None) is not None) else None
+                        if cached and cached[1] is not None:
+                            bounds = (created or cached[0], cached[1])
+                        else:
+                            bounds = (created, None)
+                        show_date_bounds[name] = bounds
+                        if show_id_str and getattr(self, '_show_date_cache', None) is not None:
+                            self._show_date_cache[show_id_str] = bounds
                 next_link = data.get('_links', {}).get('next')
                 url = urllib.parse.urljoin(url, next_link['href']) if next_link else None
 
             if show_ids:
                 if not any(name.strip().lower() == 'triangulation' for name in show_ids):
                     show_ids['Triangulation'] = None
+                    show_active['Triangulation'] = None
+                    show_date_bounds['Triangulation'] = (None, None)
                 self.show_ids = show_ids
+                self.show_active = show_active
+                self.show_date_bounds = show_date_bounds
                 set_status('')
                 return sorted(show_ids, key=str.casefold)
 
             set_status('Shows API returned no usable shows; using fallback show list.')
             self.show_ids = {name: sid for name, sid in DEFAULT_SHOWS}
+            self.show_active = {name: None for name in self.show_ids}
+            self.show_date_bounds = {name: (None, None) for name in self.show_ids}
             return sorted(self.show_ids, key=str.casefold)
         except Exception as e:
             print(f"Error fetching shows: {e}")
             set_status('Shows API request failed; using fallback show list.')
             self.show_ids = {name: sid for name, sid in DEFAULT_SHOWS}
+            self.show_active = {name: None for name in self.show_ids}
+            self.show_date_bounds = {name: (None, None) for name in self.show_ids}
             return sorted(self.show_ids, key=str.casefold)
+
+    def fetch_show_date_bounds(self, show_id):
+        """Fetch the earliest and latest episode dates from a show's public archive."""
+        if not show_id:
+            return None
+
+        def page_dates(page_html):
+            dates = []
+            pattern = r'<a\s+href="/shows/[^\"]+/episodes/\d+(?:\?[^\"]*)?"[^>]*>(.*?)</a>'
+            for content in re.findall(pattern, page_html, re.IGNORECASE | re.DOTALL):
+                date_match = re.search(r'<span class="date">(.*?)</span>', content, re.IGNORECASE | re.DOTALL)
+                if not date_match:
+                    continue
+                date_text = html.unescape(re.sub(r'<[^>]+>', '', date_match.group(1))).strip()
+                try:
+                    dates.append(datetime.strptime(date_text, '%b %d %Y').strftime('%Y-%m-%d'))
+                except ValueError:
+                    continue
+            return dates
+
+        try:
+            params = {'filter[shows]': str(show_id), 'page': 1}
+            response = requests.get('https://twit.tv/episodes', params=params, timeout=10)
+            response.raise_for_status()
+            page_match = re.search(r'class="page-number-input"[^>]*\bmax="(\d+)"', response.text)
+            last_page = int(page_match.group(1)) if page_match else 1
+            if last_page < 1:
+                return None
+            newest_dates = page_dates(response.text)
+            if not newest_dates:
+                return None
+            oldest_dates = newest_dates
+            if last_page > 1:
+                oldest_params = {**params, 'page': last_page}
+                response = requests.get('https://twit.tv/episodes', params=oldest_params, timeout=10)
+                response.raise_for_status()
+                oldest_dates = page_dates(response.text)
+                if not oldest_dates:
+                    return None
+            return min(oldest_dates), max(newest_dates)
+        except (requests.RequestException, ValueError, TypeError) as e:
+            print(f"Error fetching show archive dates: {e}")
+            return None
 
     def startup(self) -> None:
         api_rate_limiter.wait_callback = self._rate_limit_wait_changed
@@ -2868,8 +3040,8 @@ class TwitTUIForm(toga.App):
         if not show:
             show = getattr(target, 'show', '') or ''
 
-        if not show and hasattr(self, 'show_combo') and self.show_combo and self.show_combo.value:
-            show = self.show_combo.value or ''
+        if not show:
+            show = self._selected_show_name()
 
         if isinstance(show, dict):
             show = show.get('label') or show.get('title') or ''
@@ -2929,7 +3101,7 @@ class TwitTUIForm(toga.App):
         valid_extensions = {'.mp4', '.mp3', '.m4a', '.webm', '.ogg', '.m4v', '.mov', '.flv', '.aac', '.m3u8'}
         file_ext = ext.lower() if ext and ext.lower() in valid_extensions else ('.mp3' if self.is_audio_only() else '.mp4')
 
-        show = self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo and self.show_combo.value else ''
+        show = self._selected_show_name()
         ep_num = getattr(target, 'episode', '') or (target.get('number', '') if isinstance(target, dict) else '')
         ep_title = getattr(target, 'title', '') or (target.get('title', '') if isinstance(target, dict) else '')
 
@@ -3470,7 +3642,7 @@ class TwitTUIForm(toga.App):
         else:
             media_url = None
 
-        show_name = self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo else ''
+        show_name = self._selected_show_name()
 
         # Check target.episode_data
         if hasattr(target, 'episode_data'):
@@ -3930,7 +4102,7 @@ class TwitTUIForm(toga.App):
         ep_num = str(episode_dict.get('number') or episode_dict.get('episodeNumber') or '').strip()
         ep_title = str(episode_dict.get('title') or episode_dict.get('label') or '').strip()
         ep_id = str(episode_dict.get('id') or '').strip()
-        show = show_name or (self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo else '')
+        show = show_name or self._selected_show_name()
 
         # 2. Match in Club TWiT RSS feeds (show-specific feeds, network feeds, host feeds)
         club_items = self.fetch_club_twit_rss_items(show, audio_only=audio_only)
@@ -4043,7 +4215,7 @@ class TwitTUIForm(toga.App):
                     break
 
         if not show_name:
-            show_name = self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo else ''
+            show_name = self._selected_show_name()
 
         def _add_cand(res_id: str, name: str, res_type: str, url: str | None, size_val: Any = None):
             if not url or not isinstance(url, str):
@@ -4497,7 +4669,7 @@ class TwitTUIForm(toga.App):
             self._episodes_from_api = False
             self._episodes_all_loaded = False
             self._episode_api_status = ''
-        selected_show = self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo and self.show_combo.value else ''
+        selected_show = self._selected_show_name()
         if not selected_show and hasattr(self, 'show_ids'):
             for name, sid in self.show_ids.items():
                 if str(sid) == str(show_id):
@@ -4519,8 +4691,8 @@ class TwitTUIForm(toga.App):
                     sort = self.get_current_sort_param()
 
                 page = int(page or 1)
-                page_size = 50
-                url = f'https://twit.tv/api/v1.0/episodes?filter[shows]={show_id}&range={page_size}&page={page}'
+                page_size = 2000
+                url = f'https://twit.tv/api/v1.0/episodes?filter[shows]={show_id}&page={page}&range={page_size}'
                 if sort:
                     url += f'&sort={sort}'
                 response = api_rate_limiter.get(url, headers=headers, timeout=(10, 60))
@@ -4674,7 +4846,7 @@ class TwitTUIForm(toga.App):
         query_lower = query_str.lower()
         query_words = [w for w in re.split(r'\s+', query_lower) if w]
 
-        selected_show = show_name or (self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo and self.show_combo.value else '')
+        selected_show = show_name or self._selected_show_name()
         if not selected_show and hasattr(self, 'show_ids') and show_id:
             for name, sid in self.show_ids.items():
                 if str(sid) == str(show_id):
@@ -5046,8 +5218,8 @@ class TwitTUIForm(toga.App):
 
         # Collect show and episode identifiers
         show = show_name or getattr(target, 'show', '') or ep_data.get('show_name') or ep_data.get('show') or ''
-        if not show and hasattr(self, 'show_combo') and self.show_combo and self.show_combo.value:
-            show = self.show_combo.value or ''
+        if not show:
+            show = self._selected_show_name()
         if isinstance(show, dict):
             show = show.get('label') or show.get('title') or ''
         show_str = str(show).strip()
@@ -5188,8 +5360,8 @@ class TwitTUIForm(toga.App):
 
         # Collect show name
         show = show_name or getattr(target, 'show', '') or ep_data.get('show_name') or ep_data.get('show')
-        if not show and hasattr(self, 'show_combo') and self.show_combo:
-            show = self.show_combo.value or ''
+        if not show:
+            show = self._selected_show_name()
         if isinstance(show, dict):
             show = show.get('label') or show.get('title') or ''
 
@@ -5717,7 +5889,7 @@ class TwitTUIForm(toga.App):
             self.load_episodes_for_selected_show()
             return
 
-        selected_show = self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo else ''
+        selected_show = self._selected_show_name()
         show_id = self.show_ids.get(selected_show) if hasattr(self, 'show_ids') and selected_show in self.show_ids else None
 
         token = self._next_episode_request()
@@ -5749,7 +5921,7 @@ class TwitTUIForm(toga.App):
         self._cancel_hover_timer()
         if hasattr(self, 'search_input') and self.search_input:
             self.search_input.value = ''
-        selected_show = self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo else ''
+        selected_show = self._selected_show_name()
         if getattr(self, '_search_catalog_show', None) == selected_show and getattr(self, '_search_catalog', None) is not None:
             self._next_episode_request()
             self.current_page = 1
@@ -5758,12 +5930,12 @@ class TwitTUIForm(toga.App):
             return
         self.load_episodes_for_selected_show()
 
-    def load_episodes_for_selected_show(self) -> None:
+    def load_episodes_for_selected_show(self, callback=None) -> None:
         """Fetch and display episodes for currently selected show in the combo box."""
         self._cancel_hover_timer()
         token = self._next_episode_request()
         self.current_page = 1
-        selected_show = self.show_combo.value
+        selected_show = self._selected_show_name()
         self._search_catalog = None
         self._search_catalog_show = None
         if selected_show and hasattr(self, 'show_ids') and selected_show in self.show_ids:
@@ -5786,7 +5958,10 @@ class TwitTUIForm(toga.App):
 
             def done(result):
                 if token == self._episode_request:
-                    episodes, page = result
+                    if isinstance(result, tuple) and len(result) == 2:
+                        episodes, page = result
+                    else:
+                        episodes, page = (result if isinstance(result, list) else []), 1
                     self.current_page = page
                     self._triangulation_rss_fallback = getattr(worker, '_triangulation_rss_fallback', False)
                     self._episodes_from_api = getattr(worker, '_episodes_from_api', False)
@@ -5808,11 +5983,15 @@ class TwitTUIForm(toga.App):
                                              ('title', 'description', 'summary', 'body', 'number')).lower()
                             for word in words)]
                     self.update_episodes_display()
+                if callable(callback):
+                    callback()
 
             self._run_network(fetch_all, done)
         else:
             self.current_episodes = []
             self.update_episodes_display()
+            if callable(callback):
+                callback()
 
     def on_show_select(self, widget) -> None:
         """Handle show selection change."""
@@ -5827,7 +6006,7 @@ class TwitTUIForm(toga.App):
 
     def on_next_press(self, widget) -> None:
         """Fetch the next page of episodes for the currently selected show."""
-        selected_show = self.show_combo.value if hasattr(self, 'show_combo') and self.show_combo else ''
+        selected_show = self._selected_show_name()
         if not selected_show or not hasattr(self, 'show_ids') or selected_show not in self.show_ids:
             return
 
