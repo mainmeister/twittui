@@ -401,7 +401,7 @@ class TestShowCatalog(unittest.TestCase):
             self.assertEqual([e['title'] for e in episodes], ['First', 'Second'])
             self.assertEqual(self.form.fetch_episodes(123, page=2), [])
         get.assert_called_once()
-        self.assertIn('page=1&range=2000', get.call_args.args[0])
+        self.assertIn('page=1&range=50', get.call_args.args[0])
         self.assertIn('sort=-airingDate', get.call_args.args[0])
 
     @patch('twittui_form.load_twittui_dotenv')
@@ -498,6 +498,22 @@ class TestShowCatalog(unittest.TestCase):
             self.form.load_episodes_for_selected_show()
         self.assertEqual([ep['title'] for ep in self.form.current_episodes], ['Episode 1', 'Episode 2', 'Episode 3'])
         self.assertEqual(self.form.current_page, 3)
+
+    def test_selected_show_holds_modal_wait_dialog_until_complete(self):
+        self.form.show_combo = MagicMock(value='Test')
+        self.form.show_ids = {'Test': 123}
+        self.form.search_input = MagicMock(value='')
+        self.form._set_rate_limit_wait = MagicMock()
+        worker = MagicMock()
+        worker.fetch_episodes.return_value = [{'title': 'Episode 1'}]
+        worker._episodes_all_loaded = True
+        jobs = []
+        with patch.object(self.form, '_network_snapshot', return_value=worker), patch.object(self.form, '_run_network', side_effect=lambda work, done: jobs.append((work, done))), patch.object(self.form, 'update_episodes_display'):
+            self.form.load_episodes_for_selected_show()
+            self.form._set_rate_limit_wait.assert_called_once_with(True)
+            self.form._set_rate_limit_wait.reset_mock()
+            jobs[0][1](jobs[0][0]())
+            self.form._set_rate_limit_wait.assert_called_once_with(False)
 
     def test_select_show_with_search_loads_catalog(self):
         self.form.search_input = MagicMock(value='query')

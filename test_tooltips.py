@@ -142,6 +142,8 @@ class TestMainFormUITooltips(unittest.TestCase):
             'show_folders_checkbox': self.form.show_folders_checkbox,
             'block_label': self.form.block_label,
             'block_input': self.form.block_input,
+            'rate_limit_label': self.form.rate_limit_label,
+            'rate_limit_input': self.form.rate_limit_input,
             'streamer_label': self.form.streamer_label,
             'streamer_input': self.form.streamer_input,
             'progress_bar': self.form.progress_bar,

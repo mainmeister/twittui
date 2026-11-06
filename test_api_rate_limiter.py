@@ -108,6 +108,49 @@ class TestApiRateLimiter(unittest.TestCase):
             self.assertIs(limiter.get('https://twit.tv/api/v1.0/shows'), limited)
         self.assertEqual(get.call_count, 2)
 
+    def test_403_request_blocked_waits_for_previous_calls_to_expire_and_retries(self):
+        limiter = ApiRateLimiter()
+        clock = [0.0]
+        starts = []
+        blocked = SimpleNamespace(status_code=403, text='403 Request blocked')
+        success = SimpleNamespace(status_code=200, text='')
+
+        def request(*args, **kwargs):
+            starts.append(clock[0])
+            return blocked if len(starts) == 1 else success
+
+        with patch('twittui_form.time.monotonic', side_effect=lambda: clock[0]), \
+                patch('twittui_form.time.sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
+                patch('twittui_form.requests.get', side_effect=request):
+            self.assertIs(limiter.get('https://twit.tv/api/v1.0/shows'), success)
+        self.assertEqual(starts, [0, 60])
+
+    def test_403_request_blocked_retry_is_bounded(self):
+        limiter = ApiRateLimiter()
+        clock = [0.0]
+        blocked = SimpleNamespace(status_code=403, text='Request blocked')
+        with patch('twittui_form.time.monotonic', side_effect=lambda: clock[0]), \
+                patch('twittui_form.time.sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
+                patch('twittui_form.requests.get', return_value=blocked) as get:
+            self.assertIs(limiter.get('https://twit.tv/api/v1.0/shows'), blocked)
+        self.assertEqual(get.call_count, 2)
+
+    def test_custom_rate_limit_throttling(self):
+        limiter = ApiRateLimiter(rate_limit=2)
+        clock = [0.0]
+        starts = []
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        with patch('twittui_form.time.monotonic', side_effect=lambda: clock[0]), \
+                patch('twittui_form.time.sleep', side_effect=sleep), \
+                patch('twittui_form.requests.get', side_effect=lambda *a, **k: (starts.append(clock[0]), SimpleNamespace(status_code=200, text=''))[1]):
+            for _ in range(4):
+                limiter.get('https://twit.tv/api/v1.0/shows')
+
+        self.assertEqual(starts, [0, 1, 60, 61])
+
     def test_other_server_errors_are_not_retried(self):
         limiter = ApiRateLimiter()
         failure = SimpleNamespace(status_code=500, text='Internal Server Error')
@@ -318,6 +361,30 @@ class TestRateLimitModal(unittest.TestCase):
             loop.return_value.is_running.return_value = False
             form._rate_limit_wait_changed(True)
             loop.return_value.call_soon_threadsafe.assert_called_once_with(form._set_rate_limit_wait, True)
+
+    def test_form_rate_limit_field_default_and_change(self):
+        saved = {}
+        with patch.dict(os.environ, {'TOGA_BACKEND': 'toga_textual'}, clear=True), \
+                patch.object(TwitTUIForm, 'save_env_setting', side_effect=lambda k, v: saved.__setitem__(k, v)), \
+                patch.object(TwitTUIForm, '_refresh_catalog'):
+            form = TwitTUIForm('TestApp', 'org.twit.test')
+            with patch.object(form, 'fetch_shows', return_value=['This Week in Tech']), \
+                    patch.object(form, 'fetch_episodes', return_value=[]):
+                form.startup()
+            self.assertIsNotNone(form.rate_limit_label)
+            self.assertIsNotNone(form.rate_limit_input)
+            self.assertEqual(form.rate_limit_input.value, '5')
+            self.assertEqual(form.get_rate_limit(), 5)
+
+            # Check that rate limit input is in the same box as block input
+            self.assertIn(form.block_input, form.block_label.parent.children)
+            self.assertIn(form.rate_limit_input, form.block_label.parent.children)
+
+            form.rate_limit_input.value = '10'
+            form.on_rate_limit_change()
+            self.assertEqual(form.get_rate_limit(), 10)
+            self.assertEqual(os.environ.get('twitapiratelimit'), '10')
+            self.assertEqual(saved.get('twitapiratelimit'), '10')
 
 
 if __name__ == '__main__':

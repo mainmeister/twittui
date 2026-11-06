@@ -470,6 +470,22 @@ class TogaDataTable(DataTable):
         if self.interface.on_select:
             self.interface.on_select()
 
+    def on_mouse_move(self, event: Any) -> None:
+        try:
+            row_idx = self.hover_row
+            if row_idx is not None and 0 <= row_idx < len(self.impl._rows):
+                if hasattr(self.interface, 'on_hover_row') and callable(self.interface.on_hover_row):
+                    self.interface.on_hover_row(row_idx)
+        except Exception:
+            pass
+
+    def on_leave(self, event: Any) -> None:
+        try:
+            if hasattr(self.interface, 'on_hover_leave') and callable(self.interface.on_hover_leave):
+                self.interface.on_hover_leave()
+        except Exception:
+            pass
+
 
 class TextualTable(Widget):
     """Toga Table backend implementation for Textual."""

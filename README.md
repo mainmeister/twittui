@@ -51,9 +51,9 @@ This document serves two primary audiences:
 ## Core Capabilities
 
 - **Show Catalog Navigation**: Browse active and legacy TWiT.tv productions with automatic fallback to static show catalogs when offline or unauthenticated. Displays formatted status tags (`[Active ...]` / `[Ended ...]`) with start and end date bounds.
-- **High-Efficiency API Pagination**: Retrieves the complete show catalog in a single request (`page=1&range=1000`) and up to 2,000 episodes per show (`page=1&range=2000`), minimizing network round-trips under strict API rate limits (5 calls/minute).
+- **High-Efficiency API Pagination**: Retrieves the complete show catalog in a single request (`page=1&range=1000`) and episodes in reliable blocks of 50 (`range=50`) iteratively until all episodes have been loaded, maintaining a strict rate limit of 5 API calls per rolling minute.
 - **In-Show Episode & Topic Search**: Search a loaded complete episode catalog locally, or use asynchronous API and RSS fallback searches when needed. Results depend on available sources.
-- **Episode Metadata Hover Preview**: On supported GTK tables, hovering over a row for 3 seconds can display available metadata and links; fields such as notes, guests, transcripts and media URLs are optional.
+- **Episode Metadata Hover Preview**: Hovering over an episode row for 3 seconds displays comprehensive episode metadata, show notes, and links in a dedicated popup dialog (across both GTK and Textual interfaces) without network delays.
 - **Resilient Episode Ingestion**: Show and episode fetching and media resolution use different API, RSS and webpage fallbacks. End dates are scraped from public web archives without consuming API quota.
 - **Synchronized UI Lifecycle**: Modal wait dialogs remain active until catalog dates and episode lists finish loading, ensuring stable UI scrolling and selection.
 - **Direct Video/Audio Streaming**: Spawn external media players (e.g., VLC, MPV) asynchronously using customizable command templates without stalling the UI.
@@ -339,9 +339,9 @@ TWITAUDIOONLY=0
 - Click **Fetch** to refresh the show catalog and episodes. The catalog queries all shows in a single request (`page=1&range=1000`) and falls back to built-in shows if the API is unavailable.
 - Show start dates are parsed from API `created` timestamps, while show end dates are scraped from public web archives asynchronously to conserve API quota under strict rate limits.
 - The wait modal dialog remains displayed during catalog refresh until both show metadata dates and the initial episode list have completed loading, ensuring smooth navigation without list resets.
-- **Next** fetches another page when additional episodes exist beyond the initial 2,000-episode query.
+- **Next** fetches another page when additional episodes exist beyond the currently loaded catalog.
 - The API status message reports loading and credential status; requests may display a wait dialog while the API rate limiter is active (5 calls per minute).
-- **Episode Metadata Inspection**: On supported GTK tables, hovering for 3 seconds can show the metadata and links available for that episode; not all fields or links are present.
+- **Episode Metadata Inspection**: Hovering over any episode row for 3 seconds displays a popup with complete metadata, show notes, and links for that episode.
 
 #### Searching Episodes
 - Enter keywords or topics (e.g., `OpenAI`, `Surface`, `Security`) into the **Search** text box.
@@ -361,7 +361,7 @@ TWITAUDIOONLY=0
 #### Streaming an Episode
 1. Click on an episode in the list table to highlight it.
 2. Double-click the row or press the **Stream** button.
-3. If prompted, choose an available format or resolution. TwitTUI resolves the stream and launches your configured media player in a separate process. **Audio Only** refreshes the episode list and prefers audio for streaming and downloads; the preference is saved as `TWITAUDIOONLY`.
+3. If prompted, choose an available format or resolution. Choosing **YouTube Stream** opens the episode video directly in your default web browser for native playback. For direct video and audio streams, TwitTUI resolves the stream and launches your configured media player (e.g., VLC) in a separate process. **Audio Only** refreshes the episode list and prefers audio for streaming and downloads; the preference is saved as `TWITAUDIOONLY`.
 
 #### Batch Downloading Episodes
 1. Highlight one or more episodes in the table (hold `Shift` or `Ctrl` for multiple selections).
@@ -660,7 +660,7 @@ toga.MainWindow (title='TWIT.tv TUI')
 
 There is no single fallback cascade for every operation:
 - **Show catalog**: Fetches the show catalog in a single API query (`GET /shows?page=1&range=1000`) when credentials are available, falling back to 26 built-in default shows if unavailable or offline. Show start dates (`created`) and active statuses (`active`) are parsed directly from the API response, while show end dates are discovered asynchronously via public web archive scraping (`/episodes?filter[shows]={show_id}`) to conserve API quotas under strict rate limits (5 calls/min).
-- **Episodes and search**: Fetches show episodes in high-capacity single requests (`GET /episodes?filter[shows]={show_id}&page=1&range=2000`) when available, supporting up to 2,000 episodes per request before secondary pagination. Public show RSS and configured Club RSS feeds provide resilient fallbacks. A fully loaded catalog can be searched locally; incomplete or unavailable sources need not produce complete results.
+- **Episodes and search**: Fetches show episodes iteratively in blocks of 50 (`GET /episodes?filter[shows]={show_id}&page={page}&range=50`) until the complete show catalog is loaded, throttled to a strict 5 calls per rolling minute. Public show RSS and configured Club RSS feeds provide resilient fallbacks. A fully loaded catalog can be searched locally; incomplete or unavailable sources need not produce complete results.
 - **Media resolution**: Examines available episode formats and links, RSS enclosures, webpage media or YouTube links, and potentially API episode details. The path depends on the data and requested format rather than a universal tier order.
 - **UI Initialization & Rate Limit Synchronization**: During catalog refreshes, the rate limit wait modal dialog is held open until both show date resolution and the selected show's initial episode list have finished loading, preventing UI jumping or focus loss while background operations complete.
 
@@ -802,7 +802,7 @@ The `determine_download_filename(target, media_url)` method sanitizes filenames 
 #### Key Endpoints Used by TwitTUI:
 - `GET /shows?page=1&range=1000`: Fetches active and legacy show lists, identifiers, start dates (`created`), and active status (`active`) in a single query.
 - `GET /search/{keywords}`: Executes scoped full-text queries for in-show episode discovery across TWiT indexed archives.
-- `GET /episodes?filter[shows]={show_id}&page=1&range=2000`: Retrieves up to 2,000 episodes for a specific show in a single API call to minimize network calls and rate-limiting overhead.
+- `GET /episodes?filter[shows]={show_id}&page={page}&range=50`: Retrieves episodes in sequential blocks of 50 per page until all episodes have been fetched.
 - `GET /episodes/{episode_id}`: Fetches detailed episode records including nested `video_hd`, `video_large`, and audio download nodes.
 
 #### Authentication Headers:
@@ -834,7 +834,7 @@ Without a configured destination, the application prefers a writable `~/Download
 TwitTUI maintains a comprehensive automated unit test suite covering end-to-end functionality, GUI backend abstractions, packaging pipelines, security sanitization, and network operations:
 
 - **Test Suite Structure**:
-  - `test_show_catalog.py`: Tests for show catalog single-request pagination (`range=1000`), active/ended status parsing, start date (`created`) extraction, public web archive scraping, rate-limit wait modal synchronization, episode high-capacity fetching (`range=2000`), and local catalog search.
+  - `test_show_catalog.py`: Tests for show catalog single-request pagination (`range=1000`), active/ended status parsing, start date (`created`) extraction, public web archive scraping, rate-limit wait modal synchronization, episode iterative fetching in blocks of 50 (`range=50`), and local catalog search.
   - `test_api_rate_limiter.py`: Tests for 5 requests/minute sliding window rate limiting and automatic retry on API limit responses.
   - `test_install.py`: Tests for PyInstaller compilation, standalone executable installation, PATH discovery, artifact cleanup, and application icon generation.
   - `test_snap.py`: Tests for Snapcraft YAML structure, base core24 specification, strict confinement, plugs and slots, desktop entry Freedesktop validity, launcher shell script permissions and environment isolation logic, requirements/setup synchronization, SNAP_USER_DATA .env loading/saving, and runtime resource resolution.
