@@ -17,3 +17,10 @@ venv/
 # Application temporary/partial downloads
 *.part
 *.download
+
+# Snapcraft build artifacts
+parts/
+prime/
+stage/
+*.snap
+.scratch/

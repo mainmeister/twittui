@@ -315,12 +315,14 @@ class TestTwitTUIResolutions(unittest.TestCase):
 
         self.form.prompt_resolution_choice = mock_prompt
 
-        with unittest.mock.patch('threading.Thread'):
+        with unittest.mock.patch.object(self.form, 'download_episodes_batch') as mock_dl:
             asyncio.run(self.form.on_download_press())
 
         self.assertEqual(len(prompted_resolutions), 2)
         self.assertTrue(all(r['type'] == 'audio' for r in prompted_resolutions))
-        self.assertEqual(target.selected_media_url, 'https://twit.tv/dl_audio.mp3')
+        mock_dl.assert_called_once()
+        called_targets, _ = mock_dl.call_args[0]
+        self.assertEqual(called_targets[0].selected_media_url, 'https://twit.tv/dl_audio.mp3')
 
     def test_on_download_press_audio_only_single_audio_option_downloads_without_prompt(self) -> None:
         """Verify on_download_press directly selects audio without prompt when only 1 audio option is available."""
@@ -350,11 +352,13 @@ class TestTwitTUIResolutions(unittest.TestCase):
 
         self.form.prompt_resolution_choice = mock_prompt
 
-        with unittest.mock.patch('threading.Thread'):
+        with unittest.mock.patch.object(self.form, 'download_episodes_batch') as mock_dl:
             asyncio.run(self.form.on_download_press())
 
         self.assertFalse(mock_prompt_called)
-        self.assertEqual(target.selected_media_url, 'https://twit.tv/dl_single.mp3')
+        mock_dl.assert_called_once()
+        called_targets, _ = mock_dl.call_args[0]
+        self.assertEqual(called_targets[0].selected_media_url, 'https://twit.tv/dl_single.mp3')
 
     def test_batch_download_audio_only_prompts_only_audio_options(self) -> None:
         """Verify batch download with multiple audio formats prompts user with audio options only."""
@@ -393,13 +397,65 @@ class TestTwitTUIResolutions(unittest.TestCase):
 
         self.form.prompt_resolution_choice = mock_prompt
 
-        with unittest.mock.patch('threading.Thread'):
+        with unittest.mock.patch.object(self.form, 'download_episodes_batch'):
             asyncio.run(self.form.on_download_press())
 
         self.assertTrue(len(prompted_resolutions) >= 1)
         self.assertTrue(all(r.get('type') == 'audio' for r in prompted_resolutions))
         self.assertNotIn('video_hd', [r.get('id') for r in prompted_resolutions])
         self.assertNotIn('video_large', [r.get('id') for r in prompted_resolutions])
+
+    def test_on_stream_press_youtube_stream_opens_in_browser(self) -> None:
+        """Verify selecting YouTube stream from resolution prompt opens YouTube in the default browser instead of VLC."""
+        ep_data = {
+            'title': 'MacBreak Weekly 1049',
+            'video_hd': {'mediaUrl': 'https://twit.tv/mbw1049_hd.mp4'},
+            'video_youtube': {'id': 'dQw4w9WgXcQ'},
+        }
+
+        class MockTarget:
+            def __init__(self, data):
+                self.title = data['title']
+                self.episode_data = data
+
+        self.form.is_audio_only = lambda: False
+        self.form.episodes_list = type('MockList', (), {'selection': [MockTarget(ep_data)]})()
+
+        async def mock_prompt(title, message, resolutions):
+            # User chooses YouTube Stream option
+            yt_opt = next(r for r in resolutions if r['id'] == 'video_youtube')
+            return yt_opt
+
+        self.form.prompt_resolution_choice = mock_prompt
+
+        with unittest.mock.patch('webbrowser.open') as mock_browser_open, \
+             unittest.mock.patch('twittui_form.launch_stream_safe') as mock_launch_stream:
+            asyncio.run(self.form.on_stream_press())
+
+            mock_browser_open.assert_called_once_with('https://www.youtube.com/watch?v=dQw4w9WgXcQ')
+            mock_launch_stream.assert_not_called()
+
+    def test_on_stream_press_single_youtube_stream_opens_in_browser_without_prompt(self) -> None:
+        """Verify single YouTube stream option opens directly in browser without launching media player."""
+        ep_data = {
+            'title': 'TWiT Special Video',
+            'video_youtube': {'id': 'dQw4w9WgXcQ'},
+        }
+
+        class MockTarget:
+            def __init__(self, data):
+                self.title = data['title']
+                self.episode_data = data
+
+        self.form.is_audio_only = lambda: False
+        self.form.episodes_list = type('MockList', (), {'selection': [MockTarget(ep_data)]})()
+
+        with unittest.mock.patch('webbrowser.open') as mock_browser_open, \
+             unittest.mock.patch('twittui_form.launch_stream_safe') as mock_launch_stream:
+            asyncio.run(self.form.on_stream_press())
+
+            mock_browser_open.assert_called_once_with('https://www.youtube.com/watch?v=dQw4w9WgXcQ')
+            mock_launch_stream.assert_not_called()
 
 
 if __name__ == "__main__":

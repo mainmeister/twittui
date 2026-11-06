@@ -30,6 +30,32 @@ import toga.platform
 from toga_textual.widgets.base import Widget
 
 
+class RateLimitScreen(ModalScreen):
+    DEFAULT_CSS = """
+    RateLimitScreen { align: center middle; background: rgba(0, 0, 0, 0.7); }
+    RateLimitScreen Vertical { width: 60; height: auto; border: solid $accent; background: $surface; padding: 1 2; }
+    RateLimitScreen LoadingIndicator { height: 3; color: red; }
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._close_requested = False
+
+    def compose(self) -> Any:
+        with Vertical():
+            yield Label('Waiting for the TWiT API. Please wait.')
+            yield LoadingIndicator()
+
+    def close_wait(self) -> None:
+        self._close_requested = True
+        if self.app.screen is self:
+            self.dismiss()
+
+    def on_screen_resume(self) -> None:
+        if self._close_requested:
+            self.dismiss()
+
+
 class TextualDialogScreen(ModalScreen):
     """Textual modal screen for displaying Toga dialogs."""
 
@@ -443,6 +469,22 @@ class TogaDataTable(DataTable):
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if self.interface.on_select:
             self.interface.on_select()
+
+    def on_mouse_move(self, event: Any) -> None:
+        try:
+            row_idx = self.hover_row
+            if row_idx is not None and 0 <= row_idx < len(self.impl._rows):
+                if hasattr(self.interface, 'on_hover_row') and callable(self.interface.on_hover_row):
+                    self.interface.on_hover_row(row_idx)
+        except Exception:
+            pass
+
+    def on_leave(self, event: Any) -> None:
+        try:
+            if hasattr(self.interface, 'on_hover_leave') and callable(self.interface.on_hover_leave):
+                self.interface.on_hover_leave()
+        except Exception:
+            pass
 
 
 class TextualTable(Widget):

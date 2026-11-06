@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=TwitTUI
+Comment=TWiT.tv Terminal & Desktop Media Browser
+GenericName=Podcast & Media Browser
+Exec=twittui
+Icon=twittui
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;Video;Player;Network;
+Keywords=twit;podcast;stream;download;video;audio;media;
+StartupNotify=true
+StartupWMClass=twittui
