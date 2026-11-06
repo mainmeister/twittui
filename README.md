@@ -148,20 +148,20 @@ snapcraft --destructive-mode
 snapcraft clean
 ```
 
-This compiles all dependencies, GLib schemas, GObject typelibs, and virtual environments, producing `twittui_1.0.1_<arch>.snap` (e.g., `twittui_1.0.1_amd64.snap`) in the project root directory.
+This compiles all dependencies, GLib schemas, GObject typelibs, and virtual environments, producing `twittui_1.0.2_<arch>.snap` (e.g., `twittui_1.0.2_amd64.snap`) in the project root directory.
 
 #### 3. Installing the Snap
 
 - **Install Local Build**:
   Install the locally compiled `.snap` package using the `--dangerous` flag (required for locally built, self-signed packages):
   ```bash
-  sudo snap install --dangerous twittui_1.0.1_amd64.snap
+  sudo snap install --dangerous twittui_1.0.2_amd64.snap
   ```
 
 - **Install for Development & Debugging** (Optional):
   To test without confinement restrictions during development:
   ```bash
-  sudo snap install --dangerous --devmode twittui_1.0.1_amd64.snap
+  sudo snap install --dangerous --devmode twittui_1.0.2_amd64.snap
   ```
 
 

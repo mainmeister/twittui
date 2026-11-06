@@ -18,6 +18,10 @@ venv/
 *.part
 *.download
 
+# Build and distribution artifacts
+dist/
+build/
+
 # Snapcraft build artifacts
 parts/
 prime/
