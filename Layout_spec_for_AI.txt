@@ -33,7 +33,7 @@ Below the episodes table are a horizontal group of action buttons:
 - "Cancel" (cancels running downloads)
 - "Close" (exits the application window)
 
-Below the buttons is a vertical container with controls for the following settings:
+The "Preferences" item under the "TWIT.tv TUI" application menu opens a modal Preferences window. Its vertical settings container includes the following controls:
 
 API Application ID (TWITAPI_APPLICATIONID)
     Horizontal row with label "API Application ID:" and a text input for the TWiT 3Scale Application ID.
@@ -60,10 +60,13 @@ twitclubstreamer (TWITCLUBSTREAMER)
     Horizontal row with label "Streamer:" and a text input for the command line media player.
     The stream URL is represented by %f (default: "env LC_ALL=C vlc %f").
 
-At the bottom of the form is a progress bar (toga.ProgressBar):
+The Preferences window has a "Close" button and can be dismissed without losing its settings. The download progress bar remains at the bottom of the main form (toga.ProgressBar):
 - Displays real-time download progress for the batch when downloading episodes.
 
-Application Menu Commands (under toga.Group.HELP):
+Application Menu Commands (under toga.Group.APP):
+- "Preferences": Opens the modal Preferences window for API, Club TWiT, download, rate limit, and streamer settings.
+
+Help Menu Commands (under toga.Group.HELP):
 - "View README Documentation": Opens an integrated hybrid documentation viewer window (toga.WebView) with HTML sanitization, Table of Contents anchor navigation, floating return button, and fallback to default system browser.
 - "View API Specification (twittv.apib)": Opens the TWiT REST API Blueprint specification in the sanitized hybrid document viewer.
 - "Get TWiT API Key": Opens the official TWiT 3Scale Developer Portal (https://twit-tv.3scale.net) in the default web browser.
