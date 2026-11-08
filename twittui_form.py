@@ -672,6 +672,8 @@ class TwitTUIForm(toga.App):
         self.stream_button = None
         self.cancel_button = None
         self.close_button = None
+        self.settings_box = None
+        self.preferences_close_button = None
         self.app_id_label = None
         self.app_id_input = None
         self.app_key_label = None
@@ -696,6 +698,8 @@ class TwitTUIForm(toga.App):
         self.readme_cmd = None
         self.apib_cmd = None
         self.api_key_cmd = None
+        self.preferences_cmd = None
+        self._preferences_window = None
         self._is_downloading = False
         self._cancel_download = False
         self._hover_lock = threading.Lock()
@@ -2016,7 +2020,76 @@ class TwitTUIForm(toga.App):
         button_box.add(cancel_button)
         button_box.add(close_button)
 
-        # Settings section
+        self.settings_box = self._build_preferences_box()
+
+        # Progress bar section at the bottom of the form
+        self.progress_bar = toga.ProgressBar(
+            max=100.0,
+            value=0.0,
+            style=Pack(flex=1, margin=5),
+            tooltip='Progress indicator for active download or operation'
+        )
+
+        # Add all components to main box
+        main_box.add(show_box)
+        main_box.add(self.api_status_label)
+        main_box.add(search_box)
+        main_box.add(sort_box)
+        main_box.add(episodes_label)
+        main_box.add(self.episodes_list)
+        main_box.add(button_box)
+        main_box.add(self.progress_bar)
+
+        # Create main window
+        self.main_window = toga.MainWindow(title='TWIT.tv TUI')
+        self.main_window.content = main_box
+
+        self.preferences_cmd = toga.Command(
+            self.on_preferences_press,
+            text='Preferences',
+            group=toga.Group.APP,
+            section=sys.maxsize - 1,
+            tooltip='Open application Preferences'
+        )
+        self.commands.add(self.preferences_cmd)
+
+        # Help Menu commands
+        readme_cmd = toga.Command(
+            self.on_open_readme,
+            text='View README Documentation',
+            tooltip='View TwitTUI documentation and usage guide',
+            group=toga.Group.HELP,
+            section=0,
+            order=1
+        )
+        self.readme_cmd = readme_cmd
+        apib_cmd = toga.Command(
+            self.on_open_apib,
+            text='View API Specification (twittv.apib)',
+            tooltip='View TWiT API Blueprint specification',
+            group=toga.Group.HELP,
+            section=0,
+            order=2
+        )
+        self.apib_cmd = apib_cmd
+        api_key_cmd = toga.Command(
+            self.on_open_api_key_url,
+            text='Get TWiT API Key',
+            tooltip='Open TWiT API developer portal in browser to obtain API key',
+            group=toga.Group.HELP,
+            section=0,
+            order=3
+        )
+        self.api_key_cmd = api_key_cmd
+        self.commands.add(readme_cmd)
+        self.commands.add(apib_cmd)
+        self.commands.add(api_key_cmd)
+
+        self.main_window.show()
+        self._refresh_catalog()
+
+    def _build_preferences_box(self) -> toga.Box:
+        """Build the settings controls shown in the Preferences window."""
         settings_box = toga.Box(style=Pack(direction=COLUMN, margin=5))
 
         # TWIT API Application ID setting
@@ -2205,63 +2278,47 @@ class TwitTUIForm(toga.App):
         settings_box.add(block_box)
         settings_box.add(streamer_box)
 
-        # Progress bar section at the bottom of the form
-        self.progress_bar = toga.ProgressBar(
-            max=100.0,
-            value=0.0,
-            style=Pack(flex=1, margin=5),
-            tooltip='Progress indicator for active download or operation'
+        preferences_button_box = toga.Box(style=Pack(direction=ROW, margin=5))
+        self.preferences_close_button = toga.Button(
+            'Close',
+            on_press=self.on_preferences_close_press,
+            style=Pack(margin=5),
+            tooltip='Close Preferences window'
         )
+        preferences_button_box.add(self.preferences_close_button)
+        settings_box.add(preferences_button_box)
+        return settings_box
 
-        # Add all components to main box
-        main_box.add(show_box)
-        main_box.add(self.api_status_label)
-        main_box.add(search_box)
-        main_box.add(sort_box)
-        main_box.add(episodes_label)
-        main_box.add(self.episodes_list)
-        main_box.add(button_box)
-        main_box.add(settings_box)
-        main_box.add(self.progress_bar)
+    def on_preferences_press(self, widget=None) -> None:
+        self.show_preferences_window()
 
-        # Create main window
-        self.main_window = toga.MainWindow(title='TWIT.tv TUI')
-        self.main_window.content = main_box
+    def show_preferences_window(self) -> None:
+        if self._preferences_window is None:
+            self._preferences_window = toga.Window(
+                title='Preferences',
+                size=(900, 400),
+                on_close=self.on_preferences_window_close
+            )
+            self._preferences_window.content = self.settings_box
+            try:
+                window_impl = self._preferences_window._impl
+                if window_impl.__class__.__module__.startswith('toga_gtk'):
+                    native = window_impl.native
+                    if hasattr(native, 'set_modal'):
+                        native.set_modal(True)
+                    if hasattr(native, 'set_transient_for'):
+                        native.set_transient_for(self.main_window._impl.native)
+            except Exception:
+                pass
+        self._preferences_window.show()
 
-        # Help Menu commands
-        readme_cmd = toga.Command(
-            self.on_open_readme,
-            text='View README Documentation',
-            tooltip='View TwitTUI documentation and usage guide',
-            group=toga.Group.HELP,
-            section=0,
-            order=1
-        )
-        self.readme_cmd = readme_cmd
-        apib_cmd = toga.Command(
-            self.on_open_apib,
-            text='View API Specification (twittv.apib)',
-            tooltip='View TWiT API Blueprint specification',
-            group=toga.Group.HELP,
-            section=0,
-            order=2
-        )
-        self.apib_cmd = apib_cmd
-        api_key_cmd = toga.Command(
-            self.on_open_api_key_url,
-            text='Get TWiT API Key',
-            tooltip='Open TWiT API developer portal in browser to obtain API key',
-            group=toga.Group.HELP,
-            section=0,
-            order=3
-        )
-        self.api_key_cmd = api_key_cmd
-        self.commands.add(readme_cmd)
-        self.commands.add(apib_cmd)
-        self.commands.add(api_key_cmd)
+    def on_preferences_window_close(self, window, *args, **kwargs) -> bool:
+        window.hide()
+        return True
 
-        self.main_window.show()
-        self._refresh_catalog()
+    def on_preferences_close_press(self, widget=None) -> None:
+        if self._preferences_window is not None:
+            self._preferences_window.hide()
 
     def sanitize_html(self, html_str: str) -> str:
         """Sanitize HTML content to prevent script injection and malicious payloads."""
@@ -4607,6 +4664,13 @@ class TwitTUIForm(toga.App):
             except Exception:
                 pass
             self._metadata_window = None
+        if self._preferences_window is not None:
+            try:
+                self._preferences_window.on_close = None
+                self._preferences_window.close()
+            except Exception:
+                pass
+            self._preferences_window = None
         self.exit()
 
     async def on_browse_press(self, widget) -> None:

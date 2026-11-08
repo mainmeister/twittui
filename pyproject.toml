@@ -4,8 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "twittui"
-version = "1.0.1"
+version = "1.0.2"
 description = "TWiT.tv Terminal & Desktop Media Browser"
+authors = [{ name = "TWiT Community" }]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
