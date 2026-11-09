@@ -29,6 +29,8 @@ import hashlib
 import http.server
 from dotenv import find_dotenv, load_dotenv, set_key
 
+from tiered_search import rank_and_filter_episodes, compute_match_score
+
 try:
     import defusedxml.ElementTree as DefusedET
 except ImportError:
@@ -694,6 +696,9 @@ class TwitTUIForm(toga.App):
         self.rate_limit_input = None
         self.streamer_label = None
         self.streamer_input = None
+        self.search_prefs_label = None
+        self.fuzzy_search_checkbox = None
+        self.phonetic_search_checkbox = None
         self.progress_bar = None
         self.readme_cmd = None
         self.apib_cmd = None
@@ -743,7 +748,8 @@ class TwitTUIForm(toga.App):
         worker = object.__new__(type(self))
         worker.__dict__ = self.__dict__.copy()
         for name in ('show_combo', 'sort_order_button', 'date_radio', 'episode_radio',
-                     'title_radio', 'audio_only_checkbox', 'app_id_input', 'app_key_input',
+                     'title_radio', 'audio_only_checkbox', 'fuzzy_search_checkbox',
+                     'phonetic_search_checkbox', 'app_id_input', 'app_key_input',
                      'url_input', 'api_status_label', 'block_input', 'rate_limit_input'):
             widget = getattr(self, name, None)
             if widget is not None:
@@ -1086,6 +1092,78 @@ class TwitTUIForm(toga.App):
         self.save_env_setting('TWITAUDIOONLY', val_str)
 
         self.load_episodes_for_selected_show()
+
+    def is_fuzzy_search_enabled(self) -> bool:
+        """Return True if Fuzzy Match search preference is enabled."""
+        if hasattr(self, 'fuzzy_search_checkbox') and self.fuzzy_search_checkbox:
+            if hasattr(self.fuzzy_search_checkbox, 'value'):
+                return bool(self.fuzzy_search_checkbox.value)
+            if hasattr(self.fuzzy_search_checkbox, 'text'):
+                return '☑' in self.fuzzy_search_checkbox.text
+        env_val = os.getenv('TWITFUZZYSEARCH') or os.getenv('twitfuzzysearch') or os.getenv('TWIT_FUZZY_SEARCH')
+        if env_val is None:
+            return True
+        return env_val.strip().lower() in ('1', 'true', 'yes', 'on')
+
+    def on_fuzzy_search_change(self, widget=None) -> None:
+        """Handle fuzzy search preference change."""
+        val = self.is_fuzzy_search_enabled()
+        val_str = '1' if val else '0'
+        os.environ['TWITFUZZYSEARCH'] = val_str
+        self.save_env_setting('TWITFUZZYSEARCH', val_str)
+
+    def on_fuzzy_search_toggle(self, widget=None) -> None:
+        """Toggle fuzzy search preference."""
+        if hasattr(self, 'fuzzy_search_checkbox') and self.fuzzy_search_checkbox:
+            if hasattr(self.fuzzy_search_checkbox, 'value'):
+                self.fuzzy_search_checkbox.value = not self.fuzzy_search_checkbox.value
+            elif hasattr(self.fuzzy_search_checkbox, 'text'):
+                if '☑' in self.fuzzy_search_checkbox.text:
+                    self.fuzzy_search_checkbox.text = self.fuzzy_search_checkbox.text.replace('☑', '☐')
+                else:
+                    self.fuzzy_search_checkbox.text = self.fuzzy_search_checkbox.text.replace('☐', '☑')
+            self.on_fuzzy_search_change()
+        else:
+            val = not self.is_fuzzy_search_enabled()
+            val_str = '1' if val else '0'
+            os.environ['TWITFUZZYSEARCH'] = val_str
+            self.save_env_setting('TWITFUZZYSEARCH', val_str)
+
+    def is_phonetic_search_enabled(self) -> bool:
+        """Return True if Phonetic Match search preference is enabled."""
+        if hasattr(self, 'phonetic_search_checkbox') and self.phonetic_search_checkbox:
+            if hasattr(self.phonetic_search_checkbox, 'value'):
+                return bool(self.phonetic_search_checkbox.value)
+            if hasattr(self.phonetic_search_checkbox, 'text'):
+                return '☑' in self.phonetic_search_checkbox.text
+        env_val = os.getenv('TWITPHONETICSEARCH') or os.getenv('twitphoneticsearch') or os.getenv('TWIT_PHONETIC_SEARCH')
+        if env_val is None:
+            return True
+        return env_val.strip().lower() in ('1', 'true', 'yes', 'on')
+
+    def on_phonetic_search_change(self, widget=None) -> None:
+        """Handle phonetic search preference change."""
+        val = self.is_phonetic_search_enabled()
+        val_str = '1' if val else '0'
+        os.environ['TWITPHONETICSEARCH'] = val_str
+        self.save_env_setting('TWITPHONETICSEARCH', val_str)
+
+    def on_phonetic_search_toggle(self, widget=None) -> None:
+        """Toggle phonetic search preference."""
+        if hasattr(self, 'phonetic_search_checkbox') and self.phonetic_search_checkbox:
+            if hasattr(self.phonetic_search_checkbox, 'value'):
+                self.phonetic_search_checkbox.value = not self.phonetic_search_checkbox.value
+            elif hasattr(self.phonetic_search_checkbox, 'text'):
+                if '☑' in self.phonetic_search_checkbox.text:
+                    self.phonetic_search_checkbox.text = self.phonetic_search_checkbox.text.replace('☑', '☐')
+                else:
+                    self.phonetic_search_checkbox.text = self.phonetic_search_checkbox.text.replace('☐', '☑')
+            self.on_phonetic_search_change()
+        else:
+            val = not self.is_phonetic_search_enabled()
+            val_str = '1' if val else '0'
+            os.environ['TWITPHONETICSEARCH'] = val_str
+            self.save_env_setting('TWITPHONETICSEARCH', val_str)
 
     def is_sort_ascending(self) -> bool:
         """Return True if Ascending sort order is selected, False if Descending."""
@@ -2270,6 +2348,34 @@ class TwitTUIForm(toga.App):
         streamer_box.add(streamer_label)
         streamer_box.add(self.streamer_input)
 
+        # Search matching options (Fuzzy Match & Phonetic Match)
+        search_prefs_box = toga.Box(style=Pack(direction=ROW, margin=5))
+        search_prefs_label = toga.Label(
+            'Search Options:',
+            style=Pack(margin=(0, 5)),
+            tooltip='Configure tiered search matching algorithms and fallbacks'
+        )
+        self.search_prefs_label = search_prefs_label
+        initial_fuzzy = self.is_fuzzy_search_enabled()
+        self.fuzzy_search_checkbox = toga.Switch(
+            'Fuzzy Match',
+            value=initial_fuzzy,
+            on_change=self.on_fuzzy_search_change,
+            style=Pack(margin=5),
+            tooltip='Enable ranked fuzzy/subsequence search to tolerate typos (e.g. ballacer -> ballecer)'
+        )
+        initial_phonetic = self.is_phonetic_search_enabled()
+        self.phonetic_search_checkbox = toga.Switch(
+            'Phonetic Match',
+            value=initial_phonetic,
+            on_change=self.on_phonetic_search_change,
+            style=Pack(margin=5),
+            tooltip='Enable Double Metaphone phonetic matching for sound-alike words'
+        )
+        search_prefs_box.add(search_prefs_label)
+        search_prefs_box.add(self.fuzzy_search_checkbox)
+        search_prefs_box.add(self.phonetic_search_checkbox)
+
         # Add all sections to settings box
         settings_box.add(app_id_box)
         settings_box.add(app_key_box)
@@ -2277,6 +2383,7 @@ class TwitTUIForm(toga.App):
         settings_box.add(dest_box)
         settings_box.add(block_box)
         settings_box.add(streamer_box)
+        settings_box.add(search_prefs_box)
 
         preferences_button_box = toga.Box(style=Pack(direction=ROW, margin=5))
         self.preferences_close_button = toga.Button(
@@ -5171,6 +5278,9 @@ class TwitTUIForm(toga.App):
         except Exception as e:
             print(f"Error searching API: {e}")
 
+        fuzzy_enabled = self.is_fuzzy_search_enabled()
+        phonetic_enabled = self.is_phonetic_search_enabled()
+
         # Tier 2: Public Show RSS Feeds (feeds.twit.tv)
         if show_rss_list:
             try:
@@ -5180,7 +5290,7 @@ class TwitTUIForm(toga.App):
                     s = item.get('summary', '')
                     num = str(item.get('number', ''))
                     combined = f"{t} {d} {s} {num}".lower()
-                    if all(word in combined for word in query_words):
+                    if compute_match_score(query_str, combined, fuzzy_enabled=fuzzy_enabled, phonetic_enabled=phonetic_enabled) > 0.0:
                         ep = {
                             'title': t,
                             'number': num,
@@ -5214,7 +5324,7 @@ class TwitTUIForm(toga.App):
                         if selected_show.lower() not in t.lower() and not any(w.lower() in t.lower() for w in selected_show.split() if len(w) > 3):
                             continue
                     combined = f"{t} {d} {s} {num}".lower()
-                    if all(word in combined for word in query_words):
+                    if compute_match_score(query_str, combined, fuzzy_enabled=fuzzy_enabled, phonetic_enabled=phonetic_enabled) > 0.0:
                         ep = {
                             'title': t,
                             'number': num,
@@ -5243,10 +5353,10 @@ class TwitTUIForm(toga.App):
                 s = str(ep.get('summary', ''))
                 num = str(ep.get('number', ''))
                 combined = f"{t} {d} {s} {num}".lower()
-                if all(word in combined for word in query_words):
+                if compute_match_score(query_str, combined, fuzzy_enabled=fuzzy_enabled, phonetic_enabled=phonetic_enabled) > 0.0:
                     add_result(ep)
 
-        return results
+        return rank_and_filter_episodes(results, query_str, fuzzy_enabled=fuzzy_enabled, phonetic_enabled=phonetic_enabled)
 
     def _enable_table_horizontal_scroll(self) -> None:
         """Enable horizontal scrolling on the episodes table when titles or columns exceed available width."""
@@ -6023,14 +6133,13 @@ class TwitTUIForm(toga.App):
 
         token = self._next_episode_request()
         if getattr(self, '_search_catalog_show', None) == selected_show and getattr(self, '_search_catalog', None) is not None:
-            words = query.lower().split()
             self.current_page = 1
-            self.current_episodes = [
-                ep for ep in self._search_catalog
-                if all(word in ' '.join(str(ep.get(field) or '') for field in
-                                       ('title', 'description', 'summary', 'body', 'number')).lower()
-                       for word in words)
-            ]
+            self.current_episodes = rank_and_filter_episodes(
+                self._search_catalog,
+                query,
+                fuzzy_enabled=self.is_fuzzy_search_enabled(),
+                phonetic_enabled=self.is_phonetic_search_enabled()
+            )
             self.update_episodes_display()
             return
         worker = self._network_snapshot()
@@ -6040,7 +6149,12 @@ class TwitTUIForm(toga.App):
         def done(results):
             if token == self._episode_request and (self.search_input.value or '').strip() == query:
                 self.current_page = 1
-                self.current_episodes = results
+                self.current_episodes = rank_and_filter_episodes(
+                    results,
+                    query,
+                    fuzzy_enabled=self.is_fuzzy_search_enabled(),
+                    phonetic_enabled=self.is_phonetic_search_enabled()
+                )
                 self.update_episodes_display()
 
         self._run_network(lambda: worker.search_episodes(query, show_id=show_id, show_name=selected_show), done)
@@ -6112,11 +6226,12 @@ class TwitTUIForm(toga.App):
                             self._search_catalog_show = selected_show
                         query = (self.search_input.value or '').strip() if getattr(self, 'search_input', None) else ''
                         if query:
-                            words = query.lower().split()
-                            self.current_episodes = [ep for ep in episodes if all(
-                                word in ' '.join(str(ep.get(field) or '') for field in
-                                                 ('title', 'description', 'summary', 'body', 'number')).lower()
-                                for word in words)]
+                            self.current_episodes = rank_and_filter_episodes(
+                                episodes,
+                                query,
+                                fuzzy_enabled=self.is_fuzzy_search_enabled(),
+                                phonetic_enabled=self.is_phonetic_search_enabled()
+                            )
                         self.update_episodes_display()
                 finally:
                     if held:

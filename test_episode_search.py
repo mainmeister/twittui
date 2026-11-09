@@ -64,6 +64,64 @@ class TestEpisodeSearch(unittest.TestCase):
         form.on_search_press()
         form._run_network.assert_called_once()
 
+    def test_tiered_search_exact_fuzzy_and_phonetic_ranking(self):
+        form = TwitTUIForm('TestApp', 'org.twit.test')
+        form.show_combo = SimpleNamespace(value='Security Now')
+        form._search_catalog_show = 'Security Now'
+        episodes = [
+            {'title': 'Security Now 661', 'description': 'Leo is away, Father Robert Ballecer guest hosts.', 'number': '661'},
+            {'title': 'Security Now 600', 'description': 'Leo Laporte and Steve Gibson discuss cryptography.', 'number': '600'},
+            {'title': 'Security Now 462', 'description': 'Father Robert Ballecer hosts Cloud Storage Solutions.', 'number': '462'},
+        ]
+        form._search_catalog = episodes
+        form.current_episodes = episodes
+        form.update_episodes_display = MagicMock()
+        form._cancel_hover_timer = MagicMock()
+        form._run_network = MagicMock()
+
+        # 1. Fuzzy search with typo 'ballacer' matches 'ballecer'
+        form.search_input = SimpleNamespace(value='ballacer')
+        form.on_search_press()
+        self.assertEqual(len(form.current_episodes), 2)
+        self.assertEqual([ep['number'] for ep in form.current_episodes], ['661', '462'])
+
+        # 2. Exact match 'ballecer' yields exact matches at top priority
+        form.search_input = SimpleNamespace(value='ballecer')
+        form.on_search_press()
+        self.assertEqual(len(form.current_episodes), 2)
+
+        # 3. Disabling fuzzy and phonetic requires strict exact match
+        os.environ['TWITFUZZYSEARCH'] = '0'
+        os.environ['TWITPHONETICSEARCH'] = '0'
+        form.search_input = SimpleNamespace(value='ballacer')
+        form.on_search_press()
+        self.assertEqual(form.current_episodes, [])
+
+        form.search_input = SimpleNamespace(value='ballecer')
+        form.on_search_press()
+        self.assertEqual(len(form.current_episodes), 2)
+
+        # Re-enable defaults
+        os.environ['TWITFUZZYSEARCH'] = '1'
+        os.environ['TWITPHONETICSEARCH'] = '1'
+
+    def test_preferences_search_toggles(self):
+        form = TwitTUIForm('TestApp', 'org.twit.test')
+        self.assertTrue(form.is_fuzzy_search_enabled())
+        self.assertTrue(form.is_phonetic_search_enabled())
+
+        form.on_fuzzy_search_toggle()
+        self.assertFalse(form.is_fuzzy_search_enabled())
+
+        form.on_fuzzy_search_toggle()
+        self.assertTrue(form.is_fuzzy_search_enabled())
+
+        form.on_phonetic_search_toggle()
+        self.assertFalse(form.is_phonetic_search_enabled())
+
+        form.on_phonetic_search_toggle()
+        self.assertTrue(form.is_phonetic_search_enabled())
+
 
 if __name__ == '__main__':
     unittest.main()
