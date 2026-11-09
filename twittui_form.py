@@ -29,7 +29,7 @@ import hashlib
 import http.server
 from dotenv import find_dotenv, load_dotenv, set_key
 
-from tiered_search import rank_and_filter_episodes, compute_match_score
+from tiered_search import rank_and_filter_episodes, compute_match_score, find_match_context, MatchContext
 
 try:
     import defusedxml.ElementTree as DefusedET
@@ -769,7 +769,7 @@ class TwitTUIForm(toga.App):
         return SimpleNamespace(**{name: copy.deepcopy(getattr(target, name))
                                   for name in ('episode_data', 'episode', 'number', 'title',
                                                'date', 'length', 'duration', 'size', 'file_size',
-                                               'show', 'media_url') if hasattr(target, name)})
+                                               'show', 'media_url', '_search_match_context', 'match_context') if hasattr(target, name)})
 
     def _run_network(self, work, done):
         async def run():
@@ -5680,6 +5680,27 @@ class TwitTUIForm(toga.App):
         desc_raw = ep_data.get('description') or ep_data.get('summary') or ep_data.get('body') or ep_data.get('teaser') or ep_data.get('snippet') or ''
         desc_clean = self.clean_html_text(desc_raw)
 
+        # Collect Search Match Context if present or if active search filter is applied
+        match_ctx = None
+        if hasattr(target, '_search_match_context') and getattr(target, '_search_match_context'):
+            match_ctx = getattr(target, '_search_match_context')
+        elif isinstance(target, dict) and target.get('_search_match_context'):
+            match_ctx = target.get('_search_match_context')
+        elif hasattr(target, 'match_context') and getattr(target, 'match_context'):
+            match_ctx = getattr(target, 'match_context')
+        elif isinstance(target, dict) and target.get('match_context'):
+            match_ctx = target.get('match_context')
+        elif 'episode_data' in ep_data and isinstance(ep_data['episode_data'], dict) and ep_data['episode_data'].get('_search_match_context'):
+            match_ctx = ep_data['episode_data'].get('_search_match_context')
+        elif hasattr(target, 'episode_data') and hasattr(target.episode_data, '_search_match_context') and getattr(target.episode_data, '_search_match_context'):
+            match_ctx = getattr(target.episode_data, '_search_match_context')
+
+        if not match_ctx and hasattr(self, 'search_input') and self.search_input and (self.search_input.value or '').strip():
+            query = self.search_input.value.strip()
+            fuzzy = self.is_fuzzy_search_enabled() if hasattr(self, 'is_fuzzy_search_enabled') else True
+            phonetic = self.is_phonetic_search_enabled() if hasattr(self, 'is_phonetic_search_enabled') else True
+            match_ctx = find_match_context(target, query, fuzzy_enabled=fuzzy, phonetic_enabled=phonetic)
+
         header_title = f"Episode Details: {ep_title}" if ep_title else "Episode Details"
         if len(header_title) > 60:
             header_title = header_title[:57] + "..."
@@ -5702,6 +5723,8 @@ class TwitTUIForm(toga.App):
             'people': people_list,
             'topics': topics_list,
             'description': desc_clean,
+            'match_context': match_ctx,
+            '_search_match_context': match_ctx,
             'raw_data': ep_data
         }
 
@@ -5725,6 +5748,22 @@ class TwitTUIForm(toga.App):
         desc_clean = meta['description']
 
         lines = []
+
+        match_ctx = meta.get('match_context') or meta.get('_search_match_context')
+        if match_ctx:
+            f_name = getattr(match_ctx, 'field_name', '') or (match_ctx.get('field_name', '') if isinstance(match_ctx, dict) else '')
+            m_tier = getattr(match_ctx, 'match_tier', '') or (match_ctx.get('match_tier', '') if isinstance(match_ctx, dict) else '')
+            m_snip = getattr(match_ctx, 'snippet', '') or (match_ctx.get('snippet', '') if isinstance(match_ctx, dict) else '')
+            if f_name or m_tier or m_snip:
+                lines.append("[🔍 Search Match]")
+                if f_name:
+                    lines.append(f"• Field: {f_name}")
+                if m_tier:
+                    lines.append(f"• Match Type: {m_tier}")
+                if m_snip:
+                    lines.append(f"• Snippet: {m_snip}")
+                lines.append("")
+
         if show:
             lines.append(f"Show: {show}")
         if ep_num and str(ep_num) != 'Unknown Number':
@@ -5818,6 +5857,23 @@ class TwitTUIForm(toga.App):
 
                 content_box = toga.Box(style=Pack(direction=COLUMN, margin=10))
 
+                # Search Match Summary Callout Box
+                match_ctx = meta.get('match_context') or meta.get('_search_match_context')
+                if match_ctx:
+                    f_name = getattr(match_ctx, 'field_name', '') or (match_ctx.get('field_name', '') if isinstance(match_ctx, dict) else '')
+                    m_tier = getattr(match_ctx, 'match_tier', '') or (match_ctx.get('match_tier', '') if isinstance(match_ctx, dict) else '')
+                    m_snip = getattr(match_ctx, 'snippet', '') or (match_ctx.get('snippet', '') if isinstance(match_ctx, dict) else '')
+                    if f_name or m_tier or m_snip:
+                        match_box = toga.Box(style=Pack(direction=COLUMN, margin_bottom=8))
+                        match_box.add(toga.Label("🔍 Search Match", style=Pack(font_size=11, font_weight='bold', margin_bottom=3), tooltip='Search match summary'))
+                        if f_name:
+                            match_box.add(toga.Label(f"• Field: {f_name}", style=Pack(margin_bottom=2), tooltip=f'Matched in {f_name}'))
+                        if m_tier:
+                            match_box.add(toga.Label(f"• Match Type: {m_tier}", style=Pack(margin_bottom=2), tooltip=f'Match type: {m_tier}'))
+                        if m_snip:
+                            match_box.add(toga.Label(f"• Snippet: {m_snip}", style=Pack(margin_bottom=2), tooltip='Matching text excerpt'))
+                        content_box.add(match_box)
+
                 # Title
                 ep_title = meta.get('title') or ''
                 if ep_title:
@@ -5906,6 +5962,21 @@ class TwitTUIForm(toga.App):
                         tooltip='Episode description and show notes'
                     )
                     content_box.add(desc_input)
+
+                    if match_ctx:
+                        f_name = getattr(match_ctx, 'field_name', '') or (match_ctx.get('field_name', '') if isinstance(match_ctx, dict) else '')
+                        char_offset = getattr(match_ctx, 'char_offset', 0) or (match_ctx.get('char_offset', 0) if isinstance(match_ctx, dict) else 0)
+                        if 'description' in str(f_name).lower() and char_offset > 0:
+                            try:
+                                if hasattr(desc_input, '_impl') and hasattr(desc_input._impl, 'native'):
+                                    native = desc_input._impl.native
+                                    if hasattr(native, 'get_buffer'):
+                                        buf = native.get_buffer()
+                                        iter_pos = buf.get_iter_at_offset(char_offset)
+                                        buf.place_cursor(iter_pos)
+                                        native.scroll_to_iter(iter_pos, 0.1, True, 0.0, 0.2)
+                            except Exception:
+                                pass
 
                 # Bottom Action Bar
                 btn_box = toga.Box(style=Pack(direction=ROW, margin_top=6, align_items='center'))
@@ -6104,7 +6175,7 @@ class TwitTUIForm(toga.App):
             size_val = episode.get('size') or episode.get('file_size') or episode.get('enclosure_length') or self.extract_size(episode) or ''
             formatted_size = self.format_file_size(size_val) if size_val else ''
             media_url = self.extract_media_url(episode) or episode.get('media_url') or ''
-            table_data.append({
+            row_dict = {
                 'episode': str(number),
                 'title': str(title),
                 'date': str(date),
@@ -6114,7 +6185,12 @@ class TwitTUIForm(toga.App):
                 'file_size': str(formatted_size),
                 'media_url': media_url,
                 'episode_data': episode
-            })
+            }
+            if isinstance(episode, dict) and '_search_match_context' in episode:
+                row_dict['_search_match_context'] = episode['_search_match_context']
+            elif hasattr(episode, '_search_match_context'):
+                row_dict['_search_match_context'] = getattr(episode, '_search_match_context')
+            table_data.append(row_dict)
 
         self.episodes_list.data = table_data
         self._enable_table_horizontal_scroll()

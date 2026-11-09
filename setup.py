@@ -8,7 +8,15 @@ setup(
     long_description=open("README.md", encoding="utf-8").read() if os.path.exists("README.md") else "",
     long_description_content_type="text/markdown",
     author="TWiT Community",
-    py_modules=["main", "installer", "twittui_form", "toga_textual_backend", "generate_icon"],
+    py_modules=[
+        "main",
+        "installer",
+        "twittui_form",
+        "toga_textual_backend",
+        "generate_icon",
+        "tiered_search",
+        "double_metaphone",
+    ],
     entry_points={
         "console_scripts": [
             "twittui=main:main",

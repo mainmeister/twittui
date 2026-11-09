@@ -1,9 +1,11 @@
 README.md
+double_metaphone.py
 generate_icon.py
 installer.py
 main.py
 pyproject.toml
 setup.py
+tiered_search.py
 toga_textual_backend.py
 twittui_form.py
 twittui.egg-info/PKG-INFO

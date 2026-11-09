@@ -1,5 +1,7 @@
+double_metaphone
 generate_icon
 installer
 main
+tiered_search
 toga_textual_backend
 twittui_form

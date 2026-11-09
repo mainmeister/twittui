@@ -608,6 +608,8 @@ The desktop launcher file registers TwitTUI in system application menus:
 `TwitTUIForm` extends `toga.App` and declares a declarative widget layout inside `startup()`. Layout geometry is managed through `travertino` / `toga.style.Pack` flexbox rules.
 
 #### Application Menu Commands
+- **Application Menu (`toga.Group.APP`)**:
+  - **Preferences**: Opens the modal Preferences window containing the API credentials, Club TWiT URL, download destination, block size, rate limit, and streamer settings.
 - **Help Menu (`toga.Group.HELP`)**:
   - **View README Documentation**: Opens the integrated documentation viewer via the **Hybrid Resilient Pattern**. Converts Markdown to fully sanitized HTML (stripping malicious tags, event handlers, and dangerous URI schemes) and displays it in an in-app `toga.WebView` window with automatic fallback to the system default web browser. Features smooth Table of Contents anchor navigation and a persistent floating "↑ Table of Contents" button.
   - **View API Specification (twittv.apib)**: Opens the complete API Blueprint specification for the TWiT.tv REST API v1.0 formatted and rendered identically to the README documentation viewer with HTML sanitization, anchor navigation, and hybrid viewer fallback.
@@ -641,32 +643,35 @@ toga.MainWindow (title='TWIT.tv TUI')
     │   ├── toga.Button ('Stream', on_press=on_stream_press)
     │   ├── toga.Button ('Cancel', on_press=on_cancel_press)
     │   └── toga.Button ('Close', on_press=on_close_press)
-    └── toga.Box (direction=COLUMN, margin=5) [settings_box]
-        ├── toga.Box (direction=ROW) [app_id_box]
-        │   ├── toga.Label ('API Application ID:')
-        │   └── toga.TextInput (value=initial_app_id) [app_id_input]
-        ├── toga.Box (direction=ROW) [app_key_box]
-        │   ├── toga.Label ('API Application Key:')
-        │   ├── toga.PasswordInput (value=initial_app_key) [app_key_input]
-        │   └── toga.Button ('Test API', on_press=on_test_api_press)
-        ├── toga.Box (direction=ROW) [url_box]
-        │   ├── toga.Label ('TWIT Club URL:')
-        │   ├── toga.Label ('https://twit.memberfulcontent.com/rss/9041?auth=')
-        │   ├── toga.PasswordInput (value=initial_url_key) [url_input]
-        │   └── toga.Button ('Show', on_press=on_show_club_url_press)
-        ├── toga.Box (direction=ROW) [dest_box]
-        │   ├── toga.Label ('Download Destination:')
-        │   ├── toga.TextInput (value=initial_dest) [dest_input]
-        │   ├── toga.Button ('Browse', on_press=on_browse_press)
-        │   ├── toga.Button ('Open', on_press=on_open_destination_press)
-        │   └── toga.Switch ('Show Folders', on_change=on_show_folders_change) [show_folders_checkbox]
-        ├── toga.Box (direction=ROW) [block_box]
-        │   ├── toga.Label ('Block Size:')
-        │   └── toga.TextInput (value='8192') [block_input]
-        └── toga.Box (direction=ROW) [streamer_box]
-            ├── toga.Label ('Streamer:')
-            └── toga.TextInput (value='env LC_ALL=C vlc %f') [streamer_input]
     └── toga.ProgressBar (max=100.0, value=0.0) [progress_bar]
+
+toga.Window (title='Preferences', modal and transient to the main window)
+└── toga.Box (direction=COLUMN, margin=5) [settings_box]
+    ├── toga.Box (direction=ROW) [app_id_box]
+    │   ├── toga.Label ('API Application ID:')
+    │   └── toga.TextInput (value=initial_app_id) [app_id_input]
+    ├── toga.Box (direction=ROW) [app_key_box]
+    │   ├── toga.Label ('API Application Key:')
+    │   ├── toga.PasswordInput (value=initial_app_key) [app_key_input]
+    │   └── toga.Button ('Test API', on_press=on_test_api_press)
+    ├── toga.Box (direction=ROW) [url_box]
+    │   ├── toga.Label ('TWIT Club URL:')
+    │   ├── toga.Label ('https://twit.memberfulcontent.com/rss/9041?auth=')
+    │   ├── toga.PasswordInput (value=initial_url_key) [url_input]
+    │   └── toga.Button ('Show', on_press=on_show_club_url_press)
+    ├── toga.Box (direction=ROW) [dest_box]
+    │   ├── toga.Label ('Download Destination:')
+    │   ├── toga.TextInput (value=initial_dest) [dest_input]
+    │   ├── toga.Button ('Browse', on_press=on_browse_press)
+    │   ├── toga.Button ('Open', on_press=on_open_destination_press)
+    │   └── toga.Switch ('Show Folders', on_change=on_show_folders_change) [show_folders_checkbox]
+    ├── toga.Box (direction=ROW) [block_box]
+    │   ├── toga.Label ('Block Size:')
+    │   └── toga.TextInput (value='8192') [block_input]
+    ├── toga.Box (direction=ROW) [streamer_box]
+    │   ├── toga.Label ('Streamer:')
+    │   └── toga.TextInput (value='env LC_ALL=C vlc %f') [streamer_input]
+    └── toga.Button ('Close', on_press=on_preferences_close_press) [preferences_close_button]
 ```
 
 ---
