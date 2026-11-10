@@ -118,6 +118,8 @@ class TestMainFormUITooltips(unittest.TestCase):
             'date_radio': self.form.date_radio,
             'episode_radio': self.form.episode_radio,
             'title_radio': self.form.title_radio,
+            'length_radio': self.form.length_radio,
+            'size_radio': self.form.size_radio,
             'sort_order_button': self.form.sort_order_button,
             'audio_only_checkbox': self.form.audio_only_checkbox,
             'episodes_label': self.form.episodes_label,
@@ -216,9 +218,17 @@ class TestMainFormUITooltips(unittest.TestCase):
             self.assertIn("(active)", self.form.title_radio.tooltip)
             self.assertNotIn("(active)", self.form.episode_radio.tooltip)
 
+            self.form.on_sort_button_press(self.form.length_radio)
+            self.assertIn("(active)", self.form.length_radio.tooltip)
+            self.assertNotIn("(active)", self.form.title_radio.tooltip)
+
+            self.form.on_sort_button_press(self.form.size_radio)
+            self.assertIn("(active)", self.form.size_radio.tooltip)
+            self.assertNotIn("(active)", self.form.length_radio.tooltip)
+
             self.form.on_sort_button_press(self.form.date_radio)
             self.assertIn("(active)", self.form.date_radio.tooltip)
-            self.assertNotIn("(active)", self.form.title_radio.tooltip)
+            self.assertNotIn("(active)", self.form.size_radio.tooltip)
 
     def test_form_set_and_get_tooltip_helpers(self) -> None:
         """Verify set_tooltip and get_tooltip form helper methods."""
@@ -226,6 +236,12 @@ class TestMainFormUITooltips(unittest.TestCase):
         self.form.set_tooltip(dummy_btn, "Custom Helper Tooltip")
         self.assertEqual(self.form.get_tooltip(dummy_btn), "Custom Helper Tooltip")
         self.assertEqual(dummy_btn.tooltip, "Custom Helper Tooltip")
+
+    def test_api_documentation_url_in_help_menu(self) -> None:
+        """Verify Help menu API documentation command invokes browser with updated URL."""
+        with patch("webbrowser.open") as mock_open:
+            self.form.on_open_api_key_url()
+            mock_open.assert_called_once_with("https://apidocs.twit.tv/")
 
 
 class TestModalAndDialogTooltips(unittest.TestCase):

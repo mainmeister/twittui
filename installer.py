@@ -259,6 +259,8 @@ def build_executable(
         cmd.append(f"--collect-all={pkg}")
 
     cmd.append("--hidden-import=toga_textual_backend")
+    cmd.append("--hidden-import=tiered_search")
+    cmd.append("--hidden-import=double_metaphone")
     cmd.append("--hidden-import=gi.overrides.Gtk")
     cmd.append("--hidden-import=gi.overrides.Pango")
     cmd.append(main_script)

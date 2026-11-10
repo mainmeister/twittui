@@ -376,6 +376,9 @@ class TestInstallOption(unittest.TestCase):
             build_executable(project_root=tmp_dir, output_dir=dist_dir, python_executable="python_test")
             cmd = mock_run.call_args[0][0]
             self.assertIn("--collect-all=toga_gtk", cmd)
+            self.assertIn("--hidden-import=tiered_search", cmd)
+            self.assertIn("--hidden-import=double_metaphone", cmd)
+            self.assertIn("--hidden-import=toga_textual_backend", cmd)
 
     @patch("installer.check_python_shared_library", return_value=(True, ""))
     @patch("subprocess.run")
@@ -485,6 +488,17 @@ class TestInstallOption(unittest.TestCase):
                 build_executable(project_root=tmp_dir, python_executable="python_test")
             self.assertIn("--enable-shared", str(ctx.exception))
             self.assertIn("PYTHON_CONFIGURE_OPTS", str(ctx.exception))
+
+
+    def test_setup_py_modules_includes_all_source_modules(self) -> None:
+        """Verify setup.py includes all necessary Python modules including tiered_search and double_metaphone."""
+        setup_path = os.path.join(os.path.dirname(__file__), "setup.py")
+        with open(setup_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn('"tiered_search"', content)
+        self.assertIn('"double_metaphone"', content)
+        self.assertIn('"twittui_form"', content)
+        self.assertIn('"toga_textual_backend"', content)
 
 
 if __name__ == "__main__":
