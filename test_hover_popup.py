@@ -134,6 +134,121 @@ class TestHoverPopup(unittest.TestCase):
         args, kwargs = self.form.main_window.info_dialog.call_args
         self.assertIn('TUI Episode', args[1])
 
+    def test_hover_popup_with_phonetic_search_match_shows_phonetic_summary(self):
+        ep_data = {
+            'number': '520',
+            'title': 'Security Now 520',
+            'date': '2015-08-11',
+            'show_name': 'Security Now',
+            'description': 'Steve is away this week, so Fr. Robert Ballecer joins Leo Laporte to discuss security vulnerabilities.'
+        }
+        target = SimpleNamespace(episode_data=ep_data, title='Security Now 520', episode='520', show='Security Now')
+        self.form.search_input = MagicMock(value='ballacer')
+
+        meta = self.form.extract_episode_metadata_fields(target)
+        self.assertIsNotNone(meta.get('match_context'))
+        self.assertEqual(meta['match_context'].field_name, 'Description / Show Notes')
+        self.assertIn('Phonetic Match', meta['match_context'].match_tier)
+        self.assertIn('Ballecer', meta['match_context'].snippet)
+
+        _, message = self.form.format_episode_metadata(target, meta=meta)
+        self.assertIn('[🔍 Search Match]', message)
+        self.assertIn('• Field: Description / Show Notes', message)
+        self.assertIn('• Match Type: Phonetic Match ("ballacer" ≈ "Ballecer")', message)
+        self.assertIn('Robert Ballecer', message)
+
+    def test_hover_popup_with_exact_search_match_shows_exact_summary(self):
+        ep_data = {
+            'number': '1049',
+            'title': 'MacBreak Weekly 1049: Stagefright Alert',
+            'date': '2026-11-03',
+            'show_name': 'MacBreak Weekly',
+            'description': 'Discussion of Apple silicon updates and new MacBooks.'
+        }
+        target = SimpleNamespace(episode_data=ep_data, title=ep_data['title'], episode='1049', show='MacBreak Weekly')
+        self.form.search_input = MagicMock(value='Stagefright')
+
+        meta = self.form.extract_episode_metadata_fields(target)
+        self.assertIsNotNone(meta.get('match_context'))
+        self.assertEqual(meta['match_context'].field_name, 'Title')
+        self.assertEqual(meta['match_context'].match_tier, 'Exact Match')
+
+        _, message = self.form.format_episode_metadata(target, meta=meta)
+        self.assertIn('[🔍 Search Match]', message)
+        self.assertIn('• Field: Title', message)
+        self.assertIn('• Match Type: Exact Match', message)
+        self.assertIn('Stagefright', message)
+
+    def test_hover_popup_with_fuzzy_search_match_shows_fuzzy_similarity(self):
+        ep_data = {
+            'number': '800',
+            'title': 'This Week in Tech 800: Network Security Update',
+            'date': '2021-04-12',
+            'show_name': 'This Week in Tech',
+            'description': 'Exploring computer security and firewall architectures.'
+        }
+        target = SimpleNamespace(episode_data=ep_data, title=ep_data['title'], episode='800', show='This Week in Tech')
+        self.form.search_input = MagicMock(value='aecurity')
+
+        meta = self.form.extract_episode_metadata_fields(target)
+        self.assertIsNotNone(meta.get('match_context'))
+        self.assertIn('Fuzzy Match', meta['match_context'].match_tier)
+        self.assertIn('security', meta['match_context'].snippet.lower())
+
+        _, message = self.form.format_episode_metadata(target, meta=meta)
+        self.assertIn('[🔍 Search Match]', message)
+        self.assertIn('• Match Type: Fuzzy Match', message)
+
+    def test_hover_popup_without_search_does_not_show_match_summary(self):
+        ep_data = {
+            'number': '100',
+            'title': 'Standard Episode',
+            'date': '2026-01-01',
+            'show_name': 'Standard Show',
+            'description': 'Normal description without active search.'
+        }
+        target = SimpleNamespace(episode_data=ep_data, title=ep_data['title'], episode='100', show='Standard Show')
+        self.form.search_input = MagicMock(value='')
+
+        meta = self.form.extract_episode_metadata_fields(target)
+        self.assertIsNone(meta.get('match_context'))
+
+        _, message = self.form.format_episode_metadata(target, meta=meta)
+        self.assertNotIn('[🔍 Search Match]', message)
+
+    def test_gtk_custom_window_includes_search_match_callout_box(self):
+        ep_data = {
+            'number': '520',
+            'title': 'Security Now 520',
+            'date': '2015-08-11',
+            'show_name': 'Security Now',
+            'description': 'Steve is away this week, so Fr. Robert Ballecer joins Leo Laporte.'
+        }
+        target = SimpleNamespace(episode_data=ep_data, title='Security Now 520', episode='520', show='Security Now')
+        self.form.search_input = MagicMock(value='ballacer')
+        fake_gtk_app = SimpleNamespace(__class__=SimpleNamespace(__module__='toga_gtk.app'))
+        self.form._impl = SimpleNamespace(native=fake_gtk_app)
+        os.environ['TOGA_BACKEND'] = 'toga_gtk'
+
+        with patch('twittui_form.toga.Window') as mock_win_cls:
+            mock_win = MagicMock()
+            mock_win_cls.return_value = mock_win
+
+            self.form.show_episode_metadata_dialog(target)
+
+            self.assertIsNotNone(self.form._metadata_window)
+            mock_win.show.assert_called_once()
+            content = mock_win.content
+            self.assertIsNotNone(content)
+            labels = [c.text for c in content.children if isinstance(c, toga.Label)]
+            box_labels = []
+            for c in content.children:
+                if isinstance(c, toga.Box):
+                    box_labels.extend([child.text for child in c.children if isinstance(child, toga.Label)])
+            all_labels = labels + box_labels
+            self.assertTrue(any('🔍 Search Match' in l for l in all_labels))
+            self.assertTrue(any('Phonetic Match' in l for l in all_labels))
+
 
 if __name__ == '__main__':
     unittest.main()
