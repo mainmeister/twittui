@@ -118,18 +118,95 @@ def fzf_subsequence_score(query: str, target: str) -> float:
     return normalized
 
 
+def format_duration_str(val: Any) -> str:
+    """Helper to convert duration to formatted string (HH:MM:SS or MM:SS)."""
+    if val is None or val == '':
+        return ''
+    if isinstance(val, dict):
+        if 'runningTime' in val and val['runningTime']:
+            return format_duration_str(val['runningTime'])
+        if 'duration' in val and val['duration']:
+            return format_duration_str(val['duration'])
+        if 'hours' in val or 'minutes' in val or 'seconds' in val:
+            try:
+                h = int(val.get('hours') or 0)
+                m = int(val.get('minutes') or 0)
+                s = int(val.get('seconds') or 0)
+                if h > 0:
+                    return f"{h:02d}:{m:02d}:{s:02d}"
+                return f"{m:02d}:{s:02d}"
+            except Exception:
+                pass
+        return ''
+    s = str(val).strip()
+    if not s:
+        return ''
+    if s.isdigit():
+        total = int(s)
+        h = total // 3600
+        m = (total % 3600) // 60
+        sec = total % 60
+        if h > 0:
+            return f"{h:02d}:{m:02d}:{sec:02d}"
+        return f"{m:02d}:{sec:02d}"
+    return s
+
+
+def format_file_size_str(val: Any) -> str:
+    """Helper to convert size in bytes to human-readable string and byte string."""
+    if val is None or val == '':
+        return ''
+    if isinstance(val, dict):
+        for k in ['file_size', 'fileSize', 'size', 'length', 'enclosure_length', 'bytes']:
+            if k in val and val[k]:
+                res = format_file_size_str(val[k])
+                if res:
+                    return res
+        return ''
+    s = str(val).strip().replace(',', '')
+    if not s:
+        return ''
+    if s.isdigit():
+        num = int(s)
+        if num < 1024:
+            return f"{num} B ({num} bytes)"
+        elif num < 1024 * 1024:
+            kb = num / 1024.0
+            return f"{kb:.1f} KB ({num} bytes)"
+        elif num < 1024 * 1024 * 1024:
+            mb = num / (1024.0 * 1024.0)
+            return f"{mb:.1f} MB ({num} bytes)"
+        else:
+            gb = num / (1024.0 * 1024.0 * 1024.0)
+            return f"{gb:.2f} GB ({num} bytes)"
+    return s
+
+
 def extract_searchable_text(episode: Any) -> str:
     """Extract and combine searchable text fields from an episode dict or object."""
     if not episode:
         return ""
     fields = []
-    keys = ('title', 'label', 'description', 'summary', 'body', 'number', 'episode', 'episodeNumber', 'show_notes', 'notes')
+    keys = (
+        'title', 'label', 'description', 'summary', 'body', 'number',
+        'episode', 'episodeNumber', 'show_notes', 'notes',
+        'length', 'duration', 'runningTime', 'running_time',
+        'size', 'file_size', 'fileSize', 'enclosure_length', 'bytes'
+    )
 
     if isinstance(episode, dict):
         for key in keys:
             val = episode.get(key)
             if val is not None and str(val).strip():
                 fields.append(str(val).strip())
+                if key in ('length', 'duration', 'runningTime', 'running_time'):
+                    dur_fmt = format_duration_str(val)
+                    if dur_fmt and dur_fmt not in fields:
+                        fields.append(dur_fmt)
+                elif key in ('size', 'file_size', 'fileSize', 'enclosure_length', 'bytes'):
+                    sz_fmt = format_file_size_str(val)
+                    if sz_fmt and sz_fmt not in fields:
+                        fields.append(sz_fmt)
         if '_embedded' in episode:
             embedded = episode.get('_embedded') or {}
             if isinstance(embedded, dict):
@@ -144,6 +221,14 @@ def extract_searchable_text(episode: Any) -> str:
             val = getattr(episode, key, None)
             if val is not None and str(val).strip():
                 fields.append(str(val).strip())
+                if key in ('length', 'duration', 'runningTime', 'running_time'):
+                    dur_fmt = format_duration_str(val)
+                    if dur_fmt and dur_fmt not in fields:
+                        fields.append(dur_fmt)
+                elif key in ('size', 'file_size', 'fileSize', 'enclosure_length', 'bytes'):
+                    sz_fmt = format_file_size_str(val)
+                    if sz_fmt and sz_fmt not in fields:
+                        fields.append(sz_fmt)
         if hasattr(episode, 'episode_data') and isinstance(episode.episode_data, dict):
             fields.append(extract_searchable_text(episode.episode_data))
 
@@ -354,6 +439,28 @@ def get_episode_fields(episode: Any) -> List[Tuple[str, str]]:
     if num:
         fields.append(('Episode Number', str(num).strip()))
 
+    # 6. Length / Duration
+    dur_val = ep_data.get('length') or ep_data.get('duration') or ep_data.get('runningTime') or ep_data.get('running_time')
+    if dur_val:
+        dur_str = format_duration_str(dur_val)
+        raw_str = str(dur_val).strip()
+        if dur_str:
+            combined_dur = dur_str if dur_str == raw_str else f"{dur_str} {raw_str}"
+            fields.append(('Length', combined_dur))
+        elif raw_str:
+            fields.append(('Length', raw_str))
+
+    # 7. Size / Bytes
+    size_val = ep_data.get('size') or ep_data.get('file_size') or ep_data.get('fileSize') or ep_data.get('enclosure_length') or ep_data.get('bytes')
+    if size_val:
+        size_str = format_file_size_str(size_val)
+        raw_size_str = str(size_val).strip()
+        if size_str:
+            combined_size = size_str if size_str == raw_size_str else f"{size_str} {raw_size_str}"
+            fields.append(('Size', combined_size))
+        elif raw_size_str:
+            fields.append(('Size', raw_size_str))
+
     return fields
 
 
@@ -483,7 +590,9 @@ def find_match_context(
         'Hosts / Guests': 2,
         'Title': 1,
         'Topics': 0,
-        'Episode Number': 0
+        'Episode Number': 0,
+        'Length': 0,
+        'Size': 0
     }
     candidate_matches.sort(
         key=lambda mc: (mc.score, field_priority.get(mc.field_name, 0)),

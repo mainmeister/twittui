@@ -69,4 +69,4 @@ Application Menu Commands (under toga.Group.APP):
 Help Menu Commands (under toga.Group.HELP):
 - "View README Documentation": Opens an integrated hybrid documentation viewer window (toga.WebView) with HTML sanitization, Table of Contents anchor navigation, floating return button, and fallback to default system browser.
 - "View API Specification (twittv.apib)": Opens the TWiT REST API Blueprint specification in the sanitized hybrid document viewer.
-- "Get TWiT API Key": Opens the official TWiT 3Scale Developer Portal (https://twit-tv.3scale.net) in the default web browser.
+- "Get TWiT API Key": Opens the official TWiT API Documentation (https://apidocs.twit.tv/) in the default web browser.

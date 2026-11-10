@@ -347,6 +347,7 @@ class TestShowCatalog(unittest.TestCase):
         for page_count in (1, 2, 4, 6):
             with self.subTest(page_count=page_count):
                 get.reset_mock()
+                self.form.clear_cache()
                 pages = []
                 for page_number in range(1, page_count + 1):
                     shows = [{'label': f'Show {page_number}', 'id': page_number}]

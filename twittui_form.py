@@ -27,6 +27,8 @@ import html
 import requests
 import hashlib
 import http.server
+import json
+import sqlite3
 from dotenv import find_dotenv, load_dotenv, set_key
 
 from tiered_search import rank_and_filter_episodes, compute_match_score, find_match_context, MatchContext
@@ -147,6 +149,45 @@ def load_twittui_dotenv() -> None:
 
 # Ensure environment variables are loaded
 load_twittui_dotenv()
+
+
+def get_cache_db_path(app_id: str | None = None, custom_path: str | None = None) -> str:
+    """Resolve persistent SQLite cache database file path."""
+    if custom_path:
+        return custom_path
+    env_path = os.environ.get('TWITTUI_CACHE_DB') or os.environ.get('TWIT_CACHE_DB')
+    if env_path:
+        try:
+            parent = os.path.dirname(os.path.abspath(env_path))
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            return os.path.abspath(env_path)
+        except Exception:
+            return env_path
+
+    if app_id == 'org.twit.test':
+        return os.path.join(tempfile.gettempdir(), f"twittui_test_cache_{secrets.token_hex(8)}.db")
+
+    snap_data = os.environ.get('SNAP_USER_DATA') or os.environ.get('SNAP_USER_COMMON')
+    if snap_data:
+        try:
+            os.makedirs(snap_data, exist_ok=True)
+            return os.path.join(snap_data, 'twittui_cache.db')
+        except Exception:
+            pass
+
+    user_cache = os.path.join(os.path.expanduser('~'), '.cache', 'twittui')
+    try:
+        os.makedirs(user_cache, exist_ok=True)
+        return os.path.join(user_cache, 'twittui_cache.db')
+    except Exception:
+        pass
+
+    try:
+        candidate_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(candidate_dir, 'twittui_cache.db')
+    except Exception:
+        return os.path.abspath('twittui_cache.db')
 
 # Universal Toga Widget Tooltip Support
 def apply_tooltip_to_impl(impl: Any, tooltip_text: str | None) -> None:
@@ -364,8 +405,9 @@ MEMBERFUL_SHOW_FEEDS = {
 # Host and network-wide Club TWiT feeds for deeper episode discovery
 MEMBERFUL_HOST_FEEDS = [9073, 9072, 9053, 9052, 9075, 9074, 9069, 9068, 9162, 9161]
 
-# TWiT API 3Scale Developer Portal URL for obtaining API credentials
-TWIT_API_KEY_URL = 'https://twit-tv.3scale.net'
+# TWiT API Documentation URL
+TWIT_API_KEY_URL = 'https://apidocs.twit.tv/'
+TWIT_API_DOCS_URL = 'https://apidocs.twit.tv/'
 
 DEFAULT_SHOWS = [
     ("AI Inside", "846616"),
@@ -643,17 +685,25 @@ def resolve_app_icon() -> str | None:
 
 class TwitTUIForm(toga.App):
     def __init__(self, formal_name='TwitTUI', app_id='org.twit.twittui', **kwargs):
+        self._cache_db_path = kwargs.pop('cache_db_path', None) or get_cache_db_path(app_id=app_id)
         self.show_ids = {}
         self.show_active = {}
         self.show_date_bounds = {}
+        self._shows_cache = {}
         self._show_date_cache = {}
         self._show_names_by_display = {}
         self.current_episodes = []
         self.current_page = 1
+        self._episodes_cache = {}
+        self._triangulation_archive_cache = {}
+        self._episode_detail_cache = {}
+        self._media_webpage_cache = {}
+        self._api_search_cache = {}
         self._club_rss_cache = None
         self._memberful_feeds_cache = {}
         self._show_rss_cache = {}
         self._local_server = None
+        self._init_persistent_cache_db()
         self.show_label = None
         self.show_combo = None
         self.fetch_button = None
@@ -666,6 +716,8 @@ class TwitTUIForm(toga.App):
         self.date_radio = None
         self.episode_radio = None
         self.title_radio = None
+        self.length_radio = None
+        self.size_radio = None
         self.sort_order_button = None
         self.audio_only_checkbox = None
         self.episodes_label = None
@@ -743,23 +795,131 @@ class TwitTUIForm(toga.App):
             return widget.tooltip
         return get_widget_tooltip(widget)
 
+    def _init_persistent_cache_db(self, db_path: str | None = None) -> None:
+        """Initialize SQLite database for persistent caching and load cached data."""
+        if db_path:
+            self._cache_db_path = db_path
+        elif not getattr(self, '_cache_db_path', None):
+            self._cache_db_path = get_cache_db_path(getattr(self, 'app_id', None))
+
+        try:
+            parent = os.path.dirname(os.path.abspath(self._cache_db_path))
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+        except Exception:
+            pass
+
+        try:
+            with sqlite3.connect(self._cache_db_path, timeout=10.0) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS twittui_cache (
+                        category TEXT NOT NULL,
+                        cache_key TEXT NOT NULL,
+                        data_json TEXT NOT NULL,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        PRIMARY KEY (category, cache_key)
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_twittui_cache_category ON twittui_cache(category)"
+                )
+                conn.commit()
+
+                cursor = conn.cursor()
+                cursor.execute("SELECT category, cache_key, data_json FROM twittui_cache")
+                rows = cursor.fetchall()
+                for category, key, data_json in rows:
+                    try:
+                        val = json.loads(data_json)
+                        if category == 'shows':
+                            if self._shows_cache is None or not isinstance(self._shows_cache, dict):
+                                self._shows_cache = {}
+                            parts = key.split(':', 1)
+                            tuple_key = (parts[0], parts[1]) if len(parts) == 2 else (key, '')
+                            self._shows_cache[tuple_key] = val
+                        elif category == 'show_date_bounds':
+                            self._show_date_cache[key] = tuple(val) if isinstance(val, (list, tuple)) else val
+                        elif category == 'episodes':
+                            self._episodes_cache[key] = val
+                        elif category == 'episode_detail':
+                            self._episode_detail_cache[key] = val
+                        elif category == 'media_webpage':
+                            parts = key.split('|||', 1)
+                            clean_p = parts[0]
+                            audio_flag = bool(int(parts[1])) if len(parts) > 1 and parts[1].isdigit() else False
+                            self._media_webpage_cache[(clean_p, audio_flag)] = val
+                        elif category == 'triangulation_archive':
+                            parts = key.split('|||', 1)
+                            page_num = int(parts[0]) if parts[0].isdigit() else 1
+                            sort_flag = bool(int(parts[1])) if len(parts) > 1 and parts[1].isdigit() else False
+                            self._triangulation_archive_cache[(page_num, sort_flag)] = val
+                        elif category == 'api_search':
+                            self._api_search_cache[key] = val
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _save_to_persistent_cache(self, category: str, cache_key: str, data: Any) -> None:
+        """Save a cache entry dynamically to persistent SQLite database."""
+        db_path = getattr(self, '_cache_db_path', None) or get_cache_db_path(getattr(self, 'app_id', None))
+        try:
+            now = time.time()
+            data_json = json.dumps(data)
+            with sqlite3.connect(db_path, timeout=10.0) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO twittui_cache (category, cache_key, data_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(category, cache_key) DO UPDATE SET
+                        data_json = excluded.data_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (category, str(cache_key), data_json, now, now)
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+    def _delete_from_persistent_cache(self, category: str | None = None) -> None:
+        """Clear entries from persistent SQLite database."""
+        db_path = getattr(self, '_cache_db_path', None) or get_cache_db_path(getattr(self, 'app_id', None))
+        try:
+            with sqlite3.connect(db_path, timeout=10.0) as conn:
+                if category:
+                    conn.execute("DELETE FROM twittui_cache WHERE category = ?", (category,))
+                else:
+                    conn.execute("DELETE FROM twittui_cache")
+                conn.commit()
+        except Exception:
+            pass
+
     def _network_snapshot(self):
         """Capture UI state before running network helpers in a worker."""
         worker = object.__new__(type(self))
         worker.__dict__ = self.__dict__.copy()
         for name in ('show_combo', 'sort_order_button', 'date_radio', 'episode_radio',
-                     'title_radio', 'audio_only_checkbox', 'fuzzy_search_checkbox',
-                     'phonetic_search_checkbox', 'app_id_input', 'app_key_input',
-                     'url_input', 'api_status_label', 'block_input', 'rate_limit_input'):
+                     'title_radio', 'length_radio', 'size_radio', 'audio_only_checkbox',
+                     'fuzzy_search_checkbox', 'phonetic_search_checkbox', 'app_id_input',
+                     'app_key_input', 'url_input', 'api_status_label', 'block_input', 'rate_limit_input'):
             widget = getattr(self, name, None)
             if widget is not None:
                 values = {key: getattr(widget, key) for key in ('value', 'text')
                           if hasattr(widget, key)}
                 setattr(worker, name, SimpleNamespace(**values))
         for name in ('show_ids', 'show_active', 'show_date_bounds', '_show_date_cache',
-                     '_show_names_by_display', '_memberful_feeds_cache', '_show_rss_cache'):
-            if isinstance(getattr(worker, name, None), dict):
-                setattr(worker, name, getattr(worker, name).copy())
+                     '_show_names_by_display', '_memberful_feeds_cache', '_show_rss_cache',
+                     '_shows_cache', '_episodes_cache', '_triangulation_archive_cache',
+                     '_episode_detail_cache', '_media_webpage_cache', '_api_search_cache'):
+            val = getattr(worker, name, None)
+            if isinstance(val, dict):
+                setattr(worker, name, val.copy())
+            elif isinstance(val, list):
+                setattr(worker, name, list(val))
+        worker._cache_db_path = getattr(self, '_cache_db_path', None)
         worker.current_episodes = copy.deepcopy(getattr(self, 'current_episodes', None))
         return worker
 
@@ -912,6 +1072,8 @@ class TwitTUIForm(toga.App):
             }
             if getattr(self, '_show_date_cache', None) is not None:
                 self._show_date_cache.update(getattr(worker, '_show_date_cache', {}))
+            if getattr(worker, '_shows_cache', None) is not None:
+                self._shows_cache = getattr(worker, '_shows_cache', None)
             if getattr(self, 'api_status_label', None):
                 self.api_status_label.text = worker.api_status_label.text
             selection = self._selected_show_name()
@@ -1191,6 +1353,10 @@ class TwitTUIForm(toga.App):
             sort_by = 'number'
         elif hasattr(self, 'title_radio') and self.title_radio and '☑' in self.title_radio.text:
             sort_by = 'title'
+        elif hasattr(self, 'length_radio') and self.length_radio and '☑' in self.length_radio.text:
+            sort_by = 'length'
+        elif hasattr(self, 'size_radio') and self.size_radio and '☑' in self.size_radio.text:
+            sort_by = 'size'
 
         if sort_by == 'date':
             field = 'airingDate'
@@ -1198,10 +1364,93 @@ class TwitTUIForm(toga.App):
             field = 'episodeNumber'
         elif sort_by == 'title':
             field = 'label'
+        elif sort_by == 'length':
+            field = 'runningTime'
+        elif sort_by == 'size':
+            field = 'fileSize'
         else:
             field = 'airingDate'
 
         return field if is_asc else f"-{field}"
+
+    @staticmethod
+    def parse_duration_to_seconds(val) -> int:
+        """Parse duration value (seconds int/float, formatted HH:MM:SS / MM:SS string, or dict) to total seconds."""
+        if val is None or val == '':
+            return -1
+        if isinstance(val, (int, float)):
+            return int(val)
+        if isinstance(val, dict):
+            for k in ['runningTime', 'duration', 'length', 'running_time']:
+                if k in val and val[k]:
+                    res = TwitTUIForm.parse_duration_to_seconds(val[k])
+                    if res >= 0:
+                        return res
+            if 'hours' in val or 'minutes' in val or 'seconds' in val:
+                try:
+                    h = int(val.get('hours') or 0)
+                    m = int(val.get('minutes') or 0)
+                    s = int(val.get('seconds') or 0)
+                    return h * 3600 + m * 60 + s
+                except Exception:
+                    pass
+            return -1
+        s_val = str(val).strip()
+        if not s_val:
+            return -1
+        if s_val.isdigit():
+            return int(s_val)
+        if re.match(r'^\d+(\.\d+)?$', s_val):
+            return int(float(s_val))
+        if ':' in s_val:
+            parts = s_val.split(':')
+            try:
+                if len(parts) == 3:
+                    return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(float(parts[2]))
+                elif len(parts) == 2:
+                    return int(parts[0]) * 60 + int(float(parts[1]))
+                elif len(parts) == 4:
+                    return int(parts[0]) * 86400 + int(parts[1]) * 3600 + int(parts[2]) * 60 + int(float(parts[3]))
+            except Exception:
+                pass
+        return -1
+
+    @staticmethod
+    def parse_size_to_bytes(val) -> int:
+        """Parse file size (bytes int/float, string in bytes, formatted string e.g. '500 MB', or dict) to total bytes."""
+        if val is None or val == '':
+            return -1
+        if isinstance(val, (int, float)):
+            return int(val)
+        if isinstance(val, dict):
+            for k in ['file_size', 'fileSize', 'size', 'length', 'enclosure_length', 'bytes', 'content_length']:
+                if k in val and val[k]:
+                    res = TwitTUIForm.parse_size_to_bytes(val[k])
+                    if res >= 0:
+                        return res
+            return -1
+        s_val = str(val).strip().replace(',', '')
+        if not s_val:
+            return -1
+        if s_val.isdigit():
+            return int(s_val)
+        if re.match(r'^\d+(\.\d+)?$', s_val):
+            return int(float(s_val))
+        m = re.match(r'^([\d.]+)\s*([A-Za-z]+)$', s_val)
+        if m:
+            num = float(m.group(1))
+            unit = m.group(2).upper()
+            if unit in ('B', 'BYTE', 'BYTES'):
+                return int(num)
+            elif unit in ('KB', 'K', 'KIB'):
+                return int(num * 1024)
+            elif unit in ('MB', 'M', 'MIB'):
+                return int(num * 1024 * 1024)
+            elif unit in ('GB', 'G', 'GIB'):
+                return int(num * 1024 * 1024 * 1024)
+            elif unit in ('TB', 'T', 'TIB'):
+                return int(num * 1024 * 1024 * 1024 * 1024)
+        return -1
 
     @staticmethod
     def format_duration(val) -> str:
@@ -1741,6 +1990,13 @@ class TwitTUIForm(toga.App):
         if audio_only is None:
             audio_only = self.is_audio_only()
 
+        if not hasattr(self, '_media_webpage_cache') or not isinstance(self._media_webpage_cache, dict):
+            self._media_webpage_cache = {}
+
+        cache_key = (clean_path_or_url.strip(), bool(audio_only))
+        if cache_key in self._media_webpage_cache:
+            return self._media_webpage_cache[cache_key]
+
         clean_path = clean_path_or_url.strip()
         if clean_path.startswith('http://') or clean_path.startswith('https://'):
             url = clean_path
@@ -1752,24 +2008,37 @@ class TwitTUIForm(toga.App):
             if resp.status_code == 200:
                 html = resp.text
                 media_matches = re.findall(r'https?://[^\s\"\'<>]+\.(?:mp4|mp3|m4a|webm|ogg|m4v|aac)', html)
+                res = None
                 if audio_only:
                     for candidate in media_matches:
                         if self.is_valid_media_url(candidate) and self.is_audio_url(candidate):
-                            return candidate
-                    for candidate in media_matches:
-                        if self.is_valid_media_url(candidate):
-                            return candidate
+                            res = candidate
+                            break
+                    if not res:
+                        for candidate in media_matches:
+                            if self.is_valid_media_url(candidate):
+                                res = candidate
+                                break
                 else:
                     for candidate in media_matches:
                         if self.is_valid_media_url(candidate) and (candidate.endswith('.mp4') or 'video' in candidate or self.is_video_url(candidate)):
-                            return candidate
-                    for candidate in media_matches:
-                        if self.is_valid_media_url(candidate):
-                            return candidate
+                            res = candidate
+                            break
+                    if not res:
+                        for candidate in media_matches:
+                            if self.is_valid_media_url(candidate):
+                                res = candidate
+                                break
 
-                yt_matches = re.findall(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[a-zA-Z0-9_-]+', html)
-                if yt_matches and not audio_only:
-                    return yt_matches[0]
+                if not res:
+                    yt_matches = re.findall(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[a-zA-Z0-9_-]+', html)
+                    if yt_matches and not audio_only:
+                        res = yt_matches[0]
+
+                if res:
+                    self._media_webpage_cache[cache_key] = res
+                    self._save_to_persistent_cache('media_webpage', f"{clean_path_or_url.strip()}|||{1 if audio_only else 0}", res)
+                return res
         except Exception as e:
             print(f"Error scraping episode webpage {url}: {e}")
 
@@ -1793,6 +2062,15 @@ class TwitTUIForm(toga.App):
                 self.show_active = {name: None for name in self.show_ids}
                 self.show_date_bounds = {name: (None, None) for name in self.show_ids}
                 return sorted(self.show_ids, key=str.casefold)
+
+            cache_key = (app_id, app_key)
+            if getattr(self, '_shows_cache', None) is not None:
+                cached_data = self._shows_cache.get(cache_key) if isinstance(self._shows_cache, dict) else None
+                if cached_data is not None:
+                    self.show_ids = dict(cached_data.get('show_ids', {}))
+                    self.show_active = dict(cached_data.get('show_active', {}))
+                    self.show_date_bounds = dict(cached_data.get('show_date_bounds', {}))
+                    return list(cached_data.get('shows', []))
 
             headers = {
                 'Accept': 'application/json',
@@ -1855,6 +2133,16 @@ class TwitTUIForm(toga.App):
                 self.show_ids = show_ids
                 self.show_active = show_active
                 self.show_date_bounds = show_date_bounds
+                if not hasattr(self, '_shows_cache') or not isinstance(self._shows_cache, dict):
+                    self._shows_cache = {}
+                cached_shows_obj = {
+                    'shows': sorted(show_ids, key=str.casefold),
+                    'show_ids': dict(show_ids),
+                    'show_active': dict(show_active),
+                    'show_date_bounds': dict(show_date_bounds),
+                }
+                self._shows_cache[cache_key] = cached_shows_obj
+                self._save_to_persistent_cache('shows', f"{app_id}:{app_key}", cached_shows_obj)
                 set_status('')
                 return sorted(show_ids, key=str.casefold)
 
@@ -1875,6 +2163,12 @@ class TwitTUIForm(toga.App):
         """Fetch the earliest and latest episode dates from a show's public archive."""
         if not show_id:
             return None
+
+        show_id_str = str(show_id)
+        if getattr(self, '_show_date_cache', None) is not None and show_id_str in self._show_date_cache:
+            cached_bounds = self._show_date_cache[show_id_str]
+            if cached_bounds and cached_bounds[0] is not None and cached_bounds[1] is not None:
+                return cached_bounds
 
         def page_dates(page_html):
             dates = []
@@ -1909,7 +2203,11 @@ class TwitTUIForm(toga.App):
                 oldest_dates = page_dates(response.text)
                 if not oldest_dates:
                     return None
-            return min(oldest_dates), max(newest_dates)
+            result = (min(oldest_dates), max(newest_dates))
+            if getattr(self, '_show_date_cache', None) is not None:
+                self._show_date_cache[show_id_str] = result
+            self._save_to_persistent_cache('show_date_bounds', show_id_str, result)
+            return result
         except (requests.RequestException, ValueError, TypeError) as e:
             print(f"Error fetching show archive dates: {e}")
             return None
@@ -2018,6 +2316,18 @@ class TwitTUIForm(toga.App):
             style=Pack(margin=5),
             tooltip='Sort episodes alphabetically by title'
         )
+        self.length_radio = toga.Button(
+            '☐ Length',
+            on_press=self.on_sort_button_press,
+            style=Pack(margin=5),
+            tooltip='Sort episodes by duration/length'
+        )
+        self.size_radio = toga.Button(
+            '☐ Size',
+            on_press=self.on_sort_button_press,
+            style=Pack(margin=5),
+            tooltip='Sort episodes by file size'
+        )
         self.sort_order_button = toga.Button(
             '▼ Descending',
             on_press=self.on_sort_order_toggle,
@@ -2040,6 +2350,8 @@ class TwitTUIForm(toga.App):
         sort_box.add(self.date_radio)
         sort_box.add(self.episode_radio)
         sort_box.add(self.title_radio)
+        sort_box.add(self.length_radio)
+        sort_box.add(self.size_radio)
         sort_box.add(self.sort_order_button)
         sort_box.add(self.audio_only_checkbox)
 
@@ -2386,15 +2698,43 @@ class TwitTUIForm(toga.App):
         settings_box.add(search_prefs_box)
 
         preferences_button_box = toga.Box(style=Pack(direction=ROW, margin=5))
+        self.clear_cache_button = toga.Button(
+            'Clear Cache',
+            on_press=self.on_clear_cache_press,
+            style=Pack(margin=5),
+            tooltip='Clear all cached TWiT shows, episodes, and media metadata'
+        )
         self.preferences_close_button = toga.Button(
             'Close',
             on_press=self.on_preferences_close_press,
             style=Pack(margin=5),
             tooltip='Close Preferences window'
         )
+        preferences_button_box.add(self.clear_cache_button)
         preferences_button_box.add(self.preferences_close_button)
         settings_box.add(preferences_button_box)
         return settings_box
+
+    def clear_cache(self) -> None:
+        """Clear all cached data retrieved from the TWiT API or scraped from twit.tv."""
+        self._shows_cache = None
+        self._show_date_cache = {}
+        self.show_date_bounds = {}
+        self._episodes_cache = {}
+        self._triangulation_archive_cache = {}
+        self._episode_detail_cache = {}
+        self._media_webpage_cache = {}
+        self._api_search_cache = {}
+        self._show_rss_cache = {}
+        self._club_rss_cache = None
+        self._memberful_feeds_cache = {}
+        self._search_catalog = None
+        self._search_catalog_show = None
+        self._delete_from_persistent_cache()
+
+    def on_clear_cache_press(self, widget=None) -> None:
+        """Handler for Clear Cache button in Preferences window."""
+        self.clear_cache()
 
     def on_preferences_press(self, widget=None) -> None:
         self.show_preferences_window()
@@ -2859,7 +3199,7 @@ class TwitTUIForm(toga.App):
         self.show_apib_viewer()
 
     def open_api_key_url(self) -> None:
-        """Open the TWiT API key registration URL (3Scale Developer Portal) in the default browser."""
+        """Open the TWiT API documentation URL in the default browser."""
         try:
             webbrowser.open(TWIT_API_KEY_URL)
         except Exception as e:
@@ -2872,8 +3212,16 @@ class TwitTUIForm(toga.App):
                     pass
 
     def on_open_api_key_url(self, widget=None) -> None:
-        """Handler for Help menu command to open the TWiT API key registration URL."""
+        """Handler for Help menu command to open the TWiT API key registration / documentation URL."""
         self.open_api_key_url()
+
+    def open_api_docs_url(self) -> None:
+        """Open the TWiT API documentation URL in the default browser."""
+        self.open_api_key_url()
+
+    def on_open_api_docs(self, widget=None) -> None:
+        """Handler for Help menu command to open the TWiT API documentation URL."""
+        self.open_api_docs_url()
 
     def get_full_club_twit_url(self) -> str:
         """Construct or return the full Club TWiT URL from user input or environment."""
@@ -4860,8 +5208,69 @@ class TwitTUIForm(toga.App):
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _episode_cache_key(self, ep):
+        if not isinstance(ep, dict):
+            return None
+        ep_id = ep.get('id')
+        if ep_id is not None and str(ep_id).strip():
+            return ('id', str(ep_id).strip())
+        clean_path = ep.get('cleanPath') or ep.get('link')
+        if clean_path:
+            return ('path', str(clean_path).strip().lower())
+        guid = ep.get('guid')
+        if guid:
+            return ('guid', str(guid).strip())
+        num = str(ep.get('number', '')).strip()
+        title = str(ep.get('title', '')).strip().lower()
+        if num or title:
+            return ('num_title', num, title)
+        return None
+
+    def _parse_api_episodes(self, raw_episodes):
+        episodes = []
+        for episode in raw_episodes:
+            if not isinstance(episode, dict):
+                continue
+            episode_info = dict(episode)
+            title = episode.get('label') or episode.get('title')
+            if title:
+                episode_info['title'] = title
+            date = episode.get('airingDate') or episode.get('publishDate')
+            if date:
+                episode_info['date'] = date
+            number = episode.get('episodeNumber') or episode.get('number')
+            if number is not None:
+                episode_info['number'] = number
+
+            length = self.extract_duration(episode)
+            if length:
+                episode_info['length'] = length
+                episode_info['duration'] = length
+
+            size_val = self.extract_size(episode)
+            if size_val:
+                episode_info['size'] = size_val
+                episode_info['file_size'] = size_val
+                episode_info['enclosure_length'] = size_val
+
+            media_url = self.extract_media_url(episode)
+            if media_url:
+                episode_info['media_url'] = media_url
+
+            transcript_url = episode.get('transcript_url') or episode.get('transcript') or ''
+            if transcript_url:
+                episode_info['transcript_url'] = transcript_url
+
+            episodes.append(episode_info)
+        return episodes
+
     def fetch_episode_detail(self, episode_id):
         """Fetch full details for a single episode ID."""
+        if not hasattr(self, '_episode_detail_cache') or not isinstance(self._episode_detail_cache, dict):
+            self._episode_detail_cache = {}
+        ep_id_str = str(episode_id)
+        if ep_id_str in self._episode_detail_cache:
+            return self._episode_detail_cache[ep_id_str]
         try:
             load_twittui_dotenv()
             app_id = self.get_api_app_id()
@@ -4877,12 +5286,17 @@ class TwitTUIForm(toga.App):
             response = api_rate_limiter.get(url, headers=headers, timeout=8)
             if response.status_code == 200:
                 data = response.json()
+                detail = None
                 if 'episodes' in data and isinstance(data['episodes'], list) and data['episodes']:
-                    return data['episodes'][0]
+                    detail = data['episodes'][0]
                 elif 'episode' in data and isinstance(data['episode'], dict):
-                    return data['episode']
+                    detail = data['episode']
                 elif isinstance(data, dict):
-                    return data
+                    detail = data
+                if detail:
+                    self._episode_detail_cache[ep_id_str] = detail
+                    self._save_to_persistent_cache('episode_detail', ep_id_str, detail)
+                return detail
             return None
         except Exception as e:
             print(f"Error fetching episode details: {e}")
@@ -4890,6 +5304,14 @@ class TwitTUIForm(toga.App):
 
     def fetch_triangulation_archive(self, page):
         """Fetch one chronological page from TWiT's public Triangulation archive."""
+        if not hasattr(self, '_triangulation_archive_cache') or not isinstance(self._triangulation_archive_cache, dict):
+            self._triangulation_archive_cache = {}
+        page_key = (int(page or 1), bool(self.is_sort_ascending()))
+        if page_key in self._triangulation_archive_cache:
+            archive_data = self._triangulation_archive_cache[page_key]
+            self._episodes_all_loaded = archive_data.get('all_loaded', False)
+            return list(archive_data.get('episodes', []))
+
         try:
             params = {'filter[shows]': '1663', 'page': 1}
             response = requests.get('https://twit.tv/episodes', params=params, timeout=10)
@@ -4923,13 +5345,41 @@ class TwitTUIForm(toga.App):
             if not episodes:
                 return None
             self._episodes_all_loaded = page >= last_page
-            return list(reversed(episodes)) if self.is_sort_ascending() else episodes
+            result = list(reversed(episodes)) if self.is_sort_ascending() else episodes
+            self._triangulation_archive_cache[page_key] = {
+                'episodes': list(result),
+                'all_loaded': self._episodes_all_loaded
+            }
+            self._save_to_persistent_cache('triangulation_archive', f"{page_key[0]}|||{1 if page_key[1] else 0}", self._triangulation_archive_cache[page_key])
+            return result
         except (requests.RequestException, ValueError, TypeError) as e:
             print(f"Error fetching Triangulation archive: {e}")
             return None
 
     def fetch_episodes(self, show_id, page=1, sort=None):
         """Fetch episodes for a specific show ID, with fallback to Show and Club RSS feeds."""
+        if not hasattr(self, '_episodes_cache') or not isinstance(self._episodes_cache, dict):
+            self._episodes_cache = {}
+
+        show_id_key = str(show_id) if show_id is not None else ''
+        page_num = int(page or 1)
+        page_size = 50
+        cached_list = self._episodes_cache.get(show_id_key, [])
+
+        if page_num > 1 and cached_list and getattr(self, '_episodes_all_loaded', False):
+            start_idx = (page_num - 1) * page_size
+            end_idx = page_num * page_size
+            if start_idx < len(cached_list):
+                self._episodes_from_api = True
+                self._episodes_all_loaded = end_idx >= len(cached_list)
+                self._episode_api_status = ''
+                return cached_list[start_idx:end_idx]
+            else:
+                self._episodes_from_api = True
+                self._episodes_all_loaded = True
+                self._episode_api_status = ''
+                return []
+
         if page and int(page) > 1 and getattr(self, '_episodes_all_loaded', False):
             return []
         if not page or int(page) <= 1:
@@ -4942,6 +5392,7 @@ class TwitTUIForm(toga.App):
                 if str(sid) == str(show_id):
                     selected_show = name
                     break
+
         try:
             load_twittui_dotenv()
             app_id = self.get_api_app_id()
@@ -4959,6 +5410,24 @@ class TwitTUIForm(toga.App):
 
                 page = int(page or 1)
                 page_size = 50
+
+                cached_list = self._episodes_cache.get(show_id_key, [])
+                cached_keys = {self._episode_cache_key(e) for e in cached_list if self._episode_cache_key(e) is not None}
+
+                if page > 1 and cached_list and getattr(self, '_episodes_all_loaded', False):
+                    start_idx = (page - 1) * page_size
+                    end_idx = page * page_size
+                    if start_idx < len(cached_list):
+                        self._episodes_from_api = True
+                        self._episodes_all_loaded = end_idx >= len(cached_list)
+                        self._episode_api_status = ''
+                        return cached_list[start_idx:end_idx]
+                    else:
+                        self._episodes_from_api = True
+                        self._episodes_all_loaded = True
+                        self._episode_api_status = ''
+                        return []
+
                 url = f'https://twit.tv/api/v1.0/episodes?filter[shows]={show_id}&page={page}&range={page_size}'
                 if sort:
                     url += f'&sort={sort}'
@@ -4969,49 +5438,122 @@ class TwitTUIForm(toga.App):
                     if not isinstance(data, dict) or not isinstance(data.get('episodes'), list):
                         raise ValueError('Invalid episodes API response')
                     count = data.get('count')
-                    episodes = []
-                    if 'episodes' in data and isinstance(data['episodes'], list):
-                        for episode in data['episodes']:
-                            episode_info = dict(episode)
-                            title = episode.get('label') or episode.get('title')
-                            if title:
-                                episode_info['title'] = title
-                            date = episode.get('airingDate') or episode.get('publishDate')
-                            if date:
-                                episode_info['date'] = date
-                            number = episode.get('episodeNumber') or episode.get('number')
-                            if number is not None:
-                                episode_info['number'] = number
-
-                            length = self.extract_duration(episode)
-                            if length:
-                                episode_info['length'] = length
-                                episode_info['duration'] = length
-
-                            size_val = self.extract_size(episode)
-                            if size_val:
-                                episode_info['size'] = size_val
-                                episode_info['file_size'] = size_val
-                                episode_info['enclosure_length'] = size_val
-
-                            media_url = self.extract_media_url(episode)
-                            if media_url:
-                                episode_info['media_url'] = media_url
-
-                            transcript_url = episode.get('transcript_url') or episode.get('transcript') or ''
-                            if transcript_url:
-                                episode_info['transcript_url'] = transcript_url
-
-                            episodes.append(episode_info)
+                    episodes = self._parse_api_episodes(data.get('episodes', []))
 
                     self._episodes_from_api = True
                     next_link = (data.get('_links') or {}).get('next')
-                    self._episodes_all_loaded = not next_link and (
-                        int(count) <= page * page_size if str(count).isdigit()
-                        else len(episodes) < page_size
-                    )
-                    self._episode_api_status = ''
-                    return episodes
+
+                    if page == 1 and cached_list:
+                        hit_cache = False
+                        new_items = []
+                        for ep in episodes:
+                            k = self._episode_cache_key(ep)
+                            if k and k in cached_keys:
+                                hit_cache = True
+                                break
+                            new_items.append(ep)
+
+                        if hit_cache:
+                            merged = new_items + cached_list
+                        else:
+                            accumulated = list(episodes)
+                            curr_page = 2
+                            while next_link and not hit_cache:
+                                n_url = f'https://twit.tv/api/v1.0/episodes?filter[shows]={show_id}&page={curr_page}&range={page_size}'
+                                if sort:
+                                    n_url += f'&sort={sort}'
+                                n_resp = api_rate_limiter.get(n_url, headers=headers, timeout=(10, 60))
+                                if n_resp.status_code != 200:
+                                    break
+                                n_data = n_resp.json()
+                                if not isinstance(n_data, dict) or not isinstance(n_data.get('episodes'), list):
+                                    break
+                                page_eps = self._parse_api_episodes(n_data.get('episodes', []))
+                                for ep in page_eps:
+                                    k = self._episode_cache_key(ep)
+                                    if k and k in cached_keys:
+                                        hit_cache = True
+                                        break
+                                    accumulated.append(ep)
+                                next_link = (n_data.get('_links') or {}).get('next')
+                                curr_page += 1
+
+                            merged = accumulated + cached_list
+
+                        seen_keys = {self._episode_cache_key(e) for e in merged if self._episode_cache_key(e) is not None}
+                        total_count = int(count) if str(count).isdigit() else None
+                        total_pages = (total_count + page_size - 1) // page_size if total_count is not None else None
+
+                        if total_count is not None and len(seen_keys) < total_count:
+                            for p in range(2, total_pages + 1):
+                                if len(seen_keys) >= total_count:
+                                    break
+                                n_url = f'https://twit.tv/api/v1.0/episodes?filter[shows]={show_id}&page={p}&range={page_size}'
+                                if sort:
+                                    n_url += f'&sort={sort}'
+                                n_resp = api_rate_limiter.get(n_url, headers=headers, timeout=(10, 60))
+                                if n_resp.status_code != 200:
+                                    break
+                                n_data = n_resp.json()
+                                if not isinstance(n_data, dict) or not isinstance(n_data.get('episodes'), list):
+                                    break
+                                page_eps = self._parse_api_episodes(n_data.get('episodes', []))
+                                for ep in page_eps:
+                                    k = self._episode_cache_key(ep)
+                                    if not k or k not in seen_keys:
+                                        merged.append(ep)
+                                        if k:
+                                            seen_keys.add(k)
+                        elif total_count is None and next_link:
+                            curr_page = 2
+                            while next_link:
+                                n_url = f'https://twit.tv/api/v1.0/episodes?filter[shows]={show_id}&page={curr_page}&range={page_size}'
+                                if sort:
+                                    n_url += f'&sort={sort}'
+                                n_resp = api_rate_limiter.get(n_url, headers=headers, timeout=(10, 60))
+                                if n_resp.status_code != 200:
+                                    break
+                                n_data = n_resp.json()
+                                if not isinstance(n_data, dict) or not isinstance(n_data.get('episodes'), list):
+                                    break
+                                page_eps = self._parse_api_episodes(n_data.get('episodes', []))
+                                for ep in page_eps:
+                                    k = self._episode_cache_key(ep)
+                                    if not k or k not in seen_keys:
+                                        merged.append(ep)
+                                        if k:
+                                            seen_keys.add(k)
+                                next_link = (n_data.get('_links') or {}).get('next')
+                                curr_page += 1
+
+                        self._episodes_cache[show_id_key] = merged
+                        self._save_to_persistent_cache('episodes', show_id_key, merged)
+                        self._episodes_all_loaded = (
+                            len(seen_keys) >= total_count if total_count is not None
+                            else not next_link
+                        )
+                        self._episode_api_status = ''
+                        return merged
+                    else:
+                        if page == 1:
+                            self._episodes_cache[show_id_key] = list(episodes)
+                        else:
+                            curr_cached = self._episodes_cache.setdefault(show_id_key, [])
+                            seen_keys = {self._episode_cache_key(e) for e in curr_cached if self._episode_cache_key(e) is not None}
+                            for ep in episodes:
+                                k = self._episode_cache_key(ep)
+                                if not k or k not in seen_keys:
+                                    curr_cached.append(ep)
+                                    if k:
+                                        seen_keys.add(k)
+
+                        self._save_to_persistent_cache('episodes', show_id_key, self._episodes_cache[show_id_key])
+                        self._episodes_all_loaded = not next_link and (
+                            int(count) <= page * page_size if str(count).isdigit()
+                            else len(episodes) < page_size
+                        )
+                        self._episode_api_status = ''
+                        return episodes
                 self._episode_api_status = f'Episodes API failed (HTTP {response.status_code}); RSS may not contain the full archive.'
         except Exception as e:
             print(f"Error fetching episodes from API: {e}")
@@ -5220,61 +5762,73 @@ class TwitTUIForm(toga.App):
             app_key = self.get_api_app_key()
 
             if app_id and app_key:
-                headers = {
-                    'Accept': 'application/json',
-                    'app-id': app_id,
-                    'app-key': app_key
-                }
-                encoded_query = urllib.parse.quote(query_str)
-                url = f'https://twit.tv/api/v1.0/search/{encoded_query}?range=1000000'
-                resp = api_rate_limiter.get(url, headers=headers, timeout=10)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    search_items = data.get('search', [])
-                    if isinstance(search_items, list):
-                        for item in search_items:
-                            item_type = item.get('type')
-                            if item_type and item_type != 'episode':
-                                continue
-                            clean_path = item.get('cleanPath', '')
-                            body = item.get('body', '')
-                            if not show_matches_cleanpath(clean_path, body):
-                                continue
+                if not hasattr(self, '_api_search_cache') or not isinstance(self._api_search_cache, dict):
+                    self._api_search_cache = {}
+                search_cache_key = query_str.strip().lower()
+                if search_cache_key in self._api_search_cache:
+                    search_items = self._api_search_cache[search_cache_key]
+                else:
+                    headers = {
+                        'Accept': 'application/json',
+                        'app-id': app_id,
+                        'app-key': app_key
+                    }
+                    encoded_query = urllib.parse.quote(query_str)
+                    url = f'https://twit.tv/api/v1.0/search/{encoded_query}?range=1000000'
+                    resp = api_rate_limiter.get(url, headers=headers, timeout=10)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        search_items = data.get('search', [])
+                        if isinstance(search_items, list):
+                            self._api_search_cache[search_cache_key] = search_items
+                            self._save_to_persistent_cache('api_search', search_cache_key, search_items)
+                    else:
+                        search_items = []
 
-                            ep_id = item.get('id')
-                            title = item.get('label') or item.get('title') or ''
-                            ep_num = ''
-                            if clean_path:
-                                num_match = re.search(r'/episodes/(\d+)', clean_path)
-                                if num_match:
-                                    ep_num = num_match.group(1)
-                            if not ep_num and title:
-                                num_match = re.search(r'\b(\d+)\b', title)
-                                if num_match:
-                                    ep_num = num_match.group(1)
+                if isinstance(search_items, list):
+                    for item in search_items:
+                        item_type = item.get('type')
+                        if item_type and item_type != 'episode':
+                            continue
+                        clean_path = item.get('cleanPath', '')
+                        body = item.get('body', '')
+                        if not show_matches_cleanpath(clean_path, body):
+                            continue
 
-                            matched_rss = rss_items_map.get(str(ep_num).strip()) or rss_items_map.get(title.strip().lower())
-                            date_val = matched_rss.get('date', '') if matched_rss else ''
-                            dur_val = (matched_rss.get('length') or matched_rss.get('duration', '')) if matched_rss else ''
-                            size_val = (matched_rss.get('size') or matched_rss.get('file_size') or matched_rss.get('enclosure_length', '')) if matched_rss else ''
-                            media_url_val = matched_rss.get('enclosure_url', '') if matched_rss else ''
+                        ep_id = item.get('id')
+                        title = item.get('label') or item.get('title') or ''
+                        ep_num = ''
+                        if clean_path:
+                            num_match = re.search(r'/episodes/(\d+)', clean_path)
+                            if num_match:
+                                ep_num = num_match.group(1)
+                        if not ep_num and title:
+                            num_match = re.search(r'\b(\d+)\b', title)
+                            if num_match:
+                                ep_num = num_match.group(1)
 
-                            ep_info = {
-                                'id': str(ep_id) if ep_id is not None else '',
-                                'title': title,
-                                'number': ep_num,
-                                'cleanPath': clean_path,
-                                'description': body,
-                                'summary': body,
-                                'date': date_val,
-                                'length': dur_val,
-                                'duration': dur_val,
-                                'size': size_val,
-                                'file_size': size_val,
-                                'enclosure_length': size_val,
-                                'media_url': media_url_val
-                            }
-                            add_result(ep_info)
+                        matched_rss = rss_items_map.get(str(ep_num).strip()) or rss_items_map.get(title.strip().lower())
+                        date_val = matched_rss.get('date', '') if matched_rss else ''
+                        dur_val = (matched_rss.get('length') or matched_rss.get('duration', '')) if matched_rss else ''
+                        size_val = (matched_rss.get('size') or matched_rss.get('file_size') or matched_rss.get('enclosure_length', '')) if matched_rss else ''
+                        media_url_val = matched_rss.get('enclosure_url', '') if matched_rss else ''
+
+                        ep_info = {
+                            'id': str(ep_id) if ep_id is not None else '',
+                            'title': title,
+                            'number': ep_num,
+                            'cleanPath': clean_path,
+                            'description': body,
+                            'summary': body,
+                            'date': date_val,
+                            'length': dur_val,
+                            'duration': dur_val,
+                            'size': size_val,
+                            'file_size': size_val,
+                            'enclosure_length': size_val,
+                            'media_url': media_url_val
+                        }
+                        add_result(ep_info)
         except Exception as e:
             print(f"Error searching API: {e}")
 
@@ -5289,7 +5843,9 @@ class TwitTUIForm(toga.App):
                     d = item.get('description', '')
                     s = item.get('summary', '')
                     num = str(item.get('number', ''))
-                    combined = f"{t} {d} {s} {num}".lower()
+                    dur = str(item.get('length') or item.get('duration') or '')
+                    sz = str(item.get('size') or item.get('file_size') or item.get('enclosure_length') or '')
+                    combined = f"{t} {d} {s} {num} {dur} {sz}".lower()
                     if compute_match_score(query_str, combined, fuzzy_enabled=fuzzy_enabled, phonetic_enabled=phonetic_enabled) > 0.0:
                         ep = {
                             'title': t,
@@ -5320,10 +5876,12 @@ class TwitTUIForm(toga.App):
                     d = item.get('description', '')
                     s = item.get('summary', '')
                     num = str(item.get('number', ''))
+                    dur = str(item.get('length') or item.get('duration') or '')
+                    sz = str(item.get('size') or item.get('file_size') or item.get('enclosure_length') or '')
                     if not is_all_shows and selected_show:
                         if selected_show.lower() not in t.lower() and not any(w.lower() in t.lower() for w in selected_show.split() if len(w) > 3):
                             continue
-                    combined = f"{t} {d} {s} {num}".lower()
+                    combined = f"{t} {d} {s} {num} {dur} {sz}".lower()
                     if compute_match_score(query_str, combined, fuzzy_enabled=fuzzy_enabled, phonetic_enabled=phonetic_enabled) > 0.0:
                         ep = {
                             'title': t,
@@ -5352,7 +5910,9 @@ class TwitTUIForm(toga.App):
                 d = str(ep.get('description', ''))
                 s = str(ep.get('summary', ''))
                 num = str(ep.get('number', ''))
-                combined = f"{t} {d} {s} {num}".lower()
+                dur = str(ep.get('length') or ep.get('duration') or ep.get('runningTime') or '')
+                sz = str(ep.get('size') or ep.get('file_size') or ep.get('fileSize') or ep.get('enclosure_length') or '')
+                combined = f"{t} {d} {s} {num} {dur} {sz}".lower()
                 if compute_match_score(query_str, combined, fuzzy_enabled=fuzzy_enabled, phonetic_enabled=phonetic_enabled) > 0.0:
                     add_result(ep)
 
@@ -6150,6 +6710,10 @@ class TwitTUIForm(toga.App):
             sort_by = 'number'
         elif hasattr(self, 'title_radio') and self.title_radio and '☑' in self.title_radio.text:
             sort_by = 'title'
+        elif hasattr(self, 'length_radio') and self.length_radio and '☑' in self.length_radio.text:
+            sort_by = 'length'
+        elif hasattr(self, 'size_radio') and self.size_radio and '☑' in self.size_radio.text:
+            sort_by = 'size'
 
         is_asc = self.is_sort_ascending()
         if sort_by == 'date':
@@ -6164,6 +6728,22 @@ class TwitTUIForm(toga.App):
             episodes.sort(key=parse_num, reverse=not is_asc)
         elif sort_by == 'title':
             episodes.sort(key=lambda x: str(x.get('title', '')), reverse=not is_asc)
+        elif sort_by == 'length':
+            def parse_len(val):
+                raw = val.get('length') or val.get('duration') or val.get('runningTime') or val.get('running_time')
+                if not raw and hasattr(self, 'extract_duration'):
+                    raw = self.extract_duration(val)
+                sec = self.parse_duration_to_seconds(raw)
+                return (0, sec) if sec >= 0 else (1, str(raw or ''))
+            episodes.sort(key=parse_len, reverse=not is_asc)
+        elif sort_by == 'size':
+            def parse_sz(val):
+                raw = val.get('size') or val.get('file_size') or val.get('fileSize') or val.get('enclosure_length') or val.get('bytes')
+                if not raw and hasattr(self, 'extract_size'):
+                    raw = self.extract_size(val)
+                b = self.parse_size_to_bytes(raw)
+                return (0, b) if b >= 0 else (1, str(raw or ''))
+            episodes.sort(key=parse_sz, reverse=not is_asc)
 
         table_data = []
         for episode in episodes:
@@ -6296,6 +6876,8 @@ class TwitTUIForm(toga.App):
                             if status or self.api_status_label.text == getattr(self, '_episode_api_status', None):
                                 self.api_status_label.text = status
                         self._episode_api_status = status
+                        if hasattr(self, '_episodes_cache') and hasattr(worker, '_episodes_cache'):
+                            self._episodes_cache.update(worker._episodes_cache)
                         self.current_episodes = episodes
                         if self._episodes_all_loaded:
                             self._search_catalog = list(episodes)
@@ -6410,16 +6992,27 @@ class TwitTUIForm(toga.App):
 
     def on_sort_button_press(self, widget) -> None:
         """Handle radio button behavior for checkbox-like sort type buttons and reload from API."""
-        self.date_radio.text = self.date_radio.text.replace('☑', '☐')
-        self.episode_radio.text = self.episode_radio.text.replace('☑', '☐')
-        self.title_radio.text = self.title_radio.text.replace('☑', '☐')
+        if hasattr(self, 'date_radio') and self.date_radio:
+            self.date_radio.text = self.date_radio.text.replace('☑', '☐')
+        if hasattr(self, 'episode_radio') and self.episode_radio:
+            self.episode_radio.text = self.episode_radio.text.replace('☑', '☐')
+        if hasattr(self, 'title_radio') and self.title_radio:
+            self.title_radio.text = self.title_radio.text.replace('☑', '☐')
+        if hasattr(self, 'length_radio') and self.length_radio:
+            self.length_radio.text = self.length_radio.text.replace('☑', '☐')
+        if hasattr(self, 'size_radio') and self.size_radio:
+            self.size_radio.text = self.size_radio.text.replace('☑', '☐')
 
-        if widget == self.date_radio:
+        if hasattr(self, 'date_radio') and widget == self.date_radio:
             self.date_radio.text = self.date_radio.text.replace('☐', '☑')
-        elif widget == self.episode_radio:
+        elif hasattr(self, 'episode_radio') and widget == self.episode_radio:
             self.episode_radio.text = self.episode_radio.text.replace('☐', '☑')
-        elif widget == self.title_radio:
+        elif hasattr(self, 'title_radio') and widget == self.title_radio:
             self.title_radio.text = self.title_radio.text.replace('☐', '☑')
+        elif hasattr(self, 'length_radio') and widget == self.length_radio:
+            self.length_radio.text = self.length_radio.text.replace('☐', '☑')
+        elif hasattr(self, 'size_radio') and widget == self.size_radio:
+            self.size_radio.text = self.size_radio.text.replace('☐', '☑')
 
         if hasattr(self, 'date_radio') and self.date_radio:
             self.date_radio.tooltip = "Sort episodes by release date" + (" (active)" if widget == self.date_radio else "")
@@ -6427,6 +7020,10 @@ class TwitTUIForm(toga.App):
             self.episode_radio.tooltip = "Sort episodes by episode number" + (" (active)" if widget == self.episode_radio else "")
         if hasattr(self, 'title_radio') and self.title_radio:
             self.title_radio.tooltip = "Sort episodes alphabetically by title" + (" (active)" if widget == self.title_radio else "")
+        if hasattr(self, 'length_radio') and self.length_radio:
+            self.length_radio.tooltip = "Sort episodes by duration/length" + (" (active)" if widget == self.length_radio else "")
+        if hasattr(self, 'size_radio') and self.size_radio:
+            self.size_radio.tooltip = "Sort episodes by file size" + (" (active)" if widget == self.size_radio else "")
 
         self.load_episodes_for_selected_show()
 
