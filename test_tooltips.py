@@ -155,7 +155,6 @@ class TestMainFormUITooltips(unittest.TestCase):
             'streamer_label': self.form.streamer_label,
             'streamer_input': self.form.streamer_input,
             'progress_bar': self.form.progress_bar,
-            'homepage_cmd': self.form.homepage_cmd,
             'readme_cmd': self.form.readme_cmd,
             'apib_cmd': self.form.apib_cmd,
             'api_key_cmd': self.form.api_key_cmd,
@@ -251,7 +250,10 @@ class TestMainFormUITooltips(unittest.TestCase):
             mock_open.assert_called_once_with("https://apidocs.twit.tv/")
 
     def test_homepage_url_in_help_menu(self) -> None:
-        """Verify Help menu Visit Homepage command invokes browser with the project homepage URL."""
+        """Verify Help menu Visit Homepage handler invokes browser with the project homepage URL."""
+        with patch("webbrowser.open") as mock_open:
+            self.form.visit_homepage()
+            mock_open.assert_called_once_with("https://github.com/mainmeister/twittui.git")
         with patch("webbrowser.open") as mock_open:
             self.form.on_open_homepage()
             mock_open.assert_called_once_with("https://github.com/mainmeister/twittui.git")

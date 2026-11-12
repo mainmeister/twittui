@@ -755,7 +755,6 @@ class TwitTUIForm(toga.App):
         self.fuzzy_search_checkbox = None
         self.phonetic_search_checkbox = None
         self.progress_bar = None
-        self.homepage_cmd = None
         self.readme_cmd = None
         self.apib_cmd = None
         self.api_key_cmd = None
@@ -2534,15 +2533,6 @@ class TwitTUIForm(toga.App):
         self.commands.add(self.preferences_cmd)
 
         # Help Menu commands
-        homepage_cmd = toga.Command(
-            self.on_open_homepage,
-            text='Visit Homepage',
-            tooltip='Open the TwitTUI project homepage in browser',
-            group=toga.Group.HELP,
-            section=0,
-            order=0
-        )
-        self.homepage_cmd = homepage_cmd
         readme_cmd = toga.Command(
             self.on_open_readme,
             text='View README Documentation',
@@ -2570,7 +2560,6 @@ class TwitTUIForm(toga.App):
             order=3
         )
         self.api_key_cmd = api_key_cmd
-        self.commands.add(homepage_cmd)
         self.commands.add(readme_cmd)
         self.commands.add(apib_cmd)
         self.commands.add(api_key_cmd)
@@ -3289,6 +3278,10 @@ class TwitTUIForm(toga.App):
     def show_apib_viewer(self) -> None:
         """Display twittv.apib using the Hybrid Resilient Pattern (WebView with Browser fallback)."""
         self.show_document_viewer("twittv.apib", "TWiT API Specification (twittv.apib)")
+
+    def visit_homepage(self) -> None:
+        """Open the TwitTUI project homepage URL in the default browser."""
+        self.open_homepage_url()
 
     def open_homepage_url(self) -> None:
         """Open the TwitTUI project homepage URL in the default browser."""
