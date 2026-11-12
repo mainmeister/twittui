@@ -725,6 +725,7 @@ class TwitTUIForm(toga.App):
         self.audio_only_checkbox = None
         self.episodes_label = None
         self.episodes_list = None
+        self.button_box = None
         self.download_button = None
         self.stream_button = None
         self.cancel_button = None
@@ -769,6 +770,8 @@ class TwitTUIForm(toga.App):
         self._dialog_open = False
         self._metadata_window = None
         self._splash_window = None
+        self._gtk_maximize_handler_connected = False
+        self._gtk_window_maximized = None
         if "home_page" not in kwargs or kwargs["home_page"] is None:
             kwargs["home_page"] = TWITTUI_HOMEPAGE_URL
         if "icon" not in kwargs or kwargs["icon"] is None:
@@ -2311,6 +2314,8 @@ class TwitTUIForm(toga.App):
         self._metadata_window = None
         self._hover_lock = threading.Lock()
         self._table_hover_connected = False
+        self._gtk_maximize_handler_connected = False
+        self._gtk_window_maximized = None
 
         # Main box with vertical layout
         main_box = toga.Box(style=Pack(direction=COLUMN, margin=5))
@@ -2455,7 +2460,7 @@ class TwitTUIForm(toga.App):
             columns=['Episode', 'Title', 'Date', 'Length', 'Size'],
             multiple_select=True,
             on_activate=self.on_episode_activate,
-            style=Pack(flex=1, margin=5, height=200),
+            style=Pack(flex=1, margin=5),
             tooltip='Episode list: select episodes to download, or double-click / press Enter to stream'
         )
         self._enable_table_horizontal_scroll()
@@ -2465,6 +2470,7 @@ class TwitTUIForm(toga.App):
 
         # Buttons section
         button_box = toga.Box(style=Pack(direction=ROW, margin=5))
+        self.button_box = button_box
         download_button = toga.Button(
             'Download',
             on_press=self.on_download_press,
@@ -2505,7 +2511,7 @@ class TwitTUIForm(toga.App):
         self.progress_bar = toga.ProgressBar(
             max=100.0,
             value=0.0,
-            style=Pack(flex=1, margin=5),
+            style=Pack(margin=5),
             tooltip='Progress indicator for active download or operation'
         )
 
@@ -2522,6 +2528,7 @@ class TwitTUIForm(toga.App):
         # Create main window
         self.main_window = toga.MainWindow(title='TWIT.tv TUI')
         self.main_window.content = main_box
+        self._configure_gtk_episodes_layout()
 
         self.preferences_cmd = toga.Command(
             self.on_preferences_press,
@@ -6083,6 +6090,105 @@ class TwitTUIForm(toga.App):
             except Exception:
                 pass
 
+    def _refresh_gtk_episodes_layout(self) -> bool:
+        """Refresh main window layout so episodes_list fills available vertical height."""
+        try:
+            if getattr(self, 'episodes_list', None) is not None:
+                if getattr(self.episodes_list.style, 'height', None) not in (None, 'none'):
+                    del self.episodes_list.style.height
+                if getattr(self.episodes_list.style, 'flex', 0) != 1:
+                    self.episodes_list.style.flex = 1
+            win = getattr(self, 'main_window', None)
+            if win is not None and getattr(win, 'content', None) is not None:
+                win.content.refresh()
+                win_impl = getattr(win, '_impl', None)
+                container = getattr(win_impl, 'container', None)
+                if container is not None and hasattr(container, 'make_dirty'):
+                    container.make_dirty(getattr(self.episodes_list, '_impl', None))
+        except Exception:
+            pass
+        return False
+
+    def _on_gtk_window_state_event(self, widget, event=None) -> bool:
+        """Handle GTK window maximize/unmaximize transitions to expand or restore episodes_list."""
+        try:
+            is_maximized = False
+            if event is not None and hasattr(event, 'new_window_state'):
+                from toga_gtk.libs import Gdk
+                is_maximized = bool(event.new_window_state & Gdk.WindowState.MAXIMIZED)
+            elif hasattr(widget, 'is_maximized'):
+                is_maximized = bool(widget.is_maximized())
+
+            if getattr(self, '_gtk_window_maximized', None) != is_maximized:
+                self._gtk_window_maximized = is_maximized
+                self._refresh_gtk_episodes_layout()
+                try:
+                    from toga_gtk.libs import GLib
+                    GLib.idle_add(self._refresh_gtk_episodes_layout)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return False
+
+    def _configure_gtk_episodes_layout(self) -> None:
+        """Configure GTK table minimum height and window maximize handling so episodes_list fills vertical space."""
+        if not getattr(self, 'episodes_list', None):
+            return
+
+        table_impl = getattr(self.episodes_list, '_impl', None)
+        if not table_impl or not table_impl.__class__.__module__.startswith('toga_gtk'):
+            return
+
+        try:
+            self.episodes_list._MIN_HEIGHT = 200
+            table_impl.rehint()
+        except Exception:
+            pass
+
+        native_scroller = getattr(table_impl, 'native', None)
+        if native_scroller is not None:
+            for method_name in ('set_vexpand', 'set_hexpand'):
+                method = getattr(native_scroller, method_name, None)
+                if callable(method):
+                    try:
+                        method(True)
+                    except Exception:
+                        pass
+
+        win = getattr(self, 'main_window', None)
+        win_impl = getattr(win, '_impl', None) if win else None
+        if not win_impl:
+            return
+
+        container = getattr(win_impl, 'container', None)
+        if container is not None:
+            for method_name in ('set_vexpand', 'set_hexpand'):
+                method = getattr(container, method_name, None)
+                if callable(method):
+                    try:
+                        method(True)
+                    except Exception:
+                        pass
+
+        native_win = getattr(win_impl, 'native', None)
+        if native_win is not None and hasattr(native_win, 'connect') and not getattr(self, '_gtk_maximize_handler_connected', False):
+            try:
+                from toga_gtk.libs import GTK_VERSION
+                if GTK_VERSION < (4, 0, 0):
+                    native_win.connect('window-state-event', self._on_gtk_window_state_event)
+                else:
+                    native_win.connect('notify::maximized', self._on_gtk_window_state_event)
+                self._gtk_maximize_handler_connected = True
+            except Exception:
+                pass
+
+        if getattr(win, 'content', None) is not None:
+            try:
+                win.content.refresh()
+            except Exception:
+                pass
+
     @staticmethod
     def clean_html_text(text: str) -> str:
         """Strip HTML tags and unescape HTML entities into clean plain text."""
@@ -6493,6 +6599,75 @@ class TwitTUIForm(toga.App):
 
         return meta['header_title'], "\n".join(lines)
 
+    @staticmethod
+    def _configure_metadata_link_rows(link_rows: list, content_box=None) -> None:
+        """Size metadata link labels dynamically so they are never overwritten by adjacent URL fields."""
+        if not link_rows:
+            return
+
+        measured_widths = []
+        for lbl, btn in link_rows:
+            lbl_impl = getattr(lbl, '_impl', None)
+            lbl_mod = getattr(getattr(lbl_impl, '__class__', None), '__module__', '') if lbl_impl else ''
+            is_textual = lbl_mod.startswith('toga_textual')
+
+            if not is_textual and lbl_impl is not None:
+                try:
+                    if hasattr(lbl_impl, 'rehint'):
+                        lbl_impl.rehint()
+                except Exception:
+                    pass
+
+                lbl_native = getattr(lbl_impl, 'native', None)
+                if lbl_native is not None:
+                    try:
+                        if hasattr(lbl_native, 'get_preferred_width'):
+                            min_w, nat_w = lbl_native.get_preferred_width()
+                            if isinstance(min_w, (int, float)) and isinstance(nat_w, (int, float)):
+                                measured_widths.append(int(max(min_w, nat_w)))
+                        elif hasattr(lbl_native, 'get_preferred_size'):
+                            min_sz, nat_sz = lbl_native.get_preferred_size()
+                            w_min = getattr(min_sz, 'width', 0)
+                            w_nat = getattr(nat_sz, 'width', 0)
+                            if isinstance(w_min, (int, float)) and isinstance(w_nat, (int, float)):
+                                measured_widths.append(int(max(w_min, w_nat)))
+                    except Exception:
+                        pass
+
+                intrinsic = getattr(lbl, 'intrinsic', None)
+                intrinsic_w = getattr(intrinsic, 'width', None) if intrinsic is not None else None
+                iw_val = getattr(intrinsic_w, 'value', intrinsic_w)
+                if isinstance(iw_val, (int, float)) and not isinstance(iw_val, bool) and iw_val > 0:
+                    measured_widths.append(int(iw_val))
+
+            btn_impl = getattr(btn, '_impl', None)
+            btn_mod = getattr(getattr(btn_impl, '__class__', None), '__module__', '') if btn_impl else ''
+            if btn_mod.startswith('toga_gtk'):
+                try:
+                    from toga_gtk.libs import Pango
+                    btn_native = getattr(btn_impl, 'native', None)
+                    btn_child = btn_native.get_child() if btn_native is not None and hasattr(btn_native, 'get_child') else None
+                    if btn_child is not None:
+                        if hasattr(btn_child, 'set_xalign'):
+                            btn_child.set_xalign(0.0)
+                        if hasattr(btn_child, 'set_ellipsize'):
+                            btn_child.set_ellipsize(Pango.EllipsizeMode.END)
+                    if hasattr(btn_impl, 'rehint'):
+                        btn_impl.rehint()
+                except Exception:
+                    pass
+
+        if measured_widths:
+            aligned_width = max(measured_widths) + 8
+            for lbl, _btn in link_rows:
+                lbl.style.width = aligned_width
+
+        if content_box is not None:
+            try:
+                content_box.refresh()
+            except Exception:
+                pass
+
     def show_episode_metadata_dialog(self, target) -> None:
         """Display a popup dialog/window with all metadata for the specified episode, featuring clickable Web and Media URLs."""
         if not target:
@@ -6592,11 +6767,14 @@ class TwitTUIForm(toga.App):
                 for row_text in meta_rows:
                     content_box.add(toga.Label(row_text, style=Pack(margin_bottom=3), tooltip=f'Metadata: {row_text}'))
 
+                link_rows = []
+
                 # Web Link (Clickable)
                 ep_link = meta.get('link') or ''
                 if ep_link:
                     link_box = toga.Box(style=Pack(direction=ROW, margin_top=4, margin_bottom=4, align_items='center'))
-                    link_box.add(toga.Label("Web Link:", style=Pack(width=90, font_weight='bold', margin_right=4), tooltip='Episode webpage link'))
+                    link_label = toga.Label("Web Link:", style=Pack(font_weight='bold', margin_right=8), tooltip='Episode webpage link')
+                    link_box.add(link_label)
                     link_btn = toga.Button(
                         ep_link,
                         on_press=lambda w, u=ep_link: self.open_url_in_browser(u),
@@ -6605,12 +6783,14 @@ class TwitTUIForm(toga.App):
                     )
                     link_box.add(link_btn)
                     content_box.add(link_box)
+                    link_rows.append((link_label, link_btn))
 
                 # Transcript Link (Clickable)
                 transcript_url = meta.get('transcript_url') or meta.get('transcript') or ''
                 if transcript_url:
                     transcript_box = toga.Box(style=Pack(direction=ROW, margin_top=4, margin_bottom=4, align_items='center'))
-                    transcript_box.add(toga.Label("Transcript:", style=Pack(width=90, font_weight='bold', margin_right=4), tooltip='Episode transcript link'))
+                    transcript_label = toga.Label("Transcript:", style=Pack(font_weight='bold', margin_right=8), tooltip='Episode transcript link')
+                    transcript_box.add(transcript_label)
                     transcript_btn = toga.Button(
                         transcript_url,
                         on_press=lambda w, u=transcript_url: self.open_url_in_browser(u),
@@ -6619,12 +6799,14 @@ class TwitTUIForm(toga.App):
                     )
                     transcript_box.add(transcript_btn)
                     content_box.add(transcript_box)
+                    link_rows.append((transcript_label, transcript_btn))
 
                 # Media URL (Clickable)
                 media_url = meta.get('media_url') or ''
                 if media_url:
                     media_box = toga.Box(style=Pack(direction=ROW, margin_top=4, margin_bottom=4, align_items='center'))
-                    media_box.add(toga.Label("Media URL:", style=Pack(width=90, font_weight='bold', margin_right=4), tooltip='Direct media stream link'))
+                    media_label = toga.Label("Media URL:", style=Pack(font_weight='bold', margin_right=8), tooltip='Direct media stream link')
+                    media_box.add(media_label)
                     media_btn = toga.Button(
                         media_url,
                         on_press=lambda w, u=media_url: self.open_url_in_browser(u),
@@ -6633,6 +6815,7 @@ class TwitTUIForm(toga.App):
                     )
                     media_box.add(media_btn)
                     content_box.add(media_box)
+                    link_rows.append((media_label, media_btn))
 
                 # Available Formats
                 if meta.get('formats'):
@@ -6682,6 +6865,7 @@ class TwitTUIForm(toga.App):
 
                 # Top-level window layout container
                 win.content = content_box
+                self._configure_metadata_link_rows(link_rows, content_box)
                 win.show()
 
             except Exception as e:
