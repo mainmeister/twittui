@@ -48,12 +48,88 @@ class RateLimitScreen(ModalScreen):
 
     def close_wait(self) -> None:
         self._close_requested = True
-        if self.app.screen is self:
-            self.dismiss()
+        try:
+            if hasattr(self, 'app') and self.app and getattr(self.app, 'screen', None) is self:
+                self.dismiss()
+        except Exception:
+            pass
 
     def on_screen_resume(self) -> None:
         if self._close_requested:
-            self.dismiss()
+            try:
+                self.dismiss()
+            except Exception:
+                pass
+
+
+class SplashScreen(ModalScreen):
+    """Textual modal splash screen displayed while TwitTUI loads or closes."""
+
+    DEFAULT_CSS = """
+    SplashScreen {
+        align: center middle;
+        background: rgba(0, 0, 0, 0.7);
+    }
+    #splash_box {
+        width: 60;
+        height: auto;
+        border: solid $accent;
+        background: $surface;
+        padding: 1 2;
+        align: center middle;
+    }
+    #splash_title {
+        text-style: bold;
+        margin-bottom: 1;
+        width: 100%;
+        text-align: center;
+    }
+    #splash_message {
+        margin-bottom: 1;
+        width: 100%;
+        text-align: center;
+    }
+    SplashScreen LoadingIndicator {
+        height: 3;
+        color: $accent;
+    }
+    """
+
+    def __init__(self, title: str = "TWiT.tv TUI", message: str = "Loading TwitTUI. Please wait...") -> None:
+        super().__init__()
+        self.splash_title = title
+        self.splash_message = message
+        self._close_requested = False
+
+    def compose(self) -> Any:
+        with Vertical(id="splash_box"):
+            yield Label(self.splash_title, id="splash_title")
+            yield Label(self.splash_message, id="splash_message")
+            yield LoadingIndicator()
+
+    def update_message(self, message: str) -> None:
+        self.splash_message = message
+        try:
+            msg_label = self.query_one("#splash_message", Label)
+            if msg_label:
+                msg_label.update(message)
+        except Exception:
+            pass
+
+    def close_splash(self) -> None:
+        self._close_requested = True
+        try:
+            if hasattr(self, 'app') and self.app and getattr(self.app, 'screen', None) is self:
+                self.dismiss()
+        except Exception:
+            pass
+
+    def on_screen_resume(self) -> None:
+        if self._close_requested:
+            try:
+                self.dismiss()
+            except Exception:
+                pass
 
 
 class TextualDialogScreen(ModalScreen):

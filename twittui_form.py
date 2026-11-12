@@ -765,6 +765,7 @@ class TwitTUIForm(toga.App):
         self._hover_generation = 0
         self._dialog_open = False
         self._metadata_window = None
+        self._splash_window = None
         if "icon" not in kwargs or kwargs["icon"] is None:
             resolved_icon = resolve_app_icon()
             if resolved_icon:
@@ -1031,6 +1032,85 @@ class TwitTUIForm(toga.App):
         self._episode_request = getattr(self, '_episode_request', 0) + 1
         return self._episode_request
 
+    def show_splash_screen(self, message: str = "Loading TwitTUI. Please wait...", title: str = "TWiT.tv TUI") -> None:
+        """Display a splash screen modal or window informing the user what is happening."""
+        if getattr(self, '_splash_window', None) is not None:
+            try:
+                if hasattr(self._splash_window, 'update_message'):
+                    self._splash_window.update_message(message)
+            except Exception:
+                pass
+            return
+
+        try:
+            native_app = getattr(getattr(self, '_impl', None), 'native', None)
+            if native_app and native_app.__class__.__module__.startswith('toga_textual'):
+                from toga_textual_backend import SplashScreen
+                screen = SplashScreen(title=title, message=message)
+                self._splash_window = screen
+                native_app.push_screen(screen)
+            elif hasattr(self, 'main_window') and self.main_window:
+                window = toga.Window(
+                    title=title,
+                    size=(460, 220),
+                    closable=False,
+                    resizable=False,
+                    minimizable=False
+                )
+                self._splash_window = window
+                try:
+                    x, y = self.main_window.position
+                    width, height = self.main_window.size
+                    window.position = (x + (width - 460) // 2, y + (height - 220) // 2)
+                except Exception:
+                    pass
+                box = toga.Box(style=Pack(direction=COLUMN, margin=20))
+                box.add(toga.Label(title, style=Pack(margin=(0, 5))))
+                box.add(toga.Label(message, style=Pack(margin=(5, 5))))
+                indicator = toga.ActivityIndicator(style=Pack(margin=10, width=128, height=128, color='red'))
+                box.add(indicator)
+                window.content = box
+                native = getattr(window, '_impl', None) and getattr(window._impl, 'native', None)
+                if native:
+                    if hasattr(native, 'set_decorated'):
+                        native.set_decorated(True)
+                    if window._impl.__class__.__module__.startswith('toga_gtk'):
+                        from toga_gtk.libs import Gtk
+                        headerbar = getattr(window._impl, 'headerbar', None)
+                        if headerbar is None:
+                            headerbar = Gtk.HeaderBar()
+                            if hasattr(headerbar, 'set_title'):
+                                headerbar.set_title(title)
+                            native.set_titlebar(headerbar)
+                        headerbar.set_decoration_layout(':')
+                    if hasattr(native, 'set_transient_for') and hasattr(self.main_window, '_impl') and hasattr(self.main_window._impl, 'native'):
+                        native.set_transient_for(self.main_window._impl.native)
+                    if native.__class__.__module__.startswith('gi.repository') and hasattr(native, 'set_position'):
+                        from toga_gtk.libs import Gtk
+                        native.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+                    if hasattr(native, 'set_modal'):
+                        native.set_modal(True)
+                window.show()
+                indicator.start()
+        except Exception as e:
+            print(f"Unable to display splash screen: {e}")
+
+    def close_splash_screen(self) -> None:
+        """Dismiss the active splash screen window or modal."""
+        window = getattr(self, '_splash_window', None)
+        self._splash_window = None
+        if window:
+            try:
+                if hasattr(window, 'close_splash'):
+                    window.close_splash()
+                elif hasattr(window, 'close_wait'):
+                    window.close_wait()
+                else:
+                    window.hide()
+                    window.close()
+            except Exception as e:
+                print(f"Unable to close splash screen: {e}")
+
     def _refresh_catalog(self):
         self._catalog_request = getattr(self, '_catalog_request', 0) + 1
         token = self._catalog_request
@@ -1052,6 +1132,7 @@ class TwitTUIForm(toga.App):
                 return
             pending[task] = False
             if not pending['shows'] and not pending['episodes']:
+                self.close_splash_screen()
                 if getattr(self, '_catalog_wait_held', False):
                     self._catalog_wait_held = False
                     self._set_rate_limit_wait(False)
@@ -1061,6 +1142,7 @@ class TwitTUIForm(toga.App):
                 if getattr(self, '_catalog_wait_held', False) and getattr(self, '_catalog_request', 0) == token:
                     self._catalog_wait_held = False
                     self._set_rate_limit_wait(False)
+                    self.close_splash_screen()
                 return
             if shows is None:
                 shows = sorted(self.show_ids, key=str.casefold) if getattr(self, 'show_ids', None) else []
@@ -1343,7 +1425,10 @@ class TwitTUIForm(toga.App):
             self.sort_order_button.text = '▲ Ascending'
             self.sort_order_button.tooltip = "Currently ascending (oldest first). Click to sort descending (newest first)"
 
-        self.load_episodes_for_selected_show()
+        if getattr(self, '_episodes_all_loaded', False) and getattr(self, 'current_episodes', None):
+            self.update_episodes_display()
+        else:
+            self.load_episodes_for_selected_show()
 
     def get_current_sort_param(self) -> str:
         """Determine API sort query parameter based on UI sort selection and direction."""
@@ -1364,10 +1449,8 @@ class TwitTUIForm(toga.App):
             field = 'episodeNumber'
         elif sort_by == 'title':
             field = 'label'
-        elif sort_by == 'length':
-            field = 'runningTime'
-        elif sort_by == 'size':
-            field = 'fileSize'
+        elif sort_by in ('length', 'size'):
+            return None
         else:
             field = 'airingDate'
 
@@ -2213,6 +2296,7 @@ class TwitTUIForm(toga.App):
             return None
 
     def startup(self) -> None:
+        self.show_splash_screen('Loading TwitTUI. Initializing show catalog and episodes...', title='TWiT.tv TUI')
         api_rate_limiter.wait_callback = self._rate_limit_wait_changed
         api_rate_limiter.rate_limit = self.get_rate_limit
         # Hover tracking state for episode metadata popup
@@ -5109,6 +5193,7 @@ class TwitTUIForm(toga.App):
             self._cancel_download = True
             self.reset_progress()
         else:
+            self.show_splash_screen("Closing TwitTUI. Please wait...", title="TWiT.tv TUI")
             self.exit()
 
     def on_close_press(self, widget) -> None:
@@ -5126,7 +5211,30 @@ class TwitTUIForm(toga.App):
             except Exception:
                 pass
             self._preferences_window = None
-        self.exit()
+        self.show_splash_screen("Closing TwitTUI. Please wait...", title="TWiT.tv TUI")
+        if getattr(self, 'api_status_label', None):
+            self.api_status_label.text = "Closing TwitTUI. Please wait..."
+        try:
+            if sys.stdout and hasattr(sys.stdout, 'isatty') and sys.stdout.isatty():
+                print("\n======================================================================", flush=True)
+                print("  TwitTUI: Exiting, please wait...", flush=True)
+                print("======================================================================\n", flush=True)
+        except Exception:
+            pass
+
+        def _do_exit():
+            try:
+                self.exit()
+            except Exception:
+                sys.exit(0)
+
+        if hasattr(self, 'loop') and self.loop and self.loop.is_running():
+            try:
+                self.loop.call_later(0.05, _do_exit)
+            except Exception:
+                self.exit()
+        else:
+            self.exit()
 
     async def on_browse_press(self, widget) -> None:
         """Handle folder selection for download destination."""
@@ -7025,7 +7133,10 @@ class TwitTUIForm(toga.App):
         if hasattr(self, 'size_radio') and self.size_radio:
             self.size_radio.tooltip = "Sort episodes by file size" + (" (active)" if widget == self.size_radio else "")
 
-        self.load_episodes_for_selected_show()
+        if getattr(self, '_episodes_all_loaded', False) and getattr(self, 'current_episodes', None):
+            self.update_episodes_display()
+        else:
+            self.load_episodes_for_selected_show()
 
 def main():
     return TwitTUIForm('TWIT.tv TUI', 'org.beeware.twittui')

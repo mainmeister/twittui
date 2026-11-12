@@ -222,19 +222,50 @@ class TestEpisodeSearch(unittest.TestCase):
         form.size_radio = SimpleNamespace(text='☐ Size', tooltip='')
         form.sort_order_button = SimpleNamespace(text='▼ Descending', tooltip='')
 
-        # Length descending & ascending
+        # Length descending & ascending (TWiT API does not support runningTime; returns None so API uses default full archive)
         form.length_radio.text = '☑ Length'
-        self.assertEqual(form.get_current_sort_param(), '-runningTime')
+        self.assertIsNone(form.get_current_sort_param())
         form.sort_order_button.text = '▲ Ascending'
-        self.assertEqual(form.get_current_sort_param(), 'runningTime')
+        self.assertIsNone(form.get_current_sort_param())
 
-        # Size descending & ascending
+        # Size descending & ascending (TWiT API does not support fileSize; returns None so API uses default full archive)
         form.length_radio.text = '☐ Length'
         form.size_radio.text = '☑ Size'
         form.sort_order_button.text = '▼ Descending'
-        self.assertEqual(form.get_current_sort_param(), '-fileSize')
+        self.assertIsNone(form.get_current_sort_param())
         form.sort_order_button.text = '▲ Ascending'
-        self.assertEqual(form.get_current_sort_param(), 'fileSize')
+        self.assertIsNone(form.get_current_sort_param())
+
+    def test_sort_by_length_and_size_does_not_truncate_episodes(self):
+        form = TwitTUIForm('TestApp', 'org.twit.test')
+        form.episodes_list = MagicMock()
+        episodes = [
+            {'number': str(i), 'title': f'Episode {i}', 'length': f'0{i % 3 + 1}:00:00', 'size': (i + 1) * 10485760}
+            for i in range(1, 101)
+        ]
+        form.current_episodes = list(episodes)
+        form._episodes_all_loaded = True
+        form.date_radio = SimpleNamespace(text='☐ Date', tooltip='')
+        form.episode_radio = SimpleNamespace(text='☐ Episode Number', tooltip='')
+        form.title_radio = SimpleNamespace(text='☐ Episode Title', tooltip='')
+        form.length_radio = SimpleNamespace(text='☐ Length', tooltip='')
+        form.size_radio = SimpleNamespace(text='☐ Size', tooltip='')
+        form.sort_order_button = SimpleNamespace(text='▼ Descending', tooltip='')
+
+        # Press Length sort button
+        form.on_sort_button_press(form.length_radio)
+        self.assertEqual(len(form.episodes_list.data), 100)
+        self.assertEqual(len(form.current_episodes), 100)
+
+        # Press Size sort button
+        form.on_sort_button_press(form.size_radio)
+        self.assertEqual(len(form.episodes_list.data), 100)
+        self.assertEqual(len(form.current_episodes), 100)
+
+        # Toggle sort order
+        form.on_sort_order_toggle()
+        self.assertEqual(len(form.episodes_list.data), 100)
+        self.assertEqual(len(form.current_episodes), 100)
 
 
 if __name__ == '__main__':
