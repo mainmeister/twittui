@@ -661,6 +661,7 @@ The desktop launcher file registers TwitTUI in system application menus:
 - **Application Menu (`toga.Group.APP`)**:
   - **Preferences**: Opens the modal Preferences window containing the API credentials, Club TWiT URL, download destination, block size, rate limit, and streamer settings.
 - **Help Menu (`toga.Group.HELP`)**:
+  - **Visit Homepage**: Opens the official TwitTUI GitHub repository (`https://github.com/mainmeister/twittui.git`) in the default system web browser.
   - **View README Documentation**: Opens the integrated documentation viewer via the **Hybrid Resilient Pattern**. Converts Markdown to fully sanitized HTML (stripping malicious tags, event handlers, and dangerous URI schemes) and displays it in an in-app `toga.WebView` window with automatic fallback to the system default web browser. Features smooth Table of Contents anchor navigation and a persistent floating "↑ Table of Contents" button.
   - **View API Specification (twittv.apib)**: Opens the complete API Blueprint specification for the TWiT.tv REST API v1.0 formatted and rendered identically to the README documentation viewer with HTML sanitization, anchor navigation, and hybrid viewer fallback.
   - **Get TWiT API Key**: Opens the official TWiT API documentation and developer portal (`https://apidocs.twit.tv/`) in the default system web browser to register applications and obtain API Application IDs and Keys.

@@ -409,6 +409,9 @@ MEMBERFUL_HOST_FEEDS = [9073, 9072, 9053, 9052, 9075, 9074, 9069, 9068, 9162, 91
 TWIT_API_KEY_URL = 'https://apidocs.twit.tv/'
 TWIT_API_DOCS_URL = 'https://apidocs.twit.tv/'
 
+# TwitTUI Project Homepage URL
+TWITTUI_HOMEPAGE_URL = 'https://github.com/mainmeister/twittui.git'
+
 DEFAULT_SHOWS = [
     ("AI Inside", "846616"),
     ("Abby's Road", "1652"),
@@ -752,6 +755,7 @@ class TwitTUIForm(toga.App):
         self.fuzzy_search_checkbox = None
         self.phonetic_search_checkbox = None
         self.progress_bar = None
+        self.homepage_cmd = None
         self.readme_cmd = None
         self.apib_cmd = None
         self.api_key_cmd = None
@@ -766,6 +770,8 @@ class TwitTUIForm(toga.App):
         self._dialog_open = False
         self._metadata_window = None
         self._splash_window = None
+        if "home_page" not in kwargs or kwargs["home_page"] is None:
+            kwargs["home_page"] = TWITTUI_HOMEPAGE_URL
         if "icon" not in kwargs or kwargs["icon"] is None:
             resolved_icon = resolve_app_icon()
             if resolved_icon:
@@ -2528,6 +2534,15 @@ class TwitTUIForm(toga.App):
         self.commands.add(self.preferences_cmd)
 
         # Help Menu commands
+        homepage_cmd = toga.Command(
+            self.on_open_homepage,
+            text='Visit Homepage',
+            tooltip='Open the TwitTUI project homepage in browser',
+            group=toga.Group.HELP,
+            section=0,
+            order=0
+        )
+        self.homepage_cmd = homepage_cmd
         readme_cmd = toga.Command(
             self.on_open_readme,
             text='View README Documentation',
@@ -2555,6 +2570,7 @@ class TwitTUIForm(toga.App):
             order=3
         )
         self.api_key_cmd = api_key_cmd
+        self.commands.add(homepage_cmd)
         self.commands.add(readme_cmd)
         self.commands.add(apib_cmd)
         self.commands.add(api_key_cmd)
@@ -3273,6 +3289,24 @@ class TwitTUIForm(toga.App):
     def show_apib_viewer(self) -> None:
         """Display twittv.apib using the Hybrid Resilient Pattern (WebView with Browser fallback)."""
         self.show_document_viewer("twittv.apib", "TWiT API Specification (twittv.apib)")
+
+    def open_homepage_url(self) -> None:
+        """Open the TwitTUI project homepage URL in the default browser."""
+        try:
+            target_url = getattr(self, 'home_page', None) or TWITTUI_HOMEPAGE_URL
+            webbrowser.open(target_url)
+        except Exception as e:
+            err_msg = f"Failed to open project homepage URL: {e}"
+            print(f"Error: {err_msg}")
+            if hasattr(self, 'main_window') and self.main_window:
+                try:
+                    self.main_window.error_dialog("Browser Error", err_msg)
+                except Exception:
+                    pass
+
+    def on_open_homepage(self, widget=None) -> None:
+        """Handler for Help menu command to visit project homepage."""
+        self.open_homepage_url()
 
     def on_open_readme(self, widget=None) -> None:
         """Handler for Help menu command to view README documentation."""

@@ -7,6 +7,13 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault('TOGA_BACKEND', 'toga_textual')
 
+from toga_textual_backend import (
+    TextualDialogScreen,
+    TextualChoiceDialogScreen,
+    patch_toga_textual,
+)
+patch_toga_textual()
+
 import toga
 from textual.app import App
 from twittui_form import (
@@ -15,11 +22,6 @@ from twittui_form import (
     get_widget_tooltip,
     set_widget_tooltip,
     patch_toga_tooltips,
-)
-from toga_textual_backend import (
-    TextualDialogScreen,
-    TextualChoiceDialogScreen,
-    patch_toga_textual,
 )
 
 
@@ -96,12 +98,16 @@ class TestMainFormUITooltips(unittest.TestCase):
     """Verify that all UI controls on the main TwitTUIForm window have descriptive tooltips."""
 
     def setUp(self) -> None:
+        patch_toga_textual()
+        patch_toga_tooltips()
         os.environ['TWITAUDIOONLY'] = '0'
         os.environ['TWITCLUBSHOWFOLDERS'] = '0'
-        self.form = TwitTUIForm(formal_name="TwitTUI", app_id="org.twit.tooltiptest")
-        with patch.object(self.form, 'fetch_shows', return_value=['This Week in Tech']):
-            with patch.object(self.form, 'fetch_episodes', return_value=[]):
-                self.form.startup()
+        self.form = TwitTUIForm(formal_name="TwitTUI", app_id="org.twit.tooltiptest", cache_db_path=":memory:")
+        with patch.object(self.form, '_refresh_catalog'), \
+             patch.object(self.form, 'show_splash_screen'), \
+             patch.object(self.form, 'fetch_shows', return_value=['This Week in Tech']), \
+             patch.object(self.form, 'fetch_episodes', return_value=[]):
+            self.form.startup()
 
     def test_all_startup_elements_have_tooltips(self) -> None:
         """Ensure every single UI component instantiated in startup has a non-empty tooltip."""
@@ -149,6 +155,7 @@ class TestMainFormUITooltips(unittest.TestCase):
             'streamer_label': self.form.streamer_label,
             'streamer_input': self.form.streamer_input,
             'progress_bar': self.form.progress_bar,
+            'homepage_cmd': self.form.homepage_cmd,
             'readme_cmd': self.form.readme_cmd,
             'apib_cmd': self.form.apib_cmd,
             'api_key_cmd': self.form.api_key_cmd,
@@ -242,6 +249,12 @@ class TestMainFormUITooltips(unittest.TestCase):
         with patch("webbrowser.open") as mock_open:
             self.form.on_open_api_key_url()
             mock_open.assert_called_once_with("https://apidocs.twit.tv/")
+
+    def test_homepage_url_in_help_menu(self) -> None:
+        """Verify Help menu Visit Homepage command invokes browser with the project homepage URL."""
+        with patch("webbrowser.open") as mock_open:
+            self.form.on_open_homepage()
+            mock_open.assert_called_once_with("https://github.com/mainmeister/twittui.git")
 
 
 class TestModalAndDialogTooltips(unittest.TestCase):
