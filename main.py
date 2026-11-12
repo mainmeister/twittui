@@ -264,8 +264,24 @@ def resolve_toga_backend(argv: list[str] | None = None, prompt_interactive: bool
 
     return chosen_backend
 
+def show_terminal_splash(message: str = "Loading TwitTUI, please wait...") -> None:
+    """Display a concise terminal splash screen banner while the application loads or closes."""
+    try:
+        if sys.stdout and hasattr(sys.stdout, 'isatty') and sys.stdout.isatty():
+            splash = (
+                "\n"
+                "======================================================================\n"
+                "  TwitTUI: TWiT.tv Terminal & Desktop Media Browser\n"
+                f"  {message}\n"
+                "======================================================================\n"
+            )
+            print(splash, flush=True)
+    except Exception:
+        pass
+
 def main(argv: list[str] | None = None) -> None:
     """TwitTUI application entry point."""
+    show_terminal_splash("Loading TwitTUI, please wait...")
     backend = resolve_toga_backend(argv)
 
     from twittui_form import load_twittui_dotenv, patch_toga_icons, patch_toga_gtk_app, main as create_app
@@ -296,6 +312,8 @@ def main(argv: list[str] | None = None) -> None:
                 app.main_loop()
                 return
         raise
+    finally:
+        show_terminal_splash("TwitTUI closed.")
 
 if __name__ == '__main__':
     main()

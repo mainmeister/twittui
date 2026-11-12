@@ -28,12 +28,13 @@ This document serves two primary audiences:
   - [Project Structure](#project-structure)
   - [Application Icon & Branding Asset Pipeline](#application-icon--branding-asset-pipeline)
   - [Execution Lifecycle & GTK Namespace Locking (`main.py`)](#execution-lifecycle--gtk-namespace-locking-mainpy)
+  - [Startup & Shutdown Splash Screen Lifecycle](#startup--shutdown-splash-screen-lifecycle)
   - [Installer & Packaging Engine (`installer.py`)](#installer--packaging-engine-installerpy)
   - [Snap Packaging & Confinement Architecture (`snap/`)](#snap-packaging--confinement-architecture-snap)
   - [UI Architecture & Widget Tree (`twittui_form.py`)](#ui-architecture--widget-tree-twittui_formpy)
   - [Tiered Search Engine & Phonetic Matching Architecture (`tiered_search.py`, `double_metaphone.py`)](#tiered-search-engine--phonetic-matching-architecture-tiered_searchpy-double_metaphonepy)
   - [Search Match Inspection & KWIC Snippet Pipeline](#search-match-inspection--kwic-snippet-pipeline)
-  - [Data Ingestion & Fallbacks](#data-ingestion--fallbacks)
+  - [Data Ingestion, Persistent SQLite Caching & Fallbacks](#data-ingestion-persistent-sqlite-caching--fallbacks)
   - [Media Resolution Engine & Extraction Heuristics](#media-resolution-engine--extraction-heuristics)
   - [Asynchronous Streaming & Multi-Threaded Batch Downloader](#asynchronous-streaming--multi-threaded-batch-downloader)
   - [Filesystem Sanitization & Naming Pipeline](#filesystem-sanitization--naming-pipeline)
@@ -57,6 +58,9 @@ This document serves two primary audiences:
 - **Tiered Multi-Engine Search Pipeline**: Combines exact substring matching, ranked fuzzy subsequence scoring (`fzf`-style local sequence alignment and Levenshtein edit distance), and Double Metaphone phonetic matching in pure Python. Delivers precise results for accurate terms while transparently resolving typos and phonetic misspellings (e.g., `ballacer` → `ballecer`, `secruity` → `security`).
 - **Interactive Search Match Preview & KWIC Snippets**: Displays an instant search match summary banner inside episode hover popup dialogs. Communicates the matched field (Title, Hosts/Guests, Topics, Description/Show Notes), match classification (Exact, Fuzzy similarity %, or Phonetic correlation), and an auto-aligned Keyword-in-Context (KWIC) excerpt with automated GTK cursor positioning.
 - **Episode Metadata Hover Preview**: Hovering over an episode row for 3 seconds displays comprehensive episode metadata, show notes, and links in a dedicated popup dialog (across both GTK and Textual interfaces) without network delays.
+- **Startup & Shutdown Splash Screens**: Provides clear, immediate visual feedback during application initialization (show catalog and episode archive hydration) and during application exit across Textual modal screens, GTK desktop windows, and interactive terminal banners.
+- **Client-Side & In-Memory Sorting**: Instantly re-sorts loaded episode collections by Date, Episode Number, Title, Length, or Size without redundant network round-trips or episode list truncation.
+- **Persistent SQLite & In-Memory Caching**: Leverages a local SQLite persistent cache (`twittui_cache.db`) alongside in-memory caches to store show metadata, RSS feeds, and episode entries, accelerating app launch and enabling responsive offline browsing.
 - **Resilient Episode Ingestion**: Show and episode fetching and media resolution use different API, RSS and webpage fallbacks. End dates are scraped from public web archives without consuming API quota.
 - **Synchronized UI Lifecycle**: Modal wait dialogs remain active until catalog dates and episode lists finish loading, ensuring stable UI scrolling and selection.
 - **Direct Video/Audio Streaming**: Spawn external media players (e.g., VLC, MPV) asynchronously using customizable command templates without stalling the UI.
@@ -372,14 +376,14 @@ TWITPHONETICSEARCH=1
   - **Auto-Scroll Positioning**: In the GTK desktop interface, the description text view automatically scrolls and positions the cursor at the exact character offset of the match.
 
 #### Sorting Episodes
-- Select one of the three sort mode buttons:
+- Select one of the sort mode buttons:
   - **☑ Date**: Sorts episodes by airing/publication date.
   - **☑ Episode Number**: Sorts numerically by episode number.
   - **☑ Episode Title**: Sorts alphabetically by episode title.
 - Toggle the sort direction button:
   - **▼ Descending**: Displays newer or higher values first.
   - **▲ Ascending**: Displays older or lower values first.
-  - Changing direction reloads episodes; the source may be the API, RSS, or an archive, and the displayed list is also sorted locally.
+  - Loaded episode archives are sorted instantly in-memory, preserving the complete episode list without extra API requests or truncation. Sorting by duration (Length) or file size (Size) leverages local client-side sorting algorithms.
 
 #### Streaming an Episode
 1. Click on an episode in the list table to highlight it.
@@ -410,6 +414,7 @@ TWITPHONETICSEARCH=1
 twittui/
 ├── main.py                  # Process bootstrap, stderr filtering, and GTK environment patching
 ├── twittui_form.py          # Core application logic, Toga GUI/TUI layout, networking, and workers
+├── toga_textual_backend.py  # Textual TUI backend adapters, modal dialogs, and splash screen widgets
 ├── tiered_search.py         # Multi-tiered search engine (Exact, Ranked Fuzzy / fzf, Double Metaphone)
 ├── double_metaphone.py      # Pure Python implementation of Lawrence Philips' Double Metaphone algorithm
 ├── installer.py             # Packaging, executable installation, and artifact cleanup engine
@@ -426,12 +431,23 @@ twittui/
 │   │   └── twittui.png      # Application branding icon for snap package (256x256)
 │   └── local/               # Runtime sandboxing and environment isolation
 │       └── launcher.sh      # Subprocess launcher, GTK module filter, and cache initializer
+├── test_api_rate_limiter.py # 5 req/min rate limiter and retry logic tests
+├── test_backend_factory.py  # Toga backend detection and CLI switch tests
+├── test_caching.py          # SQLite database persistent caching and TTL expiration tests
+├── test_episode_activation.py# Row selection and streaming activation tests
 ├── test_episode_search.py   # Multi-tier search verification and typo resilience tests
 ├── test_hover_popup.py      # Episode metadata dialog and search match preview tests
-├── test_preferences.py      # In-app configuration, search toggle, and .env persistence tests
-├── test_snap.py             # Snapcraft recipe, desktop entry, launcher, and sandbox tests
-├── test_show_catalog.py     # Show catalog pagination, archive scraping, and rate limiting tests
 ├── test_install.py          # PyInstaller packaging, standalone binary, and cleanup tests
+├── test_open_destination.py # Destination directory opening and creation tests
+├── test_preferences.py      # In-app configuration, search toggle, and .env persistence tests
+├── test_resolutions.py      # Multi-resolution format parsing and selection tests
+├── test_security.py         # Markdown sanitization and URL security tests
+├── test_show_catalog.py     # Show catalog pagination, archive scraping, and rate limiting tests
+├── test_show_folders.py     # Show subfolder structure creation and filename routing tests
+├── test_snap.py             # Snapcraft recipe, desktop entry, launcher, and sandbox tests
+├── test_splash_screen.py    # Startup/shutdown splash screens and terminal banner tests
+├── test_tooltips.py         # UI widget tooltip bindings and accessibility tests
+├── test_youtube_download.py # YouTube video stream resolution and download tests
 ├── setup.py                 # Standard Python package setup and metadata definition
 ├── pyproject.toml           # Modern Python build-system configuration
 ├── twittv.apib              # Full API Blueprint documentation for TWiT.tv REST API v1.0
@@ -524,6 +540,25 @@ class StderrRedirector:
     def flush(self) -> None:
         self.original_stderr.flush()
 ```
+
+---
+
+### Startup & Shutdown Splash Screen Lifecycle
+
+TwitTUI provides dedicated visual feedback to keep users informed during startup and application exit:
+
+1. **Terminal Banner (`show_terminal_splash` in `main.py`)**:
+   - Prints an ASCII splash header when launching in interactive TTY sessions before backend initialization.
+   - Outputs a clean shutdown confirmation banner upon process termination.
+
+2. **Textual TUI Modal Splash (`SplashScreen` in `toga_textual_backend.py`)**:
+   - Implements a centered modal overlay utilizing Textual's `LoadingIndicator` and reactive message labels.
+   - Pushed onto the screen stack during application initialization and updated dynamically via `update_message()`.
+   - Dismissed automatically via `close_splash()` once initial show catalogs and episode lists are hydrated, or closed gracefully on shutdown.
+
+3. **Desktop GUI Splash Window (`show_splash_screen()` in `twittui_form.py`)**:
+   - For graphical desktop environments (e.g. GTK), displays an undecorated, centered modal window containing an active `toga.ActivityIndicator` and dynamic progress text.
+   - Positioned relative to the parent application window and automatically closed once background hydration finishes.
 
 ---
 
@@ -626,6 +661,7 @@ The desktop launcher file registers TwitTUI in system application menus:
 - **Application Menu (`toga.Group.APP`)**:
   - **Preferences**: Opens the modal Preferences window containing the API credentials, Club TWiT URL, download destination, block size, rate limit, and streamer settings.
 - **Help Menu (`toga.Group.HELP`)**:
+  - **Visit Homepage**: Opens the official TwitTUI GitHub repository (`https://github.com/mainmeister/twittui.git`) in the default system web browser.
   - **View README Documentation**: Opens the integrated documentation viewer via the **Hybrid Resilient Pattern**. Converts Markdown to fully sanitized HTML (stripping malicious tags, event handlers, and dangerous URI schemes) and displays it in an in-app `toga.WebView` window with automatic fallback to the system default web browser. Features smooth Table of Contents anchor navigation and a persistent floating "↑ Table of Contents" button.
   - **View API Specification (twittv.apib)**: Opens the complete API Blueprint specification for the TWiT.tv REST API v1.0 formatted and rendered identically to the README documentation viewer with HTML sanitization, anchor navigation, and hybrid viewer fallback.
   - **Get TWiT API Key**: Opens the official TWiT API documentation and developer portal (`https://apidocs.twit.tv/`) in the default system web browser to register applications and obtain API Application IDs and Keys.
@@ -771,7 +807,7 @@ class MatchContext:
 
 ---
 
-### Data Ingestion & Fallbacks
+### Data Ingestion, Persistent SQLite Caching & Fallbacks
 
 There is no single fallback cascade for every operation:
 - **Show catalog**: Fetches the show catalog in a single API query (`GET /shows?page=1&range=1000`) when credentials are available, falling back to 26 built-in default shows if unavailable or offline. Show start dates (`created`) and active statuses (`active`) are parsed directly from the API response, while show end dates are discovered asynchronously via public web archive scraping (`/episodes?filter[shows]={show_id}`) to conserve API quotas under strict rate limits (5 calls/min).
@@ -781,13 +817,18 @@ There is no single fallback cascade for every operation:
 
 API requests share a process-wide limiter: at least one second between request starts and at most five starts per rolling minute. An HTTP 500 response containing `usage limits are exceeded` triggers one retry after 60 seconds.
 
-#### In-Memory Caching
-To eliminate redundant HTTP traffic and improve responsiveness:
-- `self._memberful_feeds_cache`: Caches parsed Memberful items per feed.
-- `self._club_rss_cache`: Holds aggregated Club items when fetched without a specific show.
-- `self._show_rss_cache`: Caches public feed items by normalized show name plus an `_audio` or `_video` suffix.
-- `self.show_ids`: Stores active show mappings with fallback to `DEFAULT_SHOWS` (26 entries).
-- Network workers use snapshots containing copies of caches rather than a single shared mutable cache.
+#### Persistent SQLite Caching & In-Memory Storage
+To eliminate redundant HTTP traffic, minimize latency, and enable offline browsing:
+- **Persistent SQLite Database (`twittui_cache.db`)**:
+  - Saved to the platform cache directory (`~/.cache/twittui/twittui_cache.db` on Linux/POSIX or within `$SNAP_USER_DATA/.cache` under Snap confinement).
+  - Maintains tables for show listings, show archive dates, public RSS feeds, Memberful subscriber feeds, and episode metadata.
+  - Implements configurable TTL (time-to-live) expiration to balance freshness with network economy.
+- **In-Memory Caches**:
+  - `self._memberful_feeds_cache`: Caches parsed Memberful items per feed.
+  - `self._club_rss_cache`: Holds aggregated Club items when fetched without a specific show.
+  - `self._show_rss_cache`: Caches public feed items by normalized show name plus an `_audio` or `_video` suffix.
+  - `self.show_ids`: Stores active show mappings with fallback to `DEFAULT_SHOWS` (26 entries).
+  - Network workers use snapshots containing copies of caches rather than a single shared mutable cache.
 
 ---
 
@@ -951,19 +992,22 @@ Without a configured destination, the application prefers a writable `~/Download
 TwitTUI maintains a comprehensive automated unit test suite covering end-to-end functionality, GUI backend abstractions, packaging pipelines, security sanitization, search algorithms, and network operations:
 
 - **Test Suite Structure**:
-  - `test_episode_search.py`: Tests for the three-tiered search pipeline, exact substring priority, `fzf` subsequence ranking, typo resilience, and Double Metaphone phonetic matching (`double_metaphone.py`).
-  - `test_hover_popup.py`: Tests for 3-second hover metadata extraction, popup dialog formatting, search match provenance classification, KWIC snippet generation, and auto-scroll cursor placement.
-  - `test_preferences.py`: Tests for in-app preference dialogs, live configuration binding, search toggle persistence, and `.env` serialization.
-  - `test_show_catalog.py`: Tests for show catalog single-request pagination (`range=1000`), active/ended status parsing, start date (`created`) extraction, public web archive scraping, rate-limit wait modal synchronization, episode iterative fetching in blocks of 50 (`range=50`), and local catalog search.
   - `test_api_rate_limiter.py`: Tests for 5 requests/minute sliding window rate limiting and automatic retry on API limit responses.
-  - `test_install.py`: Tests for PyInstaller compilation, standalone executable installation, PATH discovery, artifact cleanup, hidden module import bundling (`tiered_search`, `double_metaphone`), and application icon generation.
-  - `test_snap.py`: Tests for Snapcraft YAML structure, base core24 specification, strict confinement, plugs and slots, desktop entry Freedesktop validity, launcher shell script permissions and environment isolation logic, requirements/setup synchronization, SNAP_USER_DATA .env loading/saving, and runtime resource resolution.
   - `test_backend_factory.py`: Tests for backend detection, CLI flag routing (`--gtk`, `--textual`), and environment variable configuration.
-  - `test_security.py`: Tests for markdown sanitization, HTML attribute stripping, and URI validation.
+  - `test_caching.py`: Tests for persistent SQLite database caching (`twittui_cache.db`), schema creation, cache TTL expiration, and cache hits/misses.
+  - `test_episode_activation.py`: Tests for table row selection, double-click streaming activation, keyboard shortcuts, and table focus interactions.
+  - `test_episode_search.py`: Tests for the three-tiered search pipeline, exact substring priority, `fzf` subsequence ranking, typo resilience, Double Metaphone phonetic matching (`double_metaphone.py`), and non-truncating in-memory sorting.
+  - `test_hover_popup.py`: Tests for 3-second hover metadata extraction, popup dialog formatting, search match provenance classification, KWIC snippet generation, and auto-scroll cursor placement.
+  - `test_install.py`: Tests for PyInstaller compilation, standalone executable installation, PATH discovery, artifact cleanup, hidden module import bundling (`tiered_search`, `double_metaphone`), and application icon generation.
+  - `test_open_destination.py`: Tests for opening and auto-creating download destination folders cross-platform.
+  - `test_preferences.py`: Tests for in-app preference dialogs, live configuration binding, search toggle persistence, and `.env` serialization.
   - `test_resolutions.py`: Tests for multi-resolution media extraction, format sorting, and batch resolution selection modals.
-  - `test_open_destination.py`: Tests for opening destination folders cross-platform.
+  - `test_security.py`: Tests for markdown sanitization, HTML attribute stripping, and URI validation.
+  - `test_show_catalog.py`: Tests for show catalog single-request pagination (`range=1000`), active/ended status parsing, start date (`created`) extraction, public web archive scraping, rate-limit wait modal synchronization, episode iterative fetching in blocks of 50 (`range=50`), and local catalog search.
   - `test_show_folders.py`: Tests for show folder sub-directory hierarchy creation and file path resolution.
-  - `test_tooltips.py`: Tests for tooltip assignment across widgets.
+  - `test_snap.py`: Tests for Snapcraft YAML structure, base core24 specification, strict confinement, plugs and slots, desktop entry Freedesktop validity, launcher shell script permissions and environment isolation logic, requirements/setup synchronization, SNAP_USER_DATA .env loading/saving, and runtime resource resolution.
+  - `test_splash_screen.py`: Tests for Textual modal splash screens, desktop modal splash windows, message update reactivity, and CLI terminal splash banners.
+  - `test_tooltips.py`: Tests for tooltip assignment and accessibility across all interactive widgets.
   - `test_youtube_download.py`: Tests for YouTube fallback extraction and download helpers.
 
 - **Running Tests**:
