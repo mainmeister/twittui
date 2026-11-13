@@ -3,6 +3,16 @@ import importlib.util
 import os
 import sys
 
+_GTK_MODULE_ENV_VARS = (
+    "GTK_MODULES",
+    "GTK_PATH",
+    "GTK3_MODULES",
+    "UBUNTU_MENUPROXY",
+    "QT_STYLE_OVERRIDE",
+    "QT_QPA_PLATFORMTHEME",
+)
+
+
 # Redirect stderr to suppress GTK warnings
 class StderrRedirector:
     def __init__(self, original_stderr) -> None:
@@ -17,22 +27,32 @@ class StderrRedirector:
     def flush(self) -> None:
         self.original_stderr.flush()
 
-def configure_gtk_environment() -> None:
-    """Configure GTK environment variables and ensure GObject introspection version consistency."""
-    # Suppress GTK module warnings and remove host module variables that conflict inside containers
-    for var in ("GTK_MODULES", "GTK_PATH", "GTK3_MODULES", "UBUNTU_MENUPROXY", "QT_STYLE_OVERRIDE", "QT_QPA_PLATFORMTHEME"):
+    def __getattr__(self, name: str):
+        return getattr(self.original_stderr, name)
+
+
+def sanitize_gtk_module_env() -> None:
+    """Remove host GTK/Qt module environment variables that conflict in TUI or bundled environments."""
+    for var in _GTK_MODULE_ENV_VARS:
         os.environ.pop(var, None)
 
     try:
         import ctypes
         libc = ctypes.CDLL(None)
         if hasattr(libc, "unsetenv"):
-            for var_bytes in (b"GTK_MODULES", b"GTK_PATH", b"GTK3_MODULES", b"UBUNTU_MENUPROXY", b"QT_STYLE_OVERRIDE", b"QT_QPA_PLATFORMTHEME"):
-                libc.unsetenv(var_bytes)
+            for var in _GTK_MODULE_ENV_VARS:
+                libc.unsetenv(var.encode("ascii"))
     except Exception:
         pass
 
-    sys.stderr = StderrRedirector(sys.stderr)
+
+def configure_gtk_environment() -> None:
+    """Configure GTK environment variables and ensure GObject introspection version consistency."""
+    # Suppress GTK module warnings and remove host module variables that conflict inside containers
+    sanitize_gtk_module_env()
+
+    if not isinstance(sys.stderr, StderrRedirector):
+        sys.stderr = StderrRedirector(sys.stderr)
     if 'GTK_DEBUG' in os.environ:
         del os.environ['GTK_DEBUG']
     os.environ['NO_AT_BRIDGE'] = '1'
@@ -251,16 +271,18 @@ def resolve_toga_backend(argv: list[str] | None = None, prompt_interactive: bool
             sys.exit(1)
 
     os.environ['TOGA_BACKEND'] = chosen_backend
+    sanitize_gtk_module_env()
 
     if chosen_backend == 'toga_textual':
         from toga_textual_backend import patch_toga_textual
         patch_toga_textual()
+        from twittui_form import patch_toga_icons
+        patch_toga_icons(include_gtk=False)
     elif chosen_backend == 'toga_gtk':
         configure_gtk_environment()
-
-    from twittui_form import patch_toga_icons, patch_toga_gtk_app
-    patch_toga_icons()
-    patch_toga_gtk_app()
+        from twittui_form import patch_toga_icons, patch_toga_gtk_app
+        patch_toga_icons(include_gtk=True)
+        patch_toga_gtk_app()
 
     return chosen_backend
 
@@ -284,14 +306,30 @@ def main(argv: list[str] | None = None) -> None:
     show_terminal_splash("Loading TwitTUI, please wait...")
     backend = resolve_toga_backend(argv)
 
+    if backend == 'toga_textual':
+        import warnings
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*\[toga_textual\] Not implemented:.*",
+        )
+        warnings.filterwarnings("ignore", category=ResourceWarning)
+
+    from contextlib import ExitStack, redirect_stdout
+    import io
     from twittui_form import load_twittui_dotenv, patch_toga_icons, patch_toga_gtk_app, main as create_app
     load_twittui_dotenv()
-    patch_toga_icons()
-    patch_toga_gtk_app()
+    if backend == 'toga_gtk':
+        patch_toga_icons(include_gtk=True)
+        patch_toga_gtk_app()
+    else:
+        patch_toga_icons(include_gtk=False)
 
     try:
-        app = create_app()
-        app.main_loop()
+        with ExitStack() as stack:
+            if backend == 'toga_textual':
+                stack.enter_context(redirect_stdout(io.StringIO()))
+            app = create_app()
+            app.main_loop()
     except (RuntimeError, Exception) as e:
         err_msg = str(e)
         if ("Cannot identify an active display" in err_msg or "DISPLAY" in err_msg or "Couldn’t recognize the image file format" in err_msg or "gdk-pixbuf-error-quark" in err_msg or "Unable to load icon" in err_msg or "maximum recursion depth" in err_msg or "Failed to register" in err_msg or "AccessDenied" in err_msg or "AppArmor" in err_msg) and backend != "toga_textual":
@@ -308,8 +346,9 @@ def main(argv: list[str] | None = None) -> None:
                     pass
                 from toga_textual_backend import patch_toga_textual
                 patch_toga_textual()
-                app = create_app()
-                app.main_loop()
+                with redirect_stdout(io.StringIO()):
+                    app = create_app()
+                    app.main_loop()
                 return
         raise
     finally:

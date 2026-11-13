@@ -7,8 +7,12 @@ WebView, and other widgets missing from standard toga-textual.
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import redirect_stdout
+import io
 import os
 from typing import Any
+import warnings
 from travertino.size import at_least
 from textual._context import NoActiveAppError
 from textual.binding import Binding
@@ -26,6 +30,7 @@ from textual.widgets import (
     TextArea,
 )
 import toga
+import toga.dialogs
 import toga.platform
 from toga_textual.widgets.base import Widget
 
@@ -46,20 +51,33 @@ class RateLimitScreen(ModalScreen):
             yield Label('Waiting for the TWiT API. Please wait.')
             yield LoadingIndicator()
 
-    def close_wait(self) -> None:
-        self._close_requested = True
+    def _try_dismiss(self) -> None:
+        if not self._close_requested:
+            return
         try:
-            if hasattr(self, 'app') and self.app and getattr(self.app, 'screen', None) is self:
+            app = getattr(self, 'app', None)
+            if not app:
+                return
+            if getattr(app, 'screen', None) is self:
                 self.dismiss()
+            else:
+                stack = getattr(app, '_screen_stack', None)
+                if isinstance(stack, list) and self in stack and stack[-1] is not self:
+                    stack.remove(self)
         except Exception:
             pass
 
+    def close_wait(self) -> None:
+        self._close_requested = True
+        self._try_dismiss()
+
+    def on_mount(self) -> None:
+        if self._close_requested:
+            self.call_later(self._try_dismiss)
+
     def on_screen_resume(self) -> None:
         if self._close_requested:
-            try:
-                self.dismiss()
-            except Exception:
-                pass
+            self._try_dismiss()
 
 
 class SplashScreen(ModalScreen):
@@ -116,20 +134,33 @@ class SplashScreen(ModalScreen):
         except Exception:
             pass
 
-    def close_splash(self) -> None:
-        self._close_requested = True
+    def _try_dismiss(self) -> None:
+        if not self._close_requested:
+            return
         try:
-            if hasattr(self, 'app') and self.app and getattr(self.app, 'screen', None) is self:
+            app = getattr(self, 'app', None)
+            if not app:
+                return
+            if getattr(app, 'screen', None) is self:
                 self.dismiss()
+            else:
+                stack = getattr(app, '_screen_stack', None)
+                if isinstance(stack, list) and self in stack and stack[-1] is not self:
+                    stack.remove(self)
         except Exception:
             pass
 
+    def close_splash(self) -> None:
+        self._close_requested = True
+        self._try_dismiss()
+
+    def on_mount(self) -> None:
+        if self._close_requested:
+            self.call_later(self._try_dismiss)
+
     def on_screen_resume(self) -> None:
         if self._close_requested:
-            try:
-                self.dismiss()
-            except Exception:
-                pass
+            self._try_dismiss()
 
 
 class TextualDialogScreen(ModalScreen):
@@ -258,6 +289,12 @@ class TextualChoiceDialogScreen(ModalScreen):
     }
     """
 
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("up", "focus_previous", "Previous", show=False),
+        Binding("down", "focus_next", "Next", show=False),
+    ]
+
     def __init__(self, title: str, message: str, options: list[dict], future: Any) -> None:
         super().__init__()
         self.dialog_title = title
@@ -277,44 +314,69 @@ class TextualChoiceDialogScreen(ModalScreen):
             with Horizontal(id="choice_cancel_row"):
                 yield Button("Cancel", id="btn_choice_cancel", variant="error", tooltip="Cancel resolution selection")
 
+    def on_mount(self) -> None:
+        try:
+            if self.options:
+                self.query_one("#opt_btn_0", Button).focus()
+            else:
+                self.query_one("#btn_choice_cancel", Button).focus()
+        except Exception:
+            pass
+
+    def _finish(self, result: Any) -> None:
+        if self.future and not self.future.done():
+            self.future.set_result(result)
+        try:
+            self.dismiss(result)
+        except Exception:
+            pass
+
+    def action_cancel(self) -> None:
+        self._finish(None)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
         if button_id == "btn_choice_cancel":
-            self.dismiss(None)
-            if self.future and not self.future.done():
-                self.future.set_result(None)
+            self._finish(None)
             return
 
         if button_id and button_id.startswith("opt_btn_"):
             try:
                 idx = int(button_id.split("opt_btn_")[1])
                 selected = self.options[idx]
-                self.dismiss(selected)
-                if self.future and not self.future.done():
-                    self.future.set_result(selected)
+                self._finish(selected)
                 return
             except Exception:
                 pass
 
-        self.dismiss(None)
-        if self.future and not self.future.done():
-            self.future.set_result(None)
+        self._finish(None)
 
 
-class ChoiceDialog:
+class ChoiceDialog(toga.dialogs.Dialog):
     """Dialog that allows user to choose from a list of option dictionaries."""
     def __init__(self, title: str, message: str, options: list[dict], default_result: Any = None) -> None:
         self.title = title
         self.message = message
         self.options = options
         self.default_result = default_result
+        self._impl = self
+
+    def _show(self, window: Any) -> asyncio.Future:
+        try:
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+        except RuntimeError:
+            future = asyncio.Future()
+        self.show(window, future)
+        return future
 
     def show(self, host_window: Any, future: Any) -> None:
         try:
-            app = toga.App.app
-            if app and hasattr(app, '_impl') and hasattr(app._impl, 'native'):
+            app = getattr(host_window, 'app', None) or toga.App.app
+            native = getattr(getattr(app, '_impl', None), 'native', None) if app else None
+            if native is not None and hasattr(native, 'push_screen'):
                 screen = TextualChoiceDialogScreen(self.title, self.message, self.options, future)
-                app._impl.native.push_screen(screen)
+                native.push_screen(screen)
                 return
         except Exception:
             pass
@@ -926,37 +988,98 @@ def patch_toga_textual() -> None:
     """Register missing Textual widget implementations with Toga's platform factory."""
     try:
         import toga_textual
+        import toga_textual.app
         import toga_textual.window
         import toga_textual.widgets.base
 
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*\[toga_textual\] Not implemented:.*",
+        )
+
+        # Silence noisy unimplemented menu/toolbar warnings in toga_textual
+        if not getattr(toga_textual.app.App, "_twittui_patched", False):
+            toga_textual.app.App.create_menus = lambda self: None
+
+            orig_create = toga_textual.app.App.create
+
+            def safe_create(self: Any) -> None:
+                self.interface._startup()
+                main_win = getattr(self.interface, "main_window", None)
+                if main_win in (None, toga.App.BACKGROUND):
+                    return
+                win_impl = getattr(main_win, "_impl", None)
+                win_native = getattr(win_impl, "native", None)
+                stack = getattr(self.native, "_screen_stack", None)
+                # If startup already pushed main_window and modal screens (e.g. SplashScreen / RateLimitScreen),
+                # preserve the modal stack instead of overwriting the top screen with a duplicate TogaMainWindow.
+                if isinstance(stack, list) and win_native in stack and isinstance(stack[-1], ModalScreen):
+                    previous_current = self._current_window
+                    self._current_window = win_impl
+                    self.native.title = win_impl.get_title()
+                    if previous_current != win_impl:
+                        if previous_current is not None:
+                            previous_current.interface.on_lose_focus()
+                            previous_current.interface.on_hide()
+                        main_win.on_gain_focus()
+                        main_win.on_show()
+                else:
+                    self.set_current_window(main_win)
+
+            toga_textual.app.App.create = safe_create
+
+            orig_main_loop = toga_textual.app.App.main_loop
+
+            def safe_main_loop(self: Any) -> None:
+                if getattr(self, "headless", False):
+                    orig_main_loop(self)
+                    return
+                sink = io.StringIO()
+                with redirect_stdout(sink):
+                    orig_main_loop(self)
+
+            toga_textual.app.App.main_loop = safe_main_loop
+            toga_textual.app.App._twittui_patched = True
+
+        if not getattr(toga_textual.window.Window, "_twittui_toolbar_patched", False):
+            toga_textual.window.Window.create_toolbar = lambda self: None
+            toga_textual.window.Window._twittui_toolbar_patched = True
+
         # Safely wrap Window.set_app to handle headless/test execution
-        orig_set_app = toga_textual.window.Window.set_app
+        if not getattr(toga_textual.window.Window, "_twittui_set_app_patched", False):
+            orig_set_app = toga_textual.window.Window.set_app
 
-        def safe_set_app(self: Any, app: Any) -> None:
-            try:
-                orig_set_app(self, app)
-            except Exception:
+            def safe_set_app(self: Any, app: Any) -> None:
                 try:
-                    app.native.install_screen(self.native, name=self.interface.id)
+                    if getattr(app.native, "_running", False):
+                        app.native.install_screen(self.native, name=self.interface.id)
+                    else:
+                        orig_set_app(self, app)
                 except Exception:
-                    pass
-
-        toga_textual.window.Window.set_app = safe_set_app
-
-        # Safely wrap Widget._mount to handle unmounted container parents during tests
-        orig_mount = toga_textual.widgets.base.Widget._mount
-
-        def safe_mount(self: Any, parent: Any, before: Any = None) -> None:
-            try:
-                orig_mount(self, parent, before)
-            except Exception:
-                for child in getattr(self.interface, 'children', []):
                     try:
-                        child._impl.install(parent=self)
+                        app.native.install_screen(self.native, name=self.interface.id)
                     except Exception:
                         pass
 
-        toga_textual.widgets.base.Widget._mount = safe_mount
+            toga_textual.window.Window.set_app = safe_set_app
+            toga_textual.window.Window._twittui_set_app_patched = True
+
+        # Safely wrap Widget._mount to handle unmounted container parents during tests
+        if not getattr(toga_textual.widgets.base.Widget, "_twittui_mount_patched", False):
+            orig_mount = toga_textual.widgets.base.Widget._mount
+
+            def safe_mount(self: Any, parent: Any, before: Any = None) -> None:
+                try:
+                    orig_mount(self, parent, before)
+                except Exception:
+                    for child in getattr(self.interface, 'children', []):
+                        try:
+                            child._impl.install(parent=self)
+                        except Exception:
+                            pass
+
+            toga_textual.widgets.base.Widget._mount = safe_mount
+            toga_textual.widgets.base.Widget._twittui_mount_patched = True
 
         # Inject implementations into toga_textual module
         for name, impl_cls in TEXTUAL_WIDGET_IMPLEMENTATIONS.items():
@@ -965,28 +1088,30 @@ def patch_toga_textual() -> None:
         setattr(toga_textual, 'dialogs', DialogsFactory)
 
         # Patch Factory.__getattr__ so any Factory instance resolves these widgets
-        orig_getattr = toga.platform.Factory.__getattr__
+        if not getattr(toga.platform.Factory, "_twittui_getattr_patched", False):
+            orig_getattr = toga.platform.Factory.__getattr__
 
-        def custom_getattr(self: Any, name: str) -> Any:
-            try:
-                backend = self.backend
-            except Exception:
-                backend = os.environ.get('TOGA_BACKEND', '')
-            if backend in ('toga_textual', 'textual'):
-                if name in TEXTUAL_WIDGET_IMPLEMENTATIONS:
-                    val = TEXTUAL_WIDGET_IMPLEMENTATIONS[name]
-                    setattr(self, name, val)
-                    return val
-                if name == 'dialogs':
-                    setattr(self, 'dialogs', DialogsFactory)
-                    return DialogsFactory
-                if hasattr(DialogsFactory, name):
-                    val = getattr(DialogsFactory, name)
-                    setattr(self, name, val)
-                    return val
-            return orig_getattr(self, name)
+            def custom_getattr(self: Any, name: str) -> Any:
+                try:
+                    backend = self.backend
+                except Exception:
+                    backend = os.environ.get('TOGA_BACKEND', '')
+                if backend in ('toga_textual', 'textual'):
+                    if name in TEXTUAL_WIDGET_IMPLEMENTATIONS:
+                        val = TEXTUAL_WIDGET_IMPLEMENTATIONS[name]
+                        setattr(self, name, val)
+                        return val
+                    if name == 'dialogs':
+                        setattr(self, 'dialogs', DialogsFactory)
+                        return DialogsFactory
+                    if hasattr(DialogsFactory, name):
+                        val = getattr(DialogsFactory, name)
+                        setattr(self, name, val)
+                        return val
+                return orig_getattr(self, name)
 
-        toga.platform.Factory.__getattr__ = custom_getattr
+            toga.platform.Factory.__getattr__ = custom_getattr
+            toga.platform.Factory._twittui_getattr_patched = True
 
         # Also set directly on cached factory instances if the active backend is Textual
         try:

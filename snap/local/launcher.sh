@@ -92,6 +92,12 @@ if [ -n "$SNAP" ]; then
     fi
 else
     # Non-snap direct execution
+    unset GTK_MODULES
+    unset GTK_PATH
+    unset GTK3_MODULES
+    unset UBUNTU_MENUPROXY
+    unset QT_STYLE_OVERRIDE
+    unset QT_QPA_PLATFORMTHEME
     if [ -f "main.py" ]; then
         exec python3 main.py "$@"
     else
