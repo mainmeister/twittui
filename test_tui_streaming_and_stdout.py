@@ -287,6 +287,138 @@ class TestTUIStreamingAndStdout(unittest.TestCase):
             self.assertEqual(len(sn_eps), 1)
             self.assertEqual(spy_loads.call_count, 1)
 
+    def test_dialog_from_background_thread_call_soon_threadsafe_does_not_raise_no_active_app(self) -> None:
+        """Dialogs and screens scheduled from background threads via loop.call_soon_threadsafe must not crash with NoActiveAppError."""
+        import threading
+        from toga_textual_backend import TextualDialogScreen
+
+        form = TwitTUIForm(
+            formal_name="TWIT.tv TUI",
+            app_id="org.twit.bg-dialog-test",
+            cache_db_path=":memory:",
+        )
+
+        async def run_scenario() -> None:
+            with patch.object(form, "_refresh_catalog", lambda: None), \
+                 patch.object(form, "show_splash_screen", lambda *a, **kw: None):
+                async with form._impl.native.run_test(size=(100, 30)) as pilot:
+                    # Match real TogaApp.run(loop=self.loop) where form.loop is the running asyncio loop
+                    form._impl.loop = asyncio.get_running_loop()
+                    await pilot.pause()
+                    app = pilot.app
+
+                    # 1. Trigger episode hover/metadata info_dialog from a background thread (empty contextvars)
+                    ep_row = {
+                        "episode": "1001",
+                        "title": "Security Now 1001",
+                        "date": "2026-11-12",
+                        "duration": "01:45:00",
+                        "size": "85 MB",
+                        "episode_data": {"number": "1001", "title": "Security Now 1001", "showNotes": "Hover details."},
+                    }
+                    worker = threading.Thread(target=lambda: form.show_episode_metadata_dialog(ep_row))
+                    worker.start()
+                    worker.join(timeout=2.0)
+
+                    for _ in range(20):
+                        await pilot.pause()
+                        if isinstance(app.screen, TextualDialogScreen):
+                            break
+
+                    self.assertIsNone(getattr(app, "_exception", None))
+                    self.assertIsInstance(app.screen, TextualDialogScreen)
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    # 2. Trigger API test result dialog from a background thread
+                    worker2 = threading.Thread(target=lambda: form.show_api_test_dialog(False, "Auth failed"))
+                    worker2.start()
+                    worker2.join(timeout=2.0)
+
+                    for _ in range(20):
+                        await pilot.pause()
+                        if isinstance(app.screen, TextualDialogScreen):
+                            break
+
+                    self.assertIsNone(getattr(app, "_exception", None))
+                    self.assertIsInstance(app.screen, TextualDialogScreen)
+                    await pilot.press("escape")
+                    await pilot.pause()
+
+                    # 3. Trigger RateLimitScreen from a background thread via _rate_limit_wait_changed
+                    worker3 = threading.Thread(target=lambda: form._rate_limit_wait_changed(True))
+                    worker3.start()
+                    worker3.join(timeout=2.0)
+                    await pilot.pause()
+                    self.assertIsNone(getattr(app, "_exception", None))
+                    self.assertIsInstance(app.screen, RateLimitScreen)
+
+                    worker4 = threading.Thread(target=lambda: form._rate_limit_wait_changed(False))
+                    worker4.start()
+                    worker4.join(timeout=2.0)
+                    await pilot.pause()
+                    self.assertIsNone(getattr(app, "_exception", None))
+
+        asyncio.run(run_scenario())
+
+    def test_all_modal_and_secondary_screens_compose_when_pushed_outside_active_app_context(self) -> None:
+        """Pushing any TUI modal or secondary window inside an empty contextvars.Context must not raise NoActiveAppError."""
+        import contextvars
+        from toga_textual_backend import TextualDialogScreen, TextualSelectFolderScreen
+
+        form = TwitTUIForm(
+            formal_name="TWIT.tv TUI",
+            app_id="org.twit.empty-ctx-screens",
+            cache_db_path=":memory:",
+        )
+
+        async def run_scenario() -> None:
+            with patch.object(form, "_refresh_catalog", lambda: None), \
+                 patch.object(form, "show_splash_screen", lambda *a, **kw: None):
+                async with form._impl.native.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    app = pilot.app
+
+                    # Push InfoDialog inside a brand-new empty contextvars.Context (active_app unset)
+                    contextvars.Context().run(lambda: form.main_window.info_dialog("Info", "Body text"))
+                    await pilot.pause()
+                    self.assertIsNone(getattr(app, "_exception", None))
+                    self.assertIsInstance(app.screen, TextualDialogScreen)
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+                    # Push ChoiceDialog inside an empty contextvars.Context
+                    choice_dlg = ChoiceDialog("Quality", "Pick one", [{"id": "hd", "label": "HD"}])
+                    fut = asyncio.get_running_loop().create_future()
+                    contextvars.Context().run(lambda: choice_dlg.show(form.main_window, fut))
+                    await pilot.pause()
+                    self.assertIsNone(getattr(app, "_exception", None))
+                    self.assertIsInstance(app.screen, TextualChoiceDialogScreen)
+                    await pilot.press("escape")
+                    await pilot.pause()
+
+                    # Push SelectFolderDialog inside an empty contextvars.Context
+                    from toga_textual_backend import SelectFolderDialog
+                    folder_dlg = SelectFolderDialog("Folder")
+                    fut2 = asyncio.get_running_loop().create_future()
+                    contextvars.Context().run(lambda: folder_dlg.show(form.main_window, fut2))
+                    await pilot.pause()
+                    self.assertIsNone(getattr(app, "_exception", None))
+                    self.assertIsInstance(app.screen, TextualSelectFolderScreen)
+                    await pilot.press("escape")
+                    await pilot.pause()
+
+                    # Show secondary Preferences window inside an empty contextvars.Context
+                    contextvars.Context().run(form.show_preferences_window)
+                    await pilot.pause()
+                    self.assertIsNone(getattr(app, "_exception", None))
+                    self.assertTrue(form._preferences_window.visible)
+                    contextvars.Context().run(form._preferences_window.hide)
+                    await pilot.pause()
+                    self.assertFalse(form._preferences_window.visible)
+
+        asyncio.run(run_scenario())
+
 
 if __name__ == "__main__":
     unittest.main()

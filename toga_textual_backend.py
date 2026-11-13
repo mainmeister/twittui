@@ -8,7 +8,7 @@ WebView, and other widgets missing from standard toga-textual.
 from __future__ import annotations
 
 import asyncio
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 import io
 import os
 from pathlib import Path
@@ -16,7 +16,7 @@ from typing import Any
 import warnings
 from rich.text import Text
 from travertino.size import at_least
-from textual._context import NoActiveAppError
+from textual._context import NoActiveAppError, active_app, active_message_pump
 from textual.app import SystemCommand
 from textual.binding import Binding
 from textual.screen import ModalScreen, Screen
@@ -40,7 +40,53 @@ import toga.platform
 from toga_textual.widgets.base import Widget
 
 
-class RateLimitScreen(ModalScreen):
+@contextmanager
+def _ensure_active_app(app_native: Any) -> Any:
+    """Bind Textual's active_app ContextVar when invoked from external asyncio callbacks."""
+    if app_native is None:
+        yield
+        return
+    app_token = None
+    pump_token = None
+    try:
+        active_app.get()
+    except LookupError:
+        app_token = active_app.set(app_native)
+    try:
+        active_message_pump.get()
+    except LookupError:
+        pump_token = active_message_pump.set(app_native)
+    try:
+        yield
+    finally:
+        if pump_token is not None:
+            active_message_pump.reset(pump_token)
+        if app_token is not None:
+            active_app.reset(app_token)
+
+
+class _AppContextScreenMixin:
+    """Ensure Screen/ModalScreen message pumps bind active_app even if spawned outside App._context."""
+
+    @contextmanager
+    def _context(self) -> Any:
+        app_token = None
+        try:
+            active_app.get()
+        except LookupError:
+            parent_app = getattr(self, "_parent", None)
+            if parent_app is not None:
+                app_token = active_app.set(parent_app)
+        pump_token = active_message_pump.set(self)
+        try:
+            yield
+        finally:
+            active_message_pump.reset(pump_token)
+            if app_token is not None:
+                active_app.reset(app_token)
+
+
+class RateLimitScreen(_AppContextScreenMixin, ModalScreen):
     DEFAULT_CSS = """
     RateLimitScreen { align: center middle; background: rgba(0, 0, 0, 0.7); }
     RateLimitScreen Vertical { width: 60; height: auto; border: solid $accent; background: $surface; padding: 1 2; }
@@ -85,7 +131,7 @@ class RateLimitScreen(ModalScreen):
             self._try_dismiss()
 
 
-class SplashScreen(ModalScreen):
+class SplashScreen(_AppContextScreenMixin, ModalScreen):
     """Textual modal splash screen displayed while TwitTUI loads or closes."""
 
     DEFAULT_CSS = """
@@ -186,7 +232,7 @@ def _resolve_dialog_future(future: Any, value: Any) -> None:
         pass
 
 
-class TextualDialogScreen(ModalScreen):
+class TextualDialogScreen(_AppContextScreenMixin, ModalScreen):
     """Textual modal screen for displaying Toga dialogs."""
 
     DEFAULT_CSS = """
@@ -198,6 +244,8 @@ class TextualDialogScreen(ModalScreen):
         width: 60;
         max-width: 90%;
         height: auto;
+        max-height: 90%;
+        overflow-y: auto;
         border: solid $accent;
         background: $surface;
         padding: 1 2;
@@ -283,21 +331,22 @@ class BaseTextualDialog:
             app = getattr(host_window, 'app', None) or toga.App.app
             native = getattr(getattr(app, '_impl', None), 'native', None) if app else None
             if native is not None and getattr(native, '_running', False) and hasattr(native, 'push_screen'):
-                screen = TextualDialogScreen(
-                    self.title,
-                    self.message,
-                    self.buttons,
-                    future,
-                    default_result=self.default_result,
-                )
-                native.push_screen(screen)
+                with _ensure_active_app(native):
+                    screen = TextualDialogScreen(
+                        self.title,
+                        self.message,
+                        self.buttons,
+                        future,
+                        default_result=self.default_result,
+                    )
+                    native.push_screen(screen)
                 return
         except Exception:
             pass
         _resolve_dialog_future(future, self.default_result)
 
 
-class TextualChoiceDialogScreen(ModalScreen):
+class TextualChoiceDialogScreen(_AppContextScreenMixin, ModalScreen):
     """Textual modal screen for displaying multiple choice options (such as video resolutions)."""
 
     DEFAULT_CSS = """
@@ -425,8 +474,9 @@ class ChoiceDialog(toga.dialogs.Dialog):
             app = getattr(host_window, 'app', None) or toga.App.app
             native = getattr(getattr(app, '_impl', None), 'native', None) if app else None
             if native is not None and getattr(native, '_running', False) and hasattr(native, 'push_screen'):
-                screen = TextualChoiceDialogScreen(self.title, self.message, self.options, future)
-                native.push_screen(screen)
+                with _ensure_active_app(native):
+                    screen = TextualChoiceDialogScreen(self.title, self.message, self.options, future)
+                    native.push_screen(screen)
                 return
         except Exception:
             pass
@@ -467,7 +517,7 @@ class _FoldersOnlyDirectoryTree(DirectoryTree):
         return sorted(filtered, key=lambda item: item.name.lower())
 
 
-class TextualSelectFolderScreen(ModalScreen):
+class TextualSelectFolderScreen(_AppContextScreenMixin, ModalScreen):
     """Interactive Textual modal screen for selecting a directory in TUI mode."""
 
     DEFAULT_CSS = """
@@ -653,13 +703,14 @@ class SelectFolderDialog:
             app = getattr(host_window, 'app', None) or toga.App.app
             native = getattr(getattr(app, '_impl', None), 'native', None) if app else None
             if native is not None and getattr(native, '_running', False) and hasattr(native, 'push_screen'):
-                screen = TextualSelectFolderScreen(
-                    self.title,
-                    initial_directory=self.initial_directory,
-                    multiple_select=self.multiple_select,
-                    future=future,
-                )
-                native.push_screen(screen)
+                with _ensure_active_app(native):
+                    screen = TextualSelectFolderScreen(
+                        self.title,
+                        initial_directory=self.initial_directory,
+                        multiple_select=self.multiple_select,
+                        future=future,
+                    )
+                    native.push_screen(screen)
                 return
         except Exception:
             pass
@@ -1630,8 +1681,80 @@ def patch_toga_textual() -> None:
             toga_textual.app.TogaApp.action_open_preferences = _action_open_preferences
             toga_textual.app.TogaApp._twittui_commands_patched = True
 
+        # Ensure TogaApp binds active_app ContextVar whenever screens/widgets are registered or navigated
+        # from external asyncio callbacks (such as loop.call_soon_threadsafe from worker/timer threads).
+        if not getattr(toga_textual.app.TogaApp, "_twittui_active_app_patched", False):
+            orig_register_child = toga_textual.app.TogaApp._register_child
+            orig_push_screen = toga_textual.app.TogaApp.push_screen
+            orig_switch_screen = toga_textual.app.TogaApp.switch_screen
+            orig_pop_screen = toga_textual.app.TogaApp.pop_screen
+            orig_install_screen = toga_textual.app.TogaApp.install_screen
+            orig_uninstall_screen = toga_textual.app.TogaApp.uninstall_screen
+
+            def _ctx_register_child(self: Any, parent: Any, child: Any, before: Any, after: Any) -> None:
+                with _ensure_active_app(self):
+                    return orig_register_child(self, parent, child, before, after)
+
+            def _ctx_push_screen(
+                self: Any,
+                screen: Any,
+                callback: Any = None,
+                wait_for_dismiss: bool = False,
+            ) -> Any:
+                with _ensure_active_app(self):
+                    return orig_push_screen(self, screen, callback=callback, wait_for_dismiss=wait_for_dismiss)
+
+            def _ctx_switch_screen(self: Any, screen: Any) -> Any:
+                with _ensure_active_app(self):
+                    return orig_switch_screen(self, screen)
+
+            def _ctx_pop_screen(self: Any) -> Any:
+                with _ensure_active_app(self):
+                    return orig_pop_screen(self)
+
+            def _ctx_install_screen(self: Any, screen: Any, name: str) -> Any:
+                with _ensure_active_app(self):
+                    return orig_install_screen(self, screen, name)
+
+            def _ctx_uninstall_screen(self: Any, screen: Any) -> Any:
+                with _ensure_active_app(self):
+                    return orig_uninstall_screen(self, screen)
+
+            toga_textual.app.TogaApp._register_child = _ctx_register_child
+            toga_textual.app.TogaApp.push_screen = _ctx_push_screen
+            toga_textual.app.TogaApp.switch_screen = _ctx_switch_screen
+            toga_textual.app.TogaApp.pop_screen = _ctx_pop_screen
+            toga_textual.app.TogaApp.install_screen = _ctx_install_screen
+            toga_textual.app.TogaApp.uninstall_screen = _ctx_uninstall_screen
+            toga_textual.app.TogaApp._twittui_active_app_patched = True
+
         # Silence noisy unimplemented menu/toolbar warnings in toga_textual
         if not getattr(toga_textual.app.App, "_twittui_patched", False):
+            orig_app_init = toga_textual.app.App.__init__
+
+            def _patched_app_init(self: Any, interface: Any) -> None:
+                orig_app_init(self, interface)
+                loop = getattr(self, "loop", None)
+                if loop is not None and not getattr(loop, "_twittui_ctx_wrapped", False):
+                    orig_call_soon_threadsafe = loop.call_soon_threadsafe
+
+                    def _ctx_call_soon_threadsafe(callback: Any, *cb_args: Any, context: Any = None) -> Any:
+                        if context is not None:
+                            return orig_call_soon_threadsafe(callback, *cb_args, context=context)
+
+                        def _wrapped(*inner_args: Any) -> Any:
+                            native_app = getattr(self, "native", None)
+                            if native_app is not None and getattr(native_app, "_running", False):
+                                with _ensure_active_app(native_app):
+                                    return callback(*inner_args)
+                            return callback(*inner_args)
+
+                        return orig_call_soon_threadsafe(_wrapped, *cb_args)
+
+                    loop.call_soon_threadsafe = _ctx_call_soon_threadsafe
+                    loop._twittui_ctx_wrapped = True
+
+            toga_textual.app.App.__init__ = _patched_app_init
             toga_textual.app.App.create_menus = lambda self: None
 
             orig_set_current_window = toga_textual.app.App.set_current_window
@@ -1772,6 +1895,7 @@ def patch_toga_textual() -> None:
             TogaWindowCls.on_screen_resume = _toga_window_on_screen_resume
             TogaWindowCls.action_close_secondary_window = _action_close_secondary_window
             TogaWindowCls.check_action = _check_window_action
+            TogaWindowCls._context = _AppContextScreenMixin._context
             # TogaMainWindow inherits TogaWindow; align its on_mount so both titlebar and deferred content mount cleanly
             TogaMainWindowCls.on_mount = _toga_window_on_mount
 
