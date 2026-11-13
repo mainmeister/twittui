@@ -391,7 +391,9 @@ TWITPHONETICSEARCH=1
 3. If prompted, choose an available format or resolution. Choosing **YouTube Stream** opens the episode video directly in your default web browser for native playback. For direct video and audio streams, TwitTUI resolves the stream and launches your configured media player (e.g., VLC) in a separate process. **Audio Only** refreshes the episode list and prefers audio for streaming and downloads; the preference is saved as `TWITAUDIOONLY`.
 
 #### Batch Downloading Episodes
-1. Highlight one or more episodes in the table (hold `Shift` or `Ctrl` for multiple selections).
+1. Highlight one or more episodes in the table:
+   - **GTK Desktop Mode (`--gtk`)**: Hold `Shift` or `Ctrl` while clicking rows for multiple selections.
+   - **Textual Terminal Mode (`--tui`)**: Press `Space` (or click the left `☐` / `☑` checkbox gutter, or `Ctrl+Click`) to toggle rows, `Shift+Up` / `Shift+Down` (or `Shift+Click`) to select ranges, `Ctrl+A` to select all episodes, and `Escape` (or `u`) to clear marked selections. Marked rows display a `☑` badge, row-wide highlight styling, and a live `Episodes (N selected):` count header.
 2. Ensure **Download Destination** is set to your preferred folder (use **Browse** to select). **Open** creates the destination if necessary and opens it in your file manager.
 3. Optionally toggle **Show Folders** if you want downloaded episodes organized into dedicated subfolders named after each show (e.g., `<Download Destination>/Security Now/Security Now 1000.mp4`).
 4. Click **Download**. If prompted, choose a format for a single episode or a resolution preference for the batch. The batch runs sequentially in a background worker. Existing non-identical files may be overwritten without confirmation.
@@ -657,9 +659,9 @@ The desktop launcher file registers TwitTUI in system application menus:
 
 `TwitTUIForm` extends `toga.App` and declares a declarative widget layout inside `startup()`. Layout geometry is managed through `travertino` / `toga.style.Pack` flexbox rules.
 
-#### Application Menu Commands
-- **Application Menu (`toga.Group.APP`)**:
-  - **Preferences**: Opens the modal Preferences window containing the API credentials, Club TWiT URL, download destination, block size, rate limit, and streamer settings.
+#### Application Menu & TUI Commands
+- **Application Menu (`toga.Group.APP`) & TUI Access**:
+  - **Preferences**: Opens the Preferences window containing the API credentials, Club TWiT URL, download destination (with an interactive TUI directory picker via `Browse`), block size, rate limit, streamer, search options, and cache management. In `--tui` mode, Preferences can be opened via the main-window **Preferences** button, **`F2`** (or **`Ctrl+O`**), or Textual's **`Ctrl+P`** Command Palette, and dismissed with **`Escape`**, **`Close`**, or **`✕`**.
 - **Help Menu (`toga.Group.HELP`)**:
   - **Visit Homepage**: Opens the official TwitTUI GitHub repository (`https://github.com/mainmeister/twittui.git`) in the default system web browser.
   - **View README Documentation**: Opens the integrated documentation viewer via the **Hybrid Resilient Pattern**. Converts Markdown to fully sanitized HTML (stripping malicious tags, event handlers, and dangerous URI schemes) and displays it in an in-app `toga.WebView` window with automatic fallback to the system default web browser. Features smooth Table of Contents anchor navigation and a persistent floating "↑ Table of Contents" button.
