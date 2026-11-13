@@ -2,7 +2,9 @@ import toga
 from toga.style import Pack
 from toga.style.pack import COLUMN, ROW
 import asyncio
+import builtins
 import copy
+import logging
 import os
 import sys
 import shutil
@@ -37,6 +39,126 @@ try:
     import defusedxml.ElementTree as DefusedET
 except ImportError:
     DefusedET = None
+
+
+_logger = logging.getLogger("twittui")
+if not _logger.handlers:
+    _logger.addHandler(logging.NullHandler())
+
+
+def _is_textual_environment(app: Any = None) -> bool:
+    """Return True when the active or configured Toga backend is Textual TUI."""
+    target_app = app
+    if target_app is None:
+        try:
+            target_app = toga.App.app
+        except Exception:
+            target_app = None
+    if target_app is not None:
+        impl = getattr(target_app, "_impl", None)
+        native = getattr(impl, "native", None)
+        native_mod = getattr(getattr(native, "__class__", None), "__module__", "") if native is not None else ""
+        if native_mod.startswith(("toga_textual", "textual")):
+            return True
+        if native_mod and not native_mod.startswith("unittest.mock"):
+            return False
+    return os.environ.get("TOGA_BACKEND", "").strip().lower() in ("toga_textual", "textual")
+
+
+def _is_textual_tui_running(app: Any = None) -> bool:
+    """Return True when a live Textual TUI application loop is currently running."""
+    target_app = app
+    if target_app is None:
+        try:
+            target_app = toga.App.app
+        except Exception:
+            target_app = None
+    if target_app is None:
+        return False
+    impl = getattr(target_app, "_impl", None)
+    native = getattr(impl, "native", None)
+    if native is None:
+        return False
+    native_mod = getattr(getattr(native, "__class__", None), "__module__", "")
+    return bool(native_mod.startswith(("toga_textual", "textual")) and getattr(native, "_running", False))
+
+
+def print(*args: Any, **kwargs: Any) -> None:
+    """Route internal form/worker diagnostic prints to logger instead of corrupting TUI stdout."""
+    if os.environ.get("TWITTUI_DEBUG_STDOUT") == "1" and not _is_textual_environment():
+        builtins.print(*args, **kwargs)
+        return
+    sep = kwargs.get("sep", " ")
+    if sep is None:
+        sep = " "
+    msg = sep.join(str(a) for a in args).strip()
+    if msg:
+        _logger.debug("%s", msg)
+
+
+class _LazySQLiteEpisodesCache(dict):
+    """Dictionary backed by SQLite that loads large per-show episode lists on demand."""
+
+    def __init__(self, db_path: str | None = None, unloaded_keys: set[str] | None = None) -> None:
+        super().__init__()
+        self._db_path = db_path
+        self._unloaded_keys: set[str] = set(unloaded_keys) if unloaded_keys else set()
+
+    def _load_key(self, key: str) -> None:
+        self._unloaded_keys.discard(key)
+        if not self._db_path:
+            return
+        try:
+            with sqlite3.connect(self._db_path, timeout=10.0) as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT data_json FROM twittui_cache WHERE category = 'episodes' AND cache_key = ?",
+                    (key,),
+                )
+                row = cur.fetchone()
+                if row and row[0]:
+                    super().__setitem__(key, json.loads(row[0]))
+        except Exception:
+            pass
+
+    def __contains__(self, key: object) -> bool:
+        return super().__contains__(key) or (isinstance(key, str) and key in self._unloaded_keys)
+
+    def __getitem__(self, key: str) -> Any:
+        if not super().__contains__(key) and isinstance(key, str) and key in self._unloaded_keys:
+            self._load_key(key)
+        return super().__getitem__(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if not super().__contains__(key) and isinstance(key, str) and key in self._unloaded_keys:
+            self._load_key(key)
+        return super().get(key, default)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if isinstance(key, str):
+            self._unloaded_keys.discard(key)
+        super().__setitem__(key, value)
+
+    def pop(self, key: str, *args: Any) -> Any:
+        if not super().__contains__(key) and isinstance(key, str) and key in self._unloaded_keys:
+            self._load_key(key)
+        return super().pop(key, *args)
+
+    def clear(self) -> None:
+        self._unloaded_keys.clear()
+        super().clear()
+
+    def __len__(self) -> int:
+        return super().__len__() + len(self._unloaded_keys)
+
+    def __bool__(self) -> bool:
+        return bool(super().__len__() or self._unloaded_keys)
+
+    def copy(self) -> "_LazySQLiteEpisodesCache":
+        clone = _LazySQLiteEpisodesCache(self._db_path, set(self._unloaded_keys))
+        for k, v in dict.items(self):
+            dict.__setitem__(clone, k, v)
+        return clone
 
 
 class ApiRateLimiter:
@@ -157,6 +279,8 @@ def get_cache_db_path(app_id: str | None = None, custom_path: str | None = None)
         return custom_path
     env_path = os.environ.get('TWITTUI_CACHE_DB') or os.environ.get('TWIT_CACHE_DB')
     if env_path:
+        if env_path == ':memory:':
+            return ':memory:'
         try:
             parent = os.path.dirname(os.path.abspath(env_path))
             if parent:
@@ -249,61 +373,91 @@ def patch_toga_tooltips() -> None:
         toga.Widget._twittui_tooltips_patched = True
 
 
-def patch_toga_icons() -> None:
-    """Patch Toga and Toga-GTK Icon classes to prevent infinite recursion if icon loading fails."""
+def _unset_gtk_module_env() -> None:
+    """Clear host GTK/Qt module variables before importing GTK bindings."""
+    env_vars = (
+        "GTK_MODULES",
+        "GTK_PATH",
+        "GTK3_MODULES",
+        "UBUNTU_MENUPROXY",
+        "QT_STYLE_OVERRIDE",
+        "QT_QPA_PLATFORMTHEME",
+    )
+    for var in env_vars:
+        os.environ.pop(var, None)
     try:
-        import toga.icons
-
-        orig_cached_get = toga.icons.CachedIcon.__get__
-
-        def safe_cached_get(self: Any, obj: object, owner: type[toga.icons.Icon]) -> Any:
-            cls = owner if obj is None else obj.__class__
-            attr_name = f"_{self.name}"
-            if hasattr(cls, attr_name):
-                return getattr(cls, attr_name)
-            try:
-                placeholder = toga.icons.Icon.__new__(toga.icons.Icon)
-                placeholder.factory = toga.platform.get_factory()
-                placeholder.path = getattr(self, "name", "toga")
-                placeholder.system = getattr(self, "system", False)
-                try:
-                    placeholder._impl = placeholder.factory.Icon(interface=placeholder, path={})
-                except Exception:
-                    pass
-                setattr(cls, attr_name, placeholder)
-
-                value = orig_cached_get(self, obj, owner)
-                setattr(cls, attr_name, value)
-                return value
-            except Exception:
-                return getattr(cls, attr_name, None)
-
-        toga.icons.CachedIcon.__get__ = safe_cached_get
+        import ctypes
+        libc = ctypes.CDLL(None)
+        if hasattr(libc, "unsetenv"):
+            for var in env_vars:
+                libc.unsetenv(var.encode("ascii"))
     except Exception:
         pass
 
+
+def patch_toga_icons(include_gtk: bool = True) -> None:
+    """Patch Toga and (optionally) Toga-GTK Icon classes to prevent infinite recursion if icon loading fails."""
     try:
+        import toga.icons
+
+        if not getattr(toga.icons.CachedIcon, "_twittui_cached_icon_patched", False):
+            orig_cached_get = toga.icons.CachedIcon.__get__
+
+            def safe_cached_get(self: Any, obj: object, owner: type[toga.icons.Icon]) -> Any:
+                cls = owner if obj is None else obj.__class__
+                attr_name = f"_{self.name}"
+                if hasattr(cls, attr_name):
+                    return getattr(cls, attr_name)
+                try:
+                    placeholder = toga.icons.Icon.__new__(toga.icons.Icon)
+                    placeholder.factory = toga.platform.get_factory()
+                    placeholder.path = getattr(self, "name", "toga")
+                    placeholder.system = getattr(self, "system", False)
+                    try:
+                        placeholder._impl = placeholder.factory.Icon(interface=placeholder, path={})
+                    except Exception:
+                        pass
+                    setattr(cls, attr_name, placeholder)
+
+                    value = orig_cached_get(self, obj, owner)
+                    setattr(cls, attr_name, value)
+                    return value
+                except Exception:
+                    return getattr(cls, attr_name, None)
+
+            toga.icons.CachedIcon.__get__ = safe_cached_get
+            toga.icons.CachedIcon._twittui_cached_icon_patched = True
+    except Exception:
+        pass
+
+    if not include_gtk:
+        return
+
+    try:
+        _unset_gtk_module_env()
         import toga_gtk.icons
         from gi.repository import GdkPixbuf
 
-        orig_gtk_icon_init = toga_gtk.icons.Icon.__init__
+        if not getattr(toga_gtk.icons.Icon, "_twittui_gtk_icon_patched", False):
+            orig_gtk_icon_init = toga_gtk.icons.Icon.__init__
 
-        def safe_gtk_icon_init(self: Any, interface: Any, path: Any) -> None:
-            self.interface = interface
-            self.path = path or {}
-            self._native = {}
-            try:
-                orig_gtk_icon_init(self, interface, path)
-            except Exception:
-                for size in getattr(toga_gtk.icons.Icon, "SIZES", [512, 256, 128, 72, 64, 32, 16]):
-                    try:
-                        self._native[size] = GdkPixbuf.Pixbuf.new(
-                            GdkPixbuf.Colorspace.RGB, True, 8, size, size
-                        )
-                    except Exception:
-                        pass
+            def safe_gtk_icon_init(self: Any, interface: Any, path: Any) -> None:
+                self.interface = interface
+                self.path = path or {}
+                self._native = {}
+                try:
+                    orig_gtk_icon_init(self, interface, path)
+                except Exception:
+                    for size in getattr(toga_gtk.icons.Icon, "SIZES", [512, 256, 128, 72, 64, 32, 16]):
+                        try:
+                            self._native[size] = GdkPixbuf.Pixbuf.new(
+                                GdkPixbuf.Colorspace.RGB, True, 8, size, size
+                            )
+                        except Exception:
+                            pass
 
-        toga_gtk.icons.Icon.__init__ = safe_gtk_icon_init
+            toga_gtk.icons.Icon.__init__ = safe_gtk_icon_init
+            toga_gtk.icons.Icon._twittui_gtk_icon_patched = True
     except Exception:
         pass
 
@@ -311,6 +465,7 @@ def patch_toga_icons() -> None:
 def patch_toga_gtk_app() -> None:
     """Patch toga_gtk.app.App to use None application_id and NON_UNIQUE flags, preventing AppArmor D-Bus ownership denials in sandboxes."""
     try:
+        _unset_gtk_module_env()
         import toga_gtk.app
         from gi.repository import Gio
 
@@ -338,8 +493,11 @@ def patch_toga_gtk_app() -> None:
 
 # Initialize Toga tooltip and icon resilience support
 patch_toga_tooltips()
-patch_toga_icons()
-patch_toga_gtk_app()
+if __name__ != '__main__' and os.environ.get('TOGA_BACKEND') not in ('toga_textual', 'textual'):
+    patch_toga_icons(include_gtk=True)
+    patch_toga_gtk_app()
+else:
+    patch_toga_icons(include_gtk=False)
 
 # Apply Textual backend widget extensions if available
 try:
@@ -620,6 +778,35 @@ def launch_stream_safe(
     """
     resolved_url: str = resolve_stream_url(media_url)
     args: list[str] = build_stream_args(streamer_template, resolved_url)
+
+    if _is_textual_tui_running():
+        # On headless Unix terminals without X11/Wayland, run VLC with its dummy audio interface
+        # so it does not attempt to attach a console interface or exit immediately.
+        if (
+            sys.platform != "win32"
+            and not os.environ.get("DISPLAY")
+            and not os.environ.get("WAYLAND_DISPLAY")
+        ):
+            for idx, tok in enumerate(args):
+                base_tok = os.path.basename(tok).lower()
+                if base_tok == "vlc" and "-I" not in args and "--intf" not in args:
+                    args = args[: idx + 1] + ["-I", "dummy"] + args[idx + 1 :]
+                    break
+
+        popen_kwargs: dict[str, Any] = {
+            "shell": False,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if sys.platform == "win32":
+            detached_flag = getattr(subprocess, "DETACHED_PROCESS", 0)
+            if detached_flag:
+                popen_kwargs["creationflags"] = detached_flag
+        else:
+            popen_kwargs["start_new_session"] = True
+        return subprocess.Popen(args, **popen_kwargs)
+
     return subprocess.Popen(args, shell=False)
 
 
@@ -791,6 +978,10 @@ class TwitTUIForm(toga.App):
             else:
                 raise
 
+    def _is_textual_app(self) -> bool:
+        """Return True if this form instance is backed by Toga Textual."""
+        return _is_textual_environment(self)
+
     def set_tooltip(self, widget: Any, tooltip_text: str | None) -> Any:
         """Helper to assign a tooltip to any UI widget or command."""
         if hasattr(widget, 'tooltip'):
@@ -838,7 +1029,9 @@ class TwitTUIForm(toga.App):
                 conn.commit()
 
                 cursor = conn.cursor()
-                cursor.execute("SELECT category, cache_key, data_json FROM twittui_cache")
+                cursor.execute(
+                    "SELECT category, cache_key, data_json FROM twittui_cache WHERE category != 'episodes'"
+                )
                 rows = cursor.fetchall()
                 for category, key, data_json in rows:
                     try:
@@ -851,8 +1044,6 @@ class TwitTUIForm(toga.App):
                             self._shows_cache[tuple_key] = val
                         elif category == 'show_date_bounds':
                             self._show_date_cache[key] = tuple(val) if isinstance(val, (list, tuple)) else val
-                        elif category == 'episodes':
-                            self._episodes_cache[key] = val
                         elif category == 'episode_detail':
                             self._episode_detail_cache[key] = val
                         elif category == 'media_webpage':
@@ -869,6 +1060,14 @@ class TwitTUIForm(toga.App):
                             self._api_search_cache[key] = val
                     except Exception:
                         pass
+
+                cursor.execute("SELECT cache_key FROM twittui_cache WHERE category = 'episodes'")
+                episode_keys = {str(r[0]) for r in cursor.fetchall() if r and r[0] is not None}
+                lazy_eps = _LazySQLiteEpisodesCache(self._cache_db_path, episode_keys)
+                if isinstance(getattr(self, '_episodes_cache', None), dict):
+                    for k, v in dict.items(self._episodes_cache):
+                        lazy_eps[k] = v
+                self._episodes_cache = lazy_eps
         except Exception:
             pass
 
@@ -929,7 +1128,11 @@ class TwitTUIForm(toga.App):
             elif isinstance(val, list):
                 setattr(worker, name, list(val))
         worker._cache_db_path = getattr(self, '_cache_db_path', None)
-        worker.current_episodes = copy.deepcopy(getattr(self, 'current_episodes', None))
+        current_eps = getattr(self, 'current_episodes', None)
+        if isinstance(current_eps, list):
+            worker.current_episodes = [ep.copy() if isinstance(ep, dict) else ep for ep in current_eps]
+        else:
+            worker.current_episodes = copy.copy(current_eps)
         return worker
 
     def _snapshot_episode(self, target):
@@ -2304,7 +2507,6 @@ class TwitTUIForm(toga.App):
             return None
 
     def startup(self) -> None:
-        self.show_splash_screen('Loading TwitTUI. Initializing show catalog and episodes...', title='TWiT.tv TUI')
         api_rate_limiter.wait_callback = self._rate_limit_wait_changed
         api_rate_limiter.rate_limit = self.get_rate_limit
         # Hover tracking state for episode metadata popup
@@ -2572,6 +2774,7 @@ class TwitTUIForm(toga.App):
         self.commands.add(api_key_cmd)
 
         self.main_window.show()
+        self.show_splash_screen('Loading TwitTUI. Initializing show catalog and episodes...', title='TWiT.tv TUI')
         self._refresh_catalog()
 
     def _build_preferences_box(self) -> toga.Box:
@@ -3617,11 +3820,29 @@ class TwitTUIForm(toga.App):
                 os.startfile(target_dir)
                 return True
             elif sys.platform == 'darwin':
-                subprocess.Popen(['open', target_dir])
+                if _is_textual_tui_running(self):
+                    subprocess.Popen(
+                        ['open', target_dir],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+                else:
+                    subprocess.Popen(['open', target_dir])
                 return True
             else:
                 # Linux and other Unix/BSD systems
-                subprocess.Popen(['xdg-open', target_dir])
+                if _is_textual_tui_running(self):
+                    subprocess.Popen(
+                        ['xdg-open', target_dir],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+                else:
+                    subprocess.Popen(['xdg-open', target_dir])
                 return True
         except Exception as e:
             print(f"Failed to launch file manager for '{target_dir}': {e}")
@@ -4142,6 +4363,8 @@ class TwitTUIForm(toga.App):
                     'noplaylist': True,
                     'progress_hooks': [_ytdlp_hook],
                     'quiet': True,
+                    'no_warnings': True,
+                    'noprogress': True,
                     'overwrites': True,
                 }
                 if has_ffmpeg:
@@ -5081,16 +5304,17 @@ class TwitTUIForm(toga.App):
         if len(resolutions) == 1:
             return resolutions[0]
 
-        # 1. Try backend ChoiceDialog first (e.g. Textual)
-        try:
-            from toga_textual_backend import ChoiceDialog
-            res = await self.main_window.dialog(ChoiceDialog(title, message, resolutions))
-            if res is not None:
-                return res
-            # User cancelled or dismissed
-            return None
-        except Exception:
-            pass
+        # 1. Use Textual ChoiceDialog when running on the Textual TUI backend
+        if self._is_textual_app():
+            try:
+                from toga_textual_backend import ChoiceDialog
+                dialog = ChoiceDialog(title, message, resolutions)
+                if getattr(self, 'main_window', None) is not None:
+                    return await self.main_window.dialog(dialog)
+                return await dialog._show(None)
+            except Exception as e:
+                print(f"Error presenting Textual resolution choice dialog: {e}")
+                return resolutions[0]
 
         # 2. Universal GUI Modal Window Fallback (for GTK / Cocoa / WinForms / etc.)
         try:
@@ -5202,7 +5426,7 @@ class TwitTUIForm(toga.App):
                 target_yt_url = resolved_media_url if self.is_youtube_url(resolved_media_url) else media_url
                 print(f"Opening YouTube video in browser: {target_yt_url}")
                 try:
-                    webbrowser.open(target_yt_url)
+                    await asyncio.to_thread(webbrowser.open, target_yt_url)
                 except Exception as e:
                     print(f"Error opening YouTube in browser: {e}")
                 return
@@ -5210,7 +5434,7 @@ class TwitTUIForm(toga.App):
             streamer_template = self.streamer_input.value if getattr(self, 'streamer_input', None) and self.streamer_input.value else 'env LC_ALL=C vlc %f'
             sanitized_log_url = re.sub(r'([?&]auth=)[^&]+', r'\1[REDACTED]', resolved_media_url)
             print(f"Launching stream player for: {sanitized_log_url}")
-            launch_stream_safe(streamer_template, resolved_media_url)
+            await asyncio.to_thread(launch_stream_safe, streamer_template, resolved_media_url)
         except Exception as e:
             print(f"Error launching stream: {e}")
 
@@ -5248,13 +5472,14 @@ class TwitTUIForm(toga.App):
         self.show_splash_screen("Closing TwitTUI. Please wait...", title="TWiT.tv TUI")
         if getattr(self, 'api_status_label', None):
             self.api_status_label.text = "Closing TwitTUI. Please wait..."
-        try:
-            if sys.stdout and hasattr(sys.stdout, 'isatty') and sys.stdout.isatty():
-                print("\n======================================================================", flush=True)
-                print("  TwitTUI: Exiting, please wait...", flush=True)
-                print("======================================================================\n", flush=True)
-        except Exception:
-            pass
+        if not self._is_textual_app():
+            try:
+                if sys.stdout and hasattr(sys.stdout, 'isatty') and sys.stdout.isatty():
+                    builtins.print("\n======================================================================", flush=True)
+                    builtins.print("  TwitTUI: Exiting, please wait...", flush=True)
+                    builtins.print("======================================================================\n", flush=True)
+            except Exception:
+                pass
 
         def _do_exit():
             try:
