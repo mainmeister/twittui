@@ -915,6 +915,7 @@ class TwitTUIForm(toga.App):
         self.button_box = None
         self.download_button = None
         self.stream_button = None
+        self.preferences_button = None
         self.cancel_button = None
         self.close_button = None
         self.settings_box = None
@@ -981,6 +982,27 @@ class TwitTUIForm(toga.App):
     def _is_textual_app(self) -> bool:
         """Return True if this form instance is backed by Toga Textual."""
         return _is_textual_environment(self)
+
+    def _active_dialog_window(self) -> Any:
+        """Return the active window for dialogs (Preferences window when visible, else main_window)."""
+        prefs_win = getattr(self, '_preferences_window', None)
+        if prefs_win is not None and not getattr(prefs_win, 'closed', False):
+            try:
+                if getattr(prefs_win, 'visible', False):
+                    return prefs_win
+            except Exception:
+                pass
+        return getattr(self, 'main_window', None)
+
+    def _open_browser_quietly(self, url: str) -> bool:
+        """Open a URL in the default browser while suppressing leaked terminal output in live TUI mode."""
+        if _is_textual_tui_running(self):
+            from contextlib import redirect_stderr, redirect_stdout
+            import io
+            sink = io.StringIO()
+            with redirect_stdout(sink), redirect_stderr(sink):
+                return bool(webbrowser.open(url))
+        return bool(webbrowser.open(url))
 
     def set_tooltip(self, widget: Any, tooltip_text: str | None) -> Any:
         """Helper to assign a tooltip to any UI widget or command."""
@@ -2661,9 +2683,10 @@ class TwitTUIForm(toga.App):
         self.episodes_list = toga.Table(
             columns=['Episode', 'Title', 'Date', 'Length', 'Size'],
             multiple_select=True,
+            on_select=self.on_episode_select,
             on_activate=self.on_episode_activate,
             style=Pack(flex=1, margin=5),
-            tooltip='Episode list: select episodes to download, or double-click / press Enter to stream'
+            tooltip='Episode list: select episodes to download (Space / Shift+Arrows / Ctrl+A in TUI), or double-click / press Enter to stream'
         )
         self._enable_table_horizontal_scroll()
         self._setup_table_hover_events()
@@ -2687,6 +2710,13 @@ class TwitTUIForm(toga.App):
             tooltip='Stream selected episode in external media player'
         )
         self.stream_button = stream_button
+        preferences_button = toga.Button(
+            'Preferences',
+            on_press=self.on_preferences_press,
+            style=Pack(margin=5),
+            tooltip='Open application Preferences (F2 / Ctrl+P)'
+        )
+        self.preferences_button = preferences_button
         cancel_button = toga.Button(
             'Cancel',
             on_press=self.on_cancel_press,
@@ -2704,6 +2734,8 @@ class TwitTUIForm(toga.App):
 
         button_box.add(download_button)
         button_box.add(stream_button)
+        if self._is_textual_app():
+            button_box.add(preferences_button)
         button_box.add(cancel_button)
         button_box.add(close_button)
 
@@ -3034,11 +3066,25 @@ class TwitTUIForm(toga.App):
     def on_clear_cache_press(self, widget=None) -> None:
         """Handler for Clear Cache button in Preferences window."""
         self.clear_cache()
+        if getattr(self, 'api_status_label', None) is not None:
+            try:
+                self.api_status_label.text = 'Cache cleared.'
+            except Exception:
+                pass
+        if _is_textual_tui_running(self):
+            try:
+                native_app = getattr(getattr(self, '_impl', None), 'native', None)
+                if native_app is not None and hasattr(native_app, 'notify'):
+                    native_app.notify('Cache cleared.')
+            except Exception:
+                pass
 
     def on_preferences_press(self, widget=None) -> None:
         self.show_preferences_window()
 
     def show_preferences_window(self) -> None:
+        if self._preferences_window is not None and getattr(self._preferences_window, 'closed', False):
+            self._preferences_window = None
         if self._preferences_window is None:
             self._preferences_window = toga.Window(
                 title='Preferences',
@@ -3401,7 +3447,7 @@ class TwitTUIForm(toga.App):
                 server.pages['index.html'] = html_bytes
             port = server.server_address[1]
             token = getattr(server, 'secret_token', '')
-            webbrowser.open(f"http://127.0.0.1:{port}/{token}/{page_name}")
+            self._open_browser_quietly(f"http://127.0.0.1:{port}/{token}/{page_name}")
             return
 
         # Fallback to local HTML file in cache directory if local HTTP server unavailable
@@ -3414,7 +3460,7 @@ class TwitTUIForm(toga.App):
         except Exception:
             pass
         file_uri = pathlib.Path(os.path.abspath(temp_file.name)).as_uri()
-        webbrowser.open(file_uri)
+        self._open_browser_quietly(file_uri)
 
     def show_document_viewer(self, filename: str, doc_title: str) -> None:
         """Display a Markdown/APIB document using the Hybrid Resilient Pattern (WebView with Browser fallback)."""
@@ -3497,13 +3543,14 @@ class TwitTUIForm(toga.App):
         """Open the TwitTUI project homepage URL in the default browser."""
         try:
             target_url = getattr(self, 'home_page', None) or TWITTUI_HOMEPAGE_URL
-            webbrowser.open(target_url)
+            self._open_browser_quietly(target_url)
         except Exception as e:
             err_msg = f"Failed to open project homepage URL: {e}"
             print(f"Error: {err_msg}")
-            if hasattr(self, 'main_window') and self.main_window:
+            host_win = self._active_dialog_window()
+            if host_win:
                 try:
-                    self.main_window.error_dialog("Browser Error", err_msg)
+                    host_win.error_dialog("Browser Error", err_msg)
                 except Exception:
                     pass
 
@@ -3522,13 +3569,14 @@ class TwitTUIForm(toga.App):
     def open_api_key_url(self) -> None:
         """Open the TWiT API documentation URL in the default browser."""
         try:
-            webbrowser.open(TWIT_API_KEY_URL)
+            self._open_browser_quietly(TWIT_API_KEY_URL)
         except Exception as e:
             err_msg = f"Failed to open API key registration URL: {e}"
             print(f"Error: {err_msg}")
-            if hasattr(self, 'main_window') and self.main_window:
+            host_win = self._active_dialog_window()
+            if host_win:
                 try:
-                    self.main_window.error_dialog("Browser Error", err_msg)
+                    host_win.error_dialog("Browser Error", err_msg)
                 except Exception:
                     pass
 
@@ -3774,13 +3822,14 @@ class TwitTUIForm(toga.App):
             print(f"Error fetching Club TWiT RSS feed ({e}), opening direct URL.")
 
         try:
-            webbrowser.open(target_url)
+            self._open_browser_quietly(target_url)
         except Exception as e:
             err_msg = f"Failed to open Club TWiT URL: {e}"
             print(f"Error: {err_msg}")
-            if hasattr(self, 'main_window') and self.main_window:
+            host_win = self._active_dialog_window()
+            if host_win:
                 try:
-                    self.main_window.error_dialog("Browser Error", err_msg)
+                    host_win.error_dialog("Browser Error", err_msg)
                 except Exception:
                     pass
 
@@ -3848,13 +3897,14 @@ class TwitTUIForm(toga.App):
             print(f"Failed to launch file manager for '{target_dir}': {e}")
             try:
                 file_uri = pathlib.Path(target_dir).as_uri()
-                webbrowser.open(file_uri)
+                self._open_browser_quietly(file_uri)
                 return True
             except Exception as e2:
                 print(f"Fallback to browser for folder URI failed: {e2}")
-                if hasattr(self, 'main_window') and self.main_window:
+                host_win = self._active_dialog_window()
+                if host_win:
                     try:
-                        self.main_window.error_dialog(
+                        host_win.error_dialog(
                             "File Manager Error",
                             f"Could not open download folder:\n{target_dir}\n\nError: {e}"
                         )
@@ -5368,6 +5418,29 @@ class TwitTUIForm(toga.App):
             print(f"Error presenting resolution choice dialog: {e}")
             return resolutions[0]
 
+    def _update_episodes_selection_label(self) -> None:
+        """Update the Episodes header label with active multi-selection count."""
+        label = getattr(self, 'episodes_label', None)
+        table = getattr(self, 'episodes_list', None)
+        if label is None or table is None:
+            return
+        try:
+            native = getattr(getattr(table, '_impl', None), 'native', None)
+            if native is not None and hasattr(native, '_marked_rows'):
+                marked_count = len(native._marked_rows)
+                label.text = f'Episodes ({marked_count} selected):' if marked_count > 0 else 'Episodes:'
+                return
+            sel = table.selection
+            if isinstance(sel, (list, tuple, set)) and len(sel) > 1:
+                label.text = f'Episodes ({len(sel)} selected):'
+            else:
+                label.text = 'Episodes:'
+        except Exception:
+            pass
+
+    def on_episode_select(self, widget=None, **kwargs) -> None:
+        self._update_episodes_selection_label()
+
     async def on_episode_activate(self, widget, row, **kwargs) -> None:
         await self.on_stream_press(widget)
 
@@ -5499,7 +5572,10 @@ class TwitTUIForm(toga.App):
         """Handle folder selection for download destination."""
         try:
             initial_dir = self.dest_input.value if self.dest_input.value and os.path.isdir(self.dest_input.value) else None
-            selected_folder = await self.main_window.dialog(
+            host_win = self._active_dialog_window()
+            if not host_win:
+                return
+            selected_folder = await host_win.dialog(
                 toga.SelectFolderDialog(
                     title="Select Download Destination",
                     initial_directory=initial_dir
@@ -5516,11 +5592,12 @@ class TwitTUIForm(toga.App):
 
         def _show():
             try:
-                if hasattr(self, 'main_window') and self.main_window:
+                host_win = self._active_dialog_window()
+                if host_win:
                     if success:
-                        self.main_window.info_dialog(title, message)
+                        host_win.info_dialog(title, message)
                     else:
-                        self.main_window.error_dialog(title, message)
+                        host_win.error_dialog(title, message)
             except Exception as e:
                 print(f"Error displaying API test dialog: {e}")
 
@@ -6436,13 +6513,14 @@ class TwitTUIForm(toga.App):
         if not target_url.startswith('http://') and not target_url.startswith('https://'):
             target_url = f"https://{target_url}"
         try:
-            webbrowser.open(target_url)
+            self._open_browser_quietly(target_url)
         except Exception as e:
             err_msg = f"Failed to open URL in browser: {e}"
             print(f"Error: {err_msg}")
-            if hasattr(self, 'main_window') and self.main_window:
+            host_win = self._active_dialog_window()
+            if host_win:
                 try:
-                    self.main_window.error_dialog("Browser Error", err_msg)
+                    host_win.error_dialog("Browser Error", err_msg)
                 except Exception:
                     pass
 
@@ -7244,6 +7322,7 @@ class TwitTUIForm(toga.App):
 
         if not self.current_episodes:
             self.episodes_list.data = []
+            self._update_episodes_selection_label()
             self._enable_table_horizontal_scroll()
             self._setup_table_hover_events()
             return
@@ -7317,6 +7396,7 @@ class TwitTUIForm(toga.App):
             table_data.append(row_dict)
 
         self.episodes_list.data = table_data
+        self._update_episodes_selection_label()
         self._enable_table_horizontal_scroll()
         self._setup_table_hover_events()
 
