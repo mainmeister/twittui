@@ -172,6 +172,87 @@ class TestBackendFactoryIsolation(unittest.TestCase):
         except ImportError:
             pass
 
+    def test_tui_mode_does_not_load_gtk_or_emit_gtk_module_warnings(self) -> None:
+        """Verify --tui mode neither imports GTK nor emits Gtk-Message module load warnings."""
+        import shutil
+        import subprocess
+        import sys
+        import textwrap
+
+        script = textwrap.dedent(
+            """
+            import os
+            import sys
+            from unittest.mock import patch
+            import requests
+            import main as app_main
+
+            orig_resolve = app_main.resolve_toga_backend
+            def wrapped_resolve(argv=None, prompt_interactive=True):
+                res = orig_resolve(argv=argv, prompt_interactive=prompt_interactive)
+                import toga
+                toga.App.main_loop = lambda self: None
+                return res
+
+            with patch.object(requests, "get", side_effect=OSError("offline test")), \\
+                 patch.object(app_main, "resolve_toga_backend", side_effect=wrapped_resolve):
+                app_main.main(["--tui"])
+
+            loaded_gtk = [
+                m for m in sys.modules
+                if m == "toga_gtk" or m.startswith("toga_gtk.") or m == "gi.repository.Gtk"
+            ]
+            if loaded_gtk:
+                print("LOADED_GTK:" + ",".join(sorted(loaded_gtk)), flush=True)
+                os._exit(2)
+            os._exit(0)
+            """
+        )
+
+        env = os.environ.copy()
+        env.pop("TOGA_BACKEND", None)
+        env["TWITTUI_CACHE_DB"] = ":memory:"
+        env["GTK_MODULES"] = "nonexistent-xapp-gtk3-module"
+        env["GTK3_MODULES"] = "nonexistent-xapp-gtk3-module"
+        if not env.get("DISPLAY") and not env.get("WAYLAND_DISPLAY"):
+            env["DISPLAY"] = ":0"
+
+        cmd = [sys.executable, "-c", script]
+        if not os.path.exists("/tmp/.X11-unix/X0") and shutil.which("xvfb-run"):
+            cmd = ["xvfb-run", "-a", sys.executable, "-c", script]
+
+        proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=20)
+        self.assertNotIn("Failed to load module", proc.stderr)
+        self.assertNotIn("Gtk-Message", proc.stderr)
+        self.assertEqual(
+            proc.returncode,
+            0,
+            msg=f"Unexpected GTK import or failure in --tui mode:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}",
+        )
+
+    def test_direct_form_import_cleans_gtk_modules_without_warning(self) -> None:
+        """Verify importing twittui_form directly with GTK3_MODULES set emits no Gtk-Message warning."""
+        import shutil
+        import subprocess
+        import sys
+
+        env = os.environ.copy()
+        env.pop("TOGA_BACKEND", None)
+        env["TWITTUI_CACHE_DB"] = ":memory:"
+        env["GTK_MODULES"] = "nonexistent-xapp-gtk3-module"
+        env["GTK3_MODULES"] = "nonexistent-xapp-gtk3-module"
+        if not env.get("DISPLAY") and not env.get("WAYLAND_DISPLAY"):
+            env["DISPLAY"] = ":0"
+
+        cmd = [sys.executable, "-c", "import twittui_form"]
+        if not os.path.exists("/tmp/.X11-unix/X0") and shutil.which("xvfb-run"):
+            cmd = ["xvfb-run", "-a", sys.executable, "-c", "import twittui_form"]
+
+        proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=20)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertNotIn("Failed to load module", proc.stderr)
+        self.assertNotIn("Gtk-Message", proc.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()
