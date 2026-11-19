@@ -227,8 +227,8 @@ class ApiRateLimiter:
                         retried = True
                         now_current = time.monotonic()
                         latest_timestamp = self.timestamps[-1] if self.timestamps else now_current
-                        wait_time = max(0.0, 60.0 - (now_current - latest_timestamp))
-                        self._sleep(wait_time if wait_time > 0 else 60.0)
+                        wait_time = max(0.0, 10.0 - (now_current - latest_timestamp))
+                        self._sleep(wait_time if wait_time > 0 else 10.0)
                         continue
                     if (not retried and response.status_code == 403
                             and ('request blocked' in body_str or 'request blocked' in reason_str
@@ -236,8 +236,8 @@ class ApiRateLimiter:
                         retried = True
                         now_current = time.monotonic()
                         latest_timestamp = self.timestamps[-1] if self.timestamps else now_current
-                        wait_time = max(0.0, 60.0 - (now_current - latest_timestamp))
-                        self._sleep(wait_time if wait_time > 0 else 60.0)
+                        wait_time = max(0.0, 10.0 - (now_current - latest_timestamp))
+                        self._sleep(wait_time if wait_time > 0 else 10.0)
                         continue
                     return response
                 self._sleep(delay)
@@ -5079,13 +5079,6 @@ class TwitTUIForm(toga.App):
 
         fallback_candidate = None
 
-        # 1. Direct fields in episode dict
-        url = self.extract_media_url(episode_dict, audio_only=audio_only)
-        if url and self.is_valid_media_url(url):
-            if (audio_only and self.is_audio_url(url)) or (not audio_only and self.is_video_url(url)):
-                return url
-            fallback_candidate = url
-
         # Extract identifiers from episode dict
         clean_path = str(episode_dict.get('cleanPath') or episode_dict.get('link') or '').strip()
         ep_num = str(episode_dict.get('number') or episode_dict.get('episodeNumber') or '').strip()
@@ -5093,7 +5086,7 @@ class TwitTUIForm(toga.App):
         ep_id = str(episode_dict.get('id') or '').strip()
         show = show_name or self._selected_show_name()
 
-        # 2. Match in Club TWiT RSS feeds (show-specific feeds, network feeds, host feeds)
+        # 1. Match in Club TWiT RSS feeds (show-specific feeds, network feeds, host feeds) — highest priority when configured
         club_items = self.fetch_club_twit_rss_items(show, audio_only=audio_only)
         if club_items:
             for item in club_items:
@@ -5104,6 +5097,19 @@ class TwitTUIForm(toga.App):
                             return enc
                         if not fallback_candidate:
                             fallback_candidate = enc
+
+        # 2. Direct fields in episode dict (public API data)
+        url = self.extract_media_url(episode_dict, audio_only=audio_only)
+        if url and self.is_valid_media_url(url):
+            if (audio_only and self.is_audio_url(url)) or (not audio_only and self.is_video_url(url)):
+                if not fallback_candidate:
+                    return url
+                # If we already have a Club TWiT match, prefer it over public API data
+                if not self.is_valid_media_url(fallback_candidate):
+                    return url
+                return fallback_candidate
+            if not fallback_candidate:
+                fallback_candidate = url
 
         # 3. Match in Show's public RSS feed on feeds.twit.tv
         if show:
@@ -5305,6 +5311,26 @@ class TwitTUIForm(toga.App):
                         else:
                             is_aud = self.is_audio_url(str(u))
                             _add_cand(str(k), str(k), 'audio' if is_aud else 'video', str(u), s)
+
+        # 2b. Check Club TWiT RSS feeds for this show (member-only, no commercials)
+        if show_name:
+            clean_path_club = ep_dict.get('cleanPath') or getattr(target, 'clean_path', '')
+            ep_id_club = str(ep_dict.get('id') or getattr(target, 'id', ''))
+            club_items = self.fetch_club_twit_rss_items(show_name, audio_only=audio_only)
+            if club_items:
+                for item in club_items:
+                    if self._match_rss_item(item, clean_path_club, ep_id_club, target_num, target_title, show_name):
+                        enc = item.get('enclosure_url')
+                        s = item.get('enclosure_length')
+                        if enc and self.is_valid_media_url(enc):
+                            is_aud = self.is_audio_url(enc)
+                            if audio_only and is_aud:
+                                _add_cand('club_twit_audio', 'Club TWiT Audio (No Commercials)', 'audio', enc, s)
+                            elif not audio_only and not is_aud:
+                                _add_cand('club_twit_video', 'Club TWiT Video (No Commercials)', 'video', enc, s)
+                            elif not seen_urls:
+                                # Add as fallback type if no other resolutions found yet
+                                _add_cand('club_twit', 'Club TWiT (No Commercials)', 'audio' if is_aud else 'video', enc, s)
 
         # 3. Check RSS feeds for this show
         if show_name and hasattr(self, '_show_rss_cache'):

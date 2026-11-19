@@ -14,7 +14,7 @@ confinement: strict
 icon: snap/gui/twittui.png
 
 environment:
-  PYTHONPATH: ${SNAP}/lib/python3.12/site-packages:${SNAP}/lib/python3.10/site-packages:${SNAP}/usr/lib/python3/dist-packages:${SNAP}:${PYTHONPATH}
+  PYTHONPATH: ${SNAP}/lib/python3.12/site-packages:${SNAP}/lib/python3.14/site-packages:${SNAP}/lib/python3.10/site-packages:${SNAP}/usr/lib/python3/dist-packages:${SNAP}:${PYTHONPATH}
   LD_LIBRARY_PATH: ${SNAP}/usr/lib/${CRAFT_ARCH_TRIPLET_BUILD_FOR}:${SNAP}/usr/lib:${SNAP}/usr/lib/${CRAFT_ARCH_TRIPLET_BUILD_FOR}/pulseaudio:${LD_LIBRARY_PATH}
   GI_TYPELIB_PATH: ${SNAP}/usr/lib/${CRAFT_ARCH_TRIPLET_BUILD_FOR}/girepository-1.0:${SNAP}/usr/lib/girepository-1.0:${GI_TYPELIB_PATH}
   XDG_DATA_DIRS: ${SNAP}/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}
@@ -61,8 +61,32 @@ parts:
   twittui:
     plugin: nil
     source: .
+    stage:
+      - bin
+      - lib
+      - usr
+      - snap
+      - resources
+      - "*.py"
+      - "*.css"
+      - "*.xsl"
+      - "*.apib"
+      - "*.md"
+    prime:
+      - bin
+      - lib
+      - usr
+      - snap
+      - resources
+      - "*.py"
+      - "*.css"
+      - "*.xsl"
+      - "*.apib"
+      - "*.md"
     build-packages:
+      - gir1.2-girepository-2.0
       - libgirepository1.0-dev
+      - libgirepository-2.0-dev
       - libcairo2-dev
       - pkg-config
       - python3-dev
@@ -79,17 +103,30 @@ parts:
       - libgtk-3-0
       - libgdk-pixbuf-2.0-0
       - librsvg2-common
-      - shared-mime-info
       - libgirepository-1.0-1
       - libgirepository-2.0-0
       - libpulse0
     override-build: |
-      /usr/bin/python3 -m venv $CRAFT_PART_INSTALL
-      $CRAFT_PART_INSTALL/bin/pip install --upgrade pip
-      $CRAFT_PART_INSTALL/bin/pip install -r requirements.txt
-      $CRAFT_PART_INSTALL/bin/pip install .
+      set -ex
+      # Use system Python 3.12 from core24 base, not host Python 3.14
+      PYTHON=/usr/bin/python3
+      # Create a temporary Python virtual environment
+      VENV_DIR="$CRAFT_PART_BUILD/venv"
+      rm -rf "$VENV_DIR"
+      $PYTHON -m venv "$VENV_DIR"
+      # Install pip and requirements into the venv
+      "$VENV_DIR/bin/python3" -m ensurepip 2>/dev/null || true
+      "$VENV_DIR/bin/python3" -m pip install --upgrade pip
+      "$VENV_DIR/bin/python3" -m pip install -r requirements.txt
+      "$VENV_DIR/bin/python3" -m pip install .
+      # Copy Python venv to install directory
+      mkdir -p $CRAFT_PART_INSTALL
+      cp -a "$VENV_DIR/bin" $CRAFT_PART_INSTALL/
+      cp -a "$VENV_DIR/lib" $CRAFT_PART_INSTALL/
+      # Compile GTK schemas
       glib-compile-schemas $CRAFT_PART_INSTALL/usr/share/glib-2.0/schemas/ 2>/dev/null || true
       update-mime-database $CRAFT_PART_INSTALL/usr/share/mime/ 2>/dev/null || true
+      # Setup snap GUI files
       mkdir -p $CRAFT_PART_INSTALL/snap/gui
       cp snap/local/launcher.sh $CRAFT_PART_INSTALL/bin/twittui-launcher
       chmod +x $CRAFT_PART_INSTALL/bin/twittui-launcher
@@ -99,6 +136,7 @@ parts:
         cp resources/twittui.png $CRAFT_PART_INSTALL/snap/gui/twittui.png
       fi
       cp snap/gui/twittui.desktop $CRAFT_PART_INSTALL/snap/gui/twittui.desktop
+      # Copy application files
       cp -a *.py $CRAFT_PART_INSTALL/
       cp -a resources $CRAFT_PART_INSTALL/ 2>/dev/null || true
       cp -a feed-style.* $CRAFT_PART_INSTALL/ 2>/dev/null || true

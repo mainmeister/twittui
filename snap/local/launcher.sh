@@ -74,12 +74,19 @@ if [ -n "$SNAP" ]; then
     export PYTHONPATH="$SNAP:$PYTHONPATH"
 
     # Search for available python interpreter in snap bundle or system
-    if [ -x "$SNAP/usr/bin/python3" ]; then
+    # Use the snap's bundled Python first, then fall back to system Python
+    if [ -x "$SNAP/bin/python3" ] && [ -e "$SNAP/bin/python3" ]; then
+        # Check if the symlink target actually exists
+        TARGET=$(readlink -f "$SNAP/bin/python3" 2>/dev/null)
+        if [ -x "$TARGET" ]; then
+            PYTHON_BIN="$SNAP/bin/python3"
+        else
+            PYTHON_BIN="/usr/bin/python3"
+        fi
+    elif [ -x "$SNAP/usr/bin/python3" ]; then
         PYTHON_BIN="$SNAP/usr/bin/python3"
-    elif [ -x "$SNAP/bin/python3" ]; then
-        PYTHON_BIN="$SNAP/bin/python3"
     else
-        PYTHON_BIN="python3"
+        PYTHON_BIN="/usr/bin/python3"
     fi
 
     # Launch application
