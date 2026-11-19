@@ -96,7 +96,7 @@ class TestApiRateLimiter(unittest.TestCase):
                 patch('twittui_form.time.sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
                 patch('twittui_form.requests.get', side_effect=request):
             self.assertIs(limiter.get('https://twit.tv/api/v1.0/shows'), success)
-        self.assertEqual(starts, [0, 60])
+        self.assertEqual(starts, [0, 10])
 
     def test_usage_limit_retry_is_bounded(self):
         limiter = ApiRateLimiter()
@@ -123,7 +123,7 @@ class TestApiRateLimiter(unittest.TestCase):
                 patch('twittui_form.time.sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
                 patch('twittui_form.requests.get', side_effect=request):
             self.assertIs(limiter.get('https://twit.tv/api/v1.0/shows'), success)
-        self.assertEqual(starts, [0, 60])
+        self.assertEqual(starts, [0, 10])
 
     def test_403_request_blocked_retry_is_bounded(self):
         limiter = ApiRateLimiter()
