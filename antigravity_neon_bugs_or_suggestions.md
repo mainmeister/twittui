@@ -253,7 +253,9 @@ TwitTUI is an ambitious dual-backend (GTK 3 + Textual TUI) TWiT.tv podcast brows
 - **Recommended Fix**:
   Store per-feed items consistently (or look up `f"{show_key}_video"` and `f"{show_key}_audio"` in `_show_rss_cache`).
 - **Applied Fix & Verification**:
-  Updated `get_available_resolutions()` in `twittui_form.py` to query `f"{show_key}_video"` and `f"{show_key}_audio"` in `_show_rss_cache`. Verified by `test_medium_fixes.py:test_11_get_available_resolutions_finds_cached_show_rss_entries`.
+  1. **Live `_show_rss_cache` Key Lookup & Thread-Safe Snapshotting (`twittui_form.py:2130-2139, 2231-2236, 5351-5398`)**: Updated Section 3 of `get_available_resolutions()` to read the actual `{show_key}_video` and `{show_key}_audio` cache keys populated by `fetch_show_rss_items()` in mode-preferred order (`('audio', 'video')` when `audio_only=True`, else `('video', 'audio')`), snapshotted under `self._cache_lock` (and guarded `_show_rss_cache` reads/writes in `fetch_show_rss_items()` under `self._cache_lock` as well, while preserving optional backward-compatible lookup of any externally seeded `rss_{feed_file}` entries).
+  2. **Dict Targets, Integer Episode Numbers & `"All TWiT.tv Shows"` Resolution (`twittui_form.py:5184-5230`)**: Fixed `get_available_resolutions()` with a type-safe `_scalar_str()` helper to extract and stringify `target_num`, `target_title`, `clean_path`, and `ep_id` from `ep_dict` (`episode`/`number`/`episodeNumber`, `title`/`label`, `cleanPath`, `id`) as well as row attributes (preventing empty identifiers, `int.lower()` errors, or non-string attribute leaks into `_match_rss_item()`), fall back to `target.show` / `ep_dict['show_name']` when `show_name` is omitted or `"All TWiT.tv Shows"` is selected, and normalize display-formatted show labels via `_show_names_by_display`.
+  3. **Verification**: Verified by `test_medium_fixes.py:290-360` (`test_11_get_available_resolutions_finds_cached_show_rss_entries` and `test_11b_get_available_resolutions_matches_plain_dict_and_all_shows_context`).
 
 ---
 
@@ -553,10 +555,10 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 | Executive Summary Section | Items | Status | Regression Test Suite |
 | :--- | :---: | :---: | :--- |
 | **1. Critical / High** | 7 (#1–#7) | Complete | `test_critical_fixes.py` (7 tests) |
-| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (12 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
+| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (13 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
 | **3. Low / Edge Cases** | 3 (#21–#23) | Complete | `test_low_fixes.py` (4 tests) |
 | **4. Architectural & Quality Suggestions** | 7 (#1–#7) | Complete | `test_architecture_suggestions.py` (10 tests) |
-| **Total Test Suite** | **30 items** | **304 / 304 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
+| **Total Test Suite** | **30 items** | **305 / 305 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
 
 ---
 
@@ -603,7 +605,8 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
     - Aligned Tier 2 (Fuzzy) and Tier 3 (Phonetic) precedence, fallback threshold (`< 80.0`), scores (`80.0` primary / `72.0` secondary), multi-space query normalization, and short-word thresholds (`max(min_word_threshold, 80.0)` for `< 4`-char tokens; `68.0` default) between `compute_match_score()` (`tiered_search.py:298-311`) and `find_match_context()` (`tiered_search.py:541-625`).
     - Required every query token to match in `find_match_context()` (`tiered_search.py:627-671`), eliminating partial-query false positives, and selected the highest-signal non-exact token with score aligned to `compute_match_score()` for mixed multi-word queries, verified by `test_medium_fixes.py:205-285` (`test_10`, `test_10b`).
 11. **Dead RSS Cache Lookup in `get_available_resolutions()` (#11)**:
-    - Replaced the dead `f"rss_{feed_file}"` cache key lookup with the actual `f"{show_key}_video"` and `f"{show_key}_audio"` keys populated by `fetch_show_rss_items()`.
+    - Replaced the dead `f"rss_{feed_file}"`-only cache lookup (`twittui_form.py:5351-5398`) with mode-ordered lookups of the live `f"{show_key}_video"` and `f"{show_key}_audio"` keys written by `fetch_show_rss_items()` (`twittui_form.py:2130-2139, 2231-2236`), snapshotted safely under `self._cache_lock`.
+    - Fixed `get_available_resolutions()` (`twittui_form.py:5184-5230`) with `_scalar_str()` to extract and stringify `target_num`/`target_title`/`clean_path`/`ep_id` from plain episode dicts (including integer `episodeNumber`), fall back to target show metadata when `"All TWiT.tv Shows"` is selected, and normalize display-formatted show labels via `_show_names_by_display`, verified by `test_medium_fixes.py:290-360` (`test_11`, `test_11b`).
 12. **Episode Cache Reconciliation Double-Fetch & Write Amplification (#12)**:
     - Tracked fetched pages during pagination in `fetch_episodes()` to prevent duplicate page re-fetches on sort changes and deferred SQLite cache persistence until multi-page pagination completes (eliminating O(N²) per-page write amplification).
 13. **YouTube Bracket Filenames, Misnamed Audio Containers & Non-Atomic Replace (#13)**:

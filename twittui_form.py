@@ -2129,7 +2129,12 @@ class TwitTUIForm(toga.App):
 
         show_key = show_name.lower().strip()
         cache_key = f"{show_key}_audio" if audio_only else f"{show_key}_video"
-        if cache_key in self._show_rss_cache:
+        cache_lock = getattr(self, '_cache_lock', None)
+        if cache_lock is not None:
+            with cache_lock:
+                if cache_key in self._show_rss_cache:
+                    return list(self._show_rss_cache[cache_key])
+        elif cache_key in self._show_rss_cache:
             return self._show_rss_cache[cache_key]
 
         feed_files = list(KNOWN_SHOW_FEEDS.get(show_key, []))
@@ -2223,7 +2228,11 @@ class TwitTUIForm(toga.App):
             except Exception as e:
                 print(f"Error fetching show feed {feed_file}: {e}")
 
-        self._show_rss_cache[cache_key] = items
+        if cache_lock is not None:
+            with cache_lock:
+                self._show_rss_cache[cache_key] = items
+        else:
+            self._show_rss_cache[cache_key] = items
         return items
 
     def fetch_media_from_webpage(self, clean_path_or_url: str, audio_only: bool = None) -> str | None:
@@ -5172,18 +5181,52 @@ class TwitTUIForm(toga.App):
                 if not k.startswith('_'):
                     ep_dict[k] = v
 
-        target_num = getattr(target, 'episode', str(target[0] if isinstance(target, (tuple, list)) and len(target) > 0 else ''))
-        target_title = getattr(target, 'title', str(target[1] if isinstance(target, (tuple, list)) and len(target) > 1 else ''))
+        def _scalar_str(val: Any, allow_int: bool = False) -> str:
+            if isinstance(val, str):
+                return val.strip()
+            if allow_int and isinstance(val, int) and not isinstance(val, bool):
+                return str(val)
+            return ''
+
+        target_num = (
+            _scalar_str(getattr(target, 'episode', None), allow_int=True)
+            or _scalar_str(getattr(target, 'number', None), allow_int=True)
+            or _scalar_str(ep_dict.get('episode'), allow_int=True)
+            or _scalar_str(ep_dict.get('number'), allow_int=True)
+            or _scalar_str(ep_dict.get('episodeNumber'), allow_int=True)
+            or (_scalar_str(target[0], allow_int=True) if isinstance(target, (tuple, list)) and len(target) > 0 else '')
+        )
+        target_title = (
+            _scalar_str(getattr(target, 'title', None))
+            or _scalar_str(ep_dict.get('title'))
+            or _scalar_str(ep_dict.get('label'))
+            or (_scalar_str(target[1]) if isinstance(target, (tuple, list)) and len(target) > 1 else '')
+        )
 
         if hasattr(self, 'current_episodes') and self.current_episodes:
             for ep in self.current_episodes:
-                if (target_num and str(ep.get('number', '')) == str(target_num)) or (target_title and ep.get('title') == target_title):
+                if (target_num and str(ep.get('number', '')) == target_num) or (target_title and ep.get('title') == target_title):
                     if isinstance(ep, dict):
                         ep_dict = {**ep, **ep_dict}
                     break
 
         if not show_name:
-            show_name = self._selected_show_name()
+            selected = _scalar_str(self._selected_show_name())
+            target_show = (
+                _scalar_str(getattr(target, 'show', None))
+                or _scalar_str(ep_dict.get('show_name'))
+                or ep_dict.get('show')
+                or ''
+            )
+            if isinstance(target_show, dict):
+                target_show = _scalar_str(target_show.get('label')) or _scalar_str(target_show.get('title'))
+            target_show_str = _scalar_str(target_show)
+            if selected and selected.lower() not in ('all twit.tv shows', 'all shows'):
+                show_name = selected
+            else:
+                show_name = target_show_str or selected
+        if show_name:
+            show_name = getattr(self, '_show_names_by_display', {}).get(show_name, show_name)
 
         def _add_cand(res_id: str, name: str, res_type: str, url: str | None, size_val: Any = None):
             if not url or not isinstance(url, str):
@@ -5287,8 +5330,8 @@ class TwitTUIForm(toga.App):
 
         # 2b. Check Club TWiT RSS feeds for this show (member-only, no commercials)
         if show_name:
-            clean_path_club = ep_dict.get('cleanPath') or getattr(target, 'clean_path', '')
-            ep_id_club = str(ep_dict.get('id') or getattr(target, 'id', ''))
+            clean_path_club = _scalar_str(ep_dict.get('cleanPath')) or _scalar_str(getattr(target, 'clean_path', None))
+            ep_id_club = _scalar_str(ep_dict.get('id'), allow_int=True) or _scalar_str(getattr(target, 'id', None), allow_int=True)
             club_items = self.fetch_club_twit_rss_items(show_name, audio_only=audio_only)
             if club_items:
                 for item in club_items:
@@ -5308,21 +5351,30 @@ class TwitTUIForm(toga.App):
         # 3. Check cached RSS feeds for this show
         if show_name and hasattr(self, '_show_rss_cache') and isinstance(self._show_rss_cache, dict):
             show_key = show_name.strip().lower()
-            clean_path = ep_dict.get('cleanPath') or getattr(target, 'clean_path', '')
-            ep_id = str(ep_dict.get('id') or getattr(target, 'id', ''))
+            clean_path = _scalar_str(ep_dict.get('cleanPath')) or _scalar_str(getattr(target, 'clean_path', None))
+            ep_id = _scalar_str(ep_dict.get('id'), allow_int=True) or _scalar_str(getattr(target, 'id', None), allow_int=True)
 
             # Inspect the real keys written by fetch_show_rss_items() ('{show_key}_video', '{show_key}_audio')
-            # plus any legacy per-feed 'rss_{feed_file}' keys.
+            # in mode-preferred order, plus any legacy per-feed 'rss_{feed_file}' keys.
+            suffix_order = ('audio', 'video') if audio_only else ('video', 'audio')
             rss_cache_sources: list[tuple[str, list]] = []
-            for suffix in ('video', 'audio'):
-                key = f"{show_key}_{suffix}"
-                cached_items = self._show_rss_cache.get(key)
-                if cached_items:
-                    rss_cache_sources.append(('', cached_items))
-            for feed_file in KNOWN_SHOW_FEEDS.get(show_key, []):
-                legacy_items = self._show_rss_cache.get(f"rss_{feed_file}")
-                if legacy_items:
-                    rss_cache_sources.append((feed_file, legacy_items))
+
+            def _collect_rss_sources() -> None:
+                for suffix in suffix_order:
+                    cached_items = self._show_rss_cache.get(f"{show_key}_{suffix}")
+                    if cached_items:
+                        rss_cache_sources.append(('', list(cached_items)))
+                for feed_file in KNOWN_SHOW_FEEDS.get(show_key, []):
+                    legacy_items = self._show_rss_cache.get(f"rss_{feed_file}")
+                    if legacy_items:
+                        rss_cache_sources.append((feed_file, list(legacy_items)))
+
+            cache_lock = getattr(self, '_cache_lock', None)
+            if cache_lock is not None:
+                with cache_lock:
+                    _collect_rss_sources()
+            else:
+                _collect_rss_sources()
 
             for default_feed_file, items in rss_cache_sources:
                 for item in items:

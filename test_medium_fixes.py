@@ -320,6 +320,44 @@ class TestMediumFixes(unittest.TestCase):
         self.assertTrue(any(r["url"].endswith("sn1050_h264m_1280x720_1872.mp4") for r in res_video))
         self.assertTrue(any(r["url"].endswith("sn1050.mp3") for r in res_audio))
 
+    def test_11b_get_available_resolutions_matches_plain_dict_and_all_shows_context(self) -> None:
+        """Plain episode dicts with integer numbers and 'All TWiT.tv Shows' selection still resolve cached RSS feeds."""
+        form = TwitTUIForm("TestApp", "org.twit.test", cache_db_path=":memory:")
+        form.show_combo = SimpleNamespace(value="All TWiT.tv Shows")
+        form._show_names_by_display = {"Security Now (2005-2026)": "Security Now"}
+        form._show_rss_cache["security now_video"] = [
+            {
+                "title": "Security Now 1051",
+                "number": "1051",
+                "enclosure_url": "https://cdn.twit.tv/video/sn/sn1051/sn1051_h264m_1280x720_1872.mp4",
+                "enclosure_length": "850000000",
+                "feed_file": "sn_video_hd.xml",
+            }
+        ]
+        form._show_rss_cache["security now_audio"] = [
+            {
+                "title": "Security Now 1051",
+                "number": "1051",
+                "enclosure_url": "https://cdn.twit.tv/audio/sn/sn1051/sn1051.mp3",
+                "enclosure_length": "52000000",
+                "feed_file": "sn.xml",
+            }
+        ]
+        # Plain dict with integer episodeNumber and no explicit show_name argument
+        ep_dict = {
+            "title": "Security Now 1051",
+            "episodeNumber": 1051,
+            "show_name": "Security Now",
+        }
+        with patch.object(form, "fetch_club_twit_rss_items", return_value=[]):
+            res_video = form.get_available_resolutions(ep_dict, audio_only=False)
+            res_audio = form.get_available_resolutions(ep_dict, show_name="Security Now (2005-2026)", audio_only=True)
+
+        self.assertEqual([r["id"] for r in res_video], ["video_hd", "rss_audio"])
+        self.assertTrue(res_video[0]["url"].endswith("sn1051_h264m_1280x720_1872.mp4"))
+        self.assertEqual([r["id"] for r in res_audio], ["rss_audio"])
+        self.assertTrue(res_audio[0]["url"].endswith("sn1051.mp3"))
+
     # ------------------------------------------------------------------
     # Bug 12: No duplicate page fetches & single deferred SQLite persist
     # ------------------------------------------------------------------
