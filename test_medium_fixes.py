@@ -920,6 +920,52 @@ class TestMediumFixes(unittest.TestCase):
                 start_new_session=True,
             )
 
+    def test_17b_youtube_stream_routes_through_quiet_posix_opener_without_mutating_stdio(self) -> None:
+        """In live TUI mode, streaming a YouTube episode uses DEVNULL POSIX opener (including darwin/gio fallback) and never mutates sys.stdout."""
+        form = TwitTUIForm("TestApp", "org.twit.test", cache_db_path=":memory:")
+        form.is_audio_only = lambda: False
+        yt_url = "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"
+        row = SimpleNamespace(
+            title="YouTube Episode",
+            episode="99",
+            episode_data={"title": "YouTube Episode", "video_youtube": yt_url},
+        )
+        form.episodes_list = SimpleNamespace(selection=[row])
+
+        orig_stdout, orig_stderr = sys.stdout, sys.stderr
+        with patch("twittui_form._is_textual_tui_running", return_value=True), \
+             patch("sys.platform", "darwin"), \
+             patch("shutil.which", side_effect=lambda name: "/usr/bin/open" if name == "open" else None), \
+             patch("twittui.media.requests.head") as mock_head, \
+             patch("webbrowser.open") as mock_webbrowser, \
+             patch("subprocess.Popen") as mock_popen:
+            asyncio.run(form.on_stream_press())
+            # No HTTP redirect probe for YouTube URLs and no raw webbrowser.open() in POSIX TUI
+            mock_head.assert_not_called()
+            mock_webbrowser.assert_not_called()
+            mock_popen.assert_called_once_with(
+                ["/usr/bin/open", yt_url],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            self.assertIs(sys.stdout, orig_stdout)
+            self.assertIs(sys.stderr, orig_stderr)
+
+        # Fallback from failed xdg-open to gio open on Linux without crashing
+        with patch("twittui_form._is_textual_tui_running", return_value=True), \
+             patch("sys.platform", "linux"), \
+             patch("shutil.which", side_effect=lambda name: f"/usr/bin/{name}" if name in ("xdg-open", "gio") else None), \
+             patch("subprocess.Popen", side_effect=[OSError("xdg-open broken"), MagicMock()]) as mock_fb:
+            self.assertTrue(form._open_browser_quietly("https://twit.tv/shows"))
+            self.assertEqual(mock_fb.call_count, 2)
+            self.assertEqual(mock_fb.call_args_list[1].args[0], ["/usr/bin/gio", "open", "https://twit.tv/shows"])
+
+        # Reject empty or option-like ('-...') strings safely
+        self.assertFalse(form._open_browser_quietly(""))
+        self.assertFalse(form._open_browser_quietly("--malicious-flag"))
+
     # ------------------------------------------------------------------
     # Bug 18: Textual backend widget & lifecycle fixes
     # ------------------------------------------------------------------

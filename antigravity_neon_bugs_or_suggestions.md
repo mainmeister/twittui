@@ -350,7 +350,9 @@ TwitTUI is an ambitious dual-backend (GTK 3 + Textual TUI) TWiT.tv podcast brows
 - **Recommended Fix**:
   Add `resolve: bool = True` to `launch_stream_safe()` and pass `resolve=False` from `on_stream_press()`; on POSIX in live TUI mode, launch browsers via `subprocess.Popen(['xdg-open', url], stdin=DEVNULL, stdout=DEVNULL, stderr=DEVNULL, start_new_session=True)` (macOS `open`) instead of mutating `sys.stdout`/`sys.stderr`.
 - **Applied Fix & Verification**:
-  Added `resolve: bool = True` to `launch_stream_safe()` (`twittui/media.py` + `twittui_form.py`), passed `resolve=False` from `on_stream_press()`, routed YouTube streaming through `_open_browser_quietly()`, and spawned `xdg-open`/`open` with `DEVNULL` stdio in live POSIX TUI mode. Verified by `test_medium_fixes.py:test_16_and_17_activate_streams_clicked_row_resolves_once_and_silences_browser_fds`.
+  1. **Single Redirect Resolution (`twittui/media.py:47-99, 151-192`, `twittui_form.py:351-366, 5713-5741`)**: Added `resolve: bool = True` to `launch_stream_safe()` (both `twittui/media.py` and the `twittui_form.py` wrapper) and passed `resolve=False` from `on_stream_press()` after pre-resolving once with `resolve_stream_url()`. Also expanded `resolve_stream_url()`'s YouTube skip pattern (`youtube.com`, `youtube-nocookie.com`, `youtu.be`, `yt.be`) and ensured `head_resp.close()` always runs in a `finally:` block.
+  2. **OS-Level Stdio-Silenced Browser Launches (`twittui_form.py:689-733, 5717-5724`)**: Routed YouTube streaming in `on_stream_press()` through `_open_browser_quietly()`, which in live POSIX Textual TUI mode validates the URL (rejecting empty or leading-`-` option strings) and launches OS openers (`open` on macOS; `xdg-open` with `gio open` / `sensible-browser` fallbacks on Linux/Unix, catching `OSError`) with `stdin`/`stdout`/`stderr=subprocess.DEVNULL` and `start_new_session=True` instead of mutating process-global `sys.stdout`/`sys.stderr`.
+  3. **Verification**: Verified by `test_medium_fixes.py:875-967` (`test_16_and_17_activate_streams_clicked_row_resolves_once_and_silences_browser_fds` and `test_17b_youtube_stream_routes_through_quiet_posix_opener_without_mutating_stdio`).
 
 ---
 
@@ -566,10 +568,10 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 | Executive Summary Section | Items | Status | Regression Test Suite |
 | :--- | :---: | :---: | :--- |
 | **1. Critical / High** | 7 (#1–#7) | Complete | `test_critical_fixes.py` (7 tests) |
-| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (17 tests), `test_episode_activation.py` (3 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
+| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (18 tests), `test_episode_activation.py` (3 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
 | **3. Low / Edge Cases** | 3 (#21–#23) | Complete | `test_low_fixes.py` (4 tests) |
 | **4. Architectural & Quality Suggestions** | 7 (#1–#7) | Complete | `test_architecture_suggestions.py` (10 tests) |
-| **Total Test Suite** | **30 items** | **311 / 311 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
+| **Total Test Suite** | **30 items** | **312 / 312 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
 
 ---
 
@@ -632,8 +634,8 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 16. **TUI Row Activation Streaming Wrong Episode Under Multi-Select (#16)**:
     - Updated `on_stream_press(self, widget=None, target_row=None)` and `on_episode_activate(self, widget, row, **kwargs)` (`twittui_form.py:5630-5662`) to forward and stream the explicitly activated `row` (`toga_textual_backend.py:1130-1136`) even when other rows are marked (`☑`), and added monotonic `self._stream_request` superseding in `stale()` so rapid overlapping activations launch only the latest episode; verified end-to-end under headless Textual in `test_episode_activation.py:15-134` and `test_medium_fixes.py:875-900`.
 17. **Double Redirect Resolution & Unsilenced Browser Launches in TUI Mode (#17)**:
-    - Added `resolve: bool = True` to `launch_stream_safe()` and passed `resolve=False` from `on_stream_press()` after pre-resolution.
-    - Routed YouTube streaming through `_open_browser_quietly()`, which in live POSIX Textual TUI mode spawns `xdg-open`/`open` directly with `stdin`/`stdout`/`stderr` bound to `subprocess.DEVNULL` and `start_new_session=True` instead of mutating process-global `sys.stdout`/`sys.stderr`.
+    - Added `resolve: bool = True` to `launch_stream_safe()` (`twittui/media.py:151-192`, `twittui_form.py:351-366`), passed `resolve=False` from `on_stream_press()` (`twittui_form.py:5713-5741`) after pre-resolution, aligned YouTube skip matching (`youtube-nocookie.com`/`yt.be`), and ensured `head_resp.close()` always runs in `resolve_stream_url()` (`twittui/media.py:47-99`).
+    - Routed YouTube streaming through `_open_browser_quietly()` (`twittui_form.py:689-733`), which rejects empty or `-`-prefixed strings and in live POSIX Textual TUI mode spawns `open` (macOS) or `xdg-open` / `gio open` / `sensible-browser` (Linux/Unix, with `OSError` fallback) with `stdin`/`stdout`/`stderr=subprocess.DEVNULL` and `start_new_session=True` instead of mutating process-global `sys.stdout`/`sys.stderr`, verified by `test_medium_fixes.py:875-967` (`test_16_and_17`, `test_17b`).
 18. **Textual Backend Lifecycle & Widget Gaps (`toga_textual_backend.py`) (#18)**:
     - Dismissed active modal screens cleanly in `_patched_win_hide()` so `await window.dialog(...)` futures never hang.
     - Updated `OpenFileDialog` and `SaveFileDialog` to resolve via `_resolve_dialog_future()`.

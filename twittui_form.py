@@ -693,20 +693,44 @@ class TwitTUIForm(toga.App):
         stdin/stdout/stderr redirected to DEVNULL instead of mutating process-global
         sys.stdout/sys.stderr (which is neither thread-safe nor effective for child FDs).
         """
+        if not url or not isinstance(url, str):
+            return False
+        clean_url = url.strip()
+        if not clean_url or clean_url.startswith('-'):
+            return False
+
         if _is_textual_tui_running(self):
             if sys.platform != 'win32':
-                opener = shutil.which('open') if sys.platform == 'darwin' else shutil.which('xdg-open')
-                if opener:
-                    subprocess.Popen(
-                        [opener, url],
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        start_new_session=True,
-                    )
-                    return True
-            return bool(webbrowser.open(url))
-        return bool(webbrowser.open(url))
+                opener_cmds: list[list[str]] = []
+                if sys.platform == 'darwin':
+                    open_bin = shutil.which('open')
+                    if open_bin:
+                        opener_cmds.append([open_bin, clean_url])
+                else:
+                    xdg_bin = shutil.which('xdg-open')
+                    if xdg_bin:
+                        opener_cmds.append([xdg_bin, clean_url])
+                    gio_bin = shutil.which('gio')
+                    if gio_bin:
+                        opener_cmds.append([gio_bin, 'open', clean_url])
+                    sensible_bin = shutil.which('sensible-browser')
+                    if sensible_bin:
+                        opener_cmds.append([sensible_bin, clean_url])
+
+                for cmd in opener_cmds:
+                    try:
+                        subprocess.Popen(
+                            cmd,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            start_new_session=True,
+                        )
+                        return True
+                    except OSError:
+                        _logger.debug("POSIX browser opener %s failed; trying fallback", cmd[0], exc_info=True)
+            return bool(webbrowser.open(clean_url))
+        return bool(webbrowser.open(clean_url))
 
     def set_tooltip(self, widget: Any, tooltip_text: str | None) -> Any:
         """Helper to assign a tooltip to any UI widget or command."""

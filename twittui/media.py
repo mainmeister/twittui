@@ -55,14 +55,18 @@ def resolve_stream_url(media_url: str, timeout: float = 10.0) -> str:
         return clean_url
 
     # Do not follow redirects for YouTube stream URLs
-    if re.search(r"(?:youtube\.com/|youtu\.be/)", clean_url, re.IGNORECASE):
+    if re.search(r"(?:youtube\.com/|youtube-nocookie\.com/|youtu\.be/|yt\.be/)", clean_url, re.IGNORECASE):
         return clean_url
 
     try:
         headers = {"User-Agent": "Mozilla/5.0 (compatible; TwitTUI/1.0)"}
         head_resp = requests.head(clean_url, headers=headers, allow_redirects=True, timeout=timeout)
-        if head_resp.status_code < 400 and head_resp.url:
-            return head_resp.url
+        try:
+            if head_resp.status_code < 400 and head_resp.url:
+                return head_resp.url
+        finally:
+            if callable(getattr(head_resp, "close", None)):
+                head_resp.close()
         with requests.get(
             clean_url, headers=headers, stream=True, allow_redirects=True, timeout=timeout
         ) as get_resp:
