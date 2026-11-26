@@ -52,6 +52,8 @@ def load_twittui_dotenv(base_dir: str | None = None) -> None:
 def write_restricted_file(file_path: str, content: str) -> None:
     """Write sensitive content to disk with owner-only (``0o600``) permissions."""
     flags: int = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
     fd: int = os.open(file_path, flags, 0o600)
     fd_owned: bool = True
     try:
@@ -69,10 +71,9 @@ def write_restricted_file(file_path: str, content: str) -> None:
         fd_owned = False
         with handle:
             handle.write(content)
-    except Exception:
+    finally:
         if fd_owned:
             try:
                 os.close(fd)
             except OSError:
-                pass
-        raise
+                _logger.debug("Unable to close file descriptor %d for %s", fd, file_path, exc_info=True)

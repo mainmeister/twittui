@@ -830,6 +830,45 @@ class TestMediumFixes(unittest.TestCase):
                     write_restricted_file(target, "SECRET=1\n")
                 mock_close.assert_not_called()
 
+    def test_15b_write_restricted_file_closes_fd_on_fdopen_failure_and_uses_fchmod(self) -> None:
+        """FD is closed exactly once when os.fdopen fails, and POSIX writes tighten permissions via os.fchmod."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # If os.fdopen raises before taking ownership, close the raw FD exactly once.
+            real_close = os.close
+            for error in (OSError("fdopen failed"), KeyboardInterrupt()):
+                with self.subTest(error=type(error).__name__):
+                    target_fail = os.path.join(tmp_dir, f".env_fail_{type(error).__name__}")
+                    closed_fds: list[int] = []
+
+                    def spy_close(fd: int) -> None:
+                        closed_fds.append(fd)
+                        real_close(fd)
+
+                    with patch("os.fdopen", side_effect=error), \
+                         patch("os.close", side_effect=spy_close):
+                        with self.assertRaises(type(error)):
+                            write_restricted_file(target_fail, "SECRET=1\n")
+                    self.assertEqual(len(closed_fds), 1)
+
+            # 2. Normal write on POSIX uses os.fchmod(fd, 0o600) directly without path TOCTOU os.chmod
+            target_ok = os.path.join(tmp_dir, ".env_ok")
+            with open(target_ok, "w", encoding="utf-8") as f:
+                f.write("OLD=1\n")
+            os.chmod(target_ok, 0o644)
+
+            if hasattr(os, "fchmod"):
+                with patch("os.fchmod", wraps=os.fchmod) as spy_fchmod, \
+                     patch("os.chmod") as mock_chmod:
+                    write_restricted_file(target_ok, "NEW_SECRET=42\n")
+                    spy_fchmod.assert_called_once()
+                    self.assertEqual(spy_fchmod.call_args.args[1], 0o600)
+                    mock_chmod.assert_not_called()
+                self.assertEqual(os.stat(target_ok).st_mode & 0o777, 0o600)
+            else:
+                write_restricted_file(target_ok, "NEW_SECRET=42\n")
+            with open(target_ok, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "NEW_SECRET=42\n")
+
     # ------------------------------------------------------------------
     # Bug 16 & 17: Row activation targets activated row; single resolve; quiet POSIX browser
     # ------------------------------------------------------------------

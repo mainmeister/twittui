@@ -46,6 +46,8 @@ def _create_restricted_log_file(log_path: str) -> None:
     if parent:
         os.makedirs(parent, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
     fd = os.open(log_path, flags, 0o600)
     try:
         if hasattr(os, "fchmod"):
