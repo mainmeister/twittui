@@ -52,7 +52,7 @@ dev = [
 twittui = "main:main"
 
 [tool.setuptools]
-packages = ["twittui"]
+packages = ["twittui", "twittui.search", "twittui.ui"]
 py-modules = [
     "main",
     "installer",
@@ -65,10 +65,4 @@ py-modules = [
 include-package-data = true
 
 [tool.setuptools.package-data]
-"*" = [
-    "feed-style.css",
-    "feed-style.xsl",
-    "twittv.apib",
-    "README.md",
-    "resources/*",
-]
+twittui = ["resources/*"]

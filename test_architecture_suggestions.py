@@ -20,6 +20,7 @@ os.environ.setdefault("TOGA_BACKEND", "toga_textual")
 import main as main_mod
 import twittui
 import twittui_form
+from twittui._compat import PACKAGE_ROOT
 from twittui.cache import SHOW_DATE_BOUNDS_TTL_SECONDS
 from twittui.logging_config import configure_logging, get_logger, reset_logging
 from twittui.shows import (
@@ -51,6 +52,85 @@ class TestArchitectureSuggestions(unittest.TestCase):
         self.assertIs(twittui_form._LazySQLiteEpisodesCache, twittui._LazySQLiteEpisodesCache)
         self.assertIs(twittui_form.SHOW_REGISTRY, SHOW_REGISTRY)
         self.assertTrue(issubclass(twittui_form.ApiRateLimiter, twittui.ApiRateLimiter))
+
+    def test_monolith_decomposed_into_package_layout(self) -> None:
+        """Verify twittui_form.py is a thin facade and all suggested twittui/ modules import cleanly."""
+        import importlib
+
+        facade_lines = (PROJECT_ROOT / "twittui_form.py").read_text(encoding="utf-8").splitlines()
+        self.assertLess(
+            len(facade_lines),
+            250,
+            f"Expected twittui_form.py facade to stay concise (< 250 lines), got {len(facade_lines)}",
+        )
+
+        expected_modules = (
+            "twittui.cli",
+            "twittui.config",
+            "twittui.rate_limiter",
+            "twittui.cache",
+            "twittui.catalog",
+            "twittui.rss",
+            "twittui.media",
+            "twittui.downloader",
+            "twittui.viewer",
+            "twittui.search",
+            "twittui.search.tiered_search",
+            "twittui.search.double_metaphone",
+            "twittui.ui",
+            "twittui.ui.form",
+            "twittui.ui.preferences",
+            "twittui.ui.metadata",
+            "twittui.ui.textual_backend",
+        )
+        for mod_name in expected_modules:
+            mod = importlib.import_module(mod_name)
+            self.assertIsNotNone(mod)
+
+        from twittui.catalog import CatalogMixin
+        from twittui.config import ConfigMixin
+        from twittui.downloader import DownloaderMixin
+        from twittui.media import MediaMixin
+        from twittui.rss import RssMixin
+        from twittui.ui.form import TwitTUIForm as ModularTwitTUIForm
+        from twittui.ui.metadata import MetadataMixin
+        from twittui.ui.preferences import PreferencesMixin
+        from twittui.viewer import ViewerMixin
+
+        self.assertIs(TwitTUIForm, ModularTwitTUIForm)
+        for mixin in (
+            PreferencesMixin,
+            MetadataMixin,
+            ViewerMixin,
+            DownloaderMixin,
+            MediaMixin,
+            RssMixin,
+            CatalogMixin,
+            ConfigMixin,
+        ):
+            self.assertTrue(issubclass(TwitTUIForm, mixin), f"TwitTUIForm missing mixin {mixin.__name__}")
+
+    def test_package_runtime_resources_and_icon_fallback(self) -> None:
+        """Bundled help, feed styles, and icons remain available outside the source tree."""
+        from twittui.ui.form import resolve_app_icon
+
+        package_resources = pathlib.Path(PACKAGE_ROOT) / "resources"
+        for filename in (
+            "README.md",
+            "twittv.apib",
+            "feed-style.css",
+            "feed-style.xsl",
+            "twittui.png",
+            "twittui.ico",
+        ):
+            with self.subTest(filename=filename):
+                self.assertTrue((package_resources / filename).is_file())
+
+        with tempfile.TemporaryDirectory() as empty_root:
+            with patch("twittui.ui.form.PROJECT_ROOT", empty_root), \
+                 patch("twittui.ui.form.os.getcwd", return_value=empty_root), \
+                 patch.dict(os.environ, {"SNAP": ""}):
+                self.assertEqual(resolve_app_icon(), str(package_resources / "twittui"))
 
     def test_unified_show_registry_completeness_and_derivation(self) -> None:
         """All 4 derived show lookup tables come from SHOW_REGISTRY and include previously missing shows."""
@@ -282,7 +362,7 @@ class TestArchitectureSuggestions(unittest.TestCase):
             PROJECT_ROOT / "main.py",
             PROJECT_ROOT / "tiered_search.py",
             PROJECT_ROOT / "installer.py",
-            *sorted((PROJECT_ROOT / "twittui").glob("*.py")),
+            *sorted((PROJECT_ROOT / "twittui").rglob("*.py")),
         ]
         offenders: list[str] = []
         for path in source_files:
@@ -305,10 +385,16 @@ class TestArchitectureSuggestions(unittest.TestCase):
         opt_deps = pyproject_data["project"]["optional-dependencies"]
         for extra in ("gtk", "textual", "youtube", "security", "fast-search", "dev"):
             self.assertIn(extra, opt_deps)
-        self.assertIn("twittui", pyproject_data["tool"]["setuptools"]["packages"])
+        for pkg_name in ("twittui", "twittui.search", "twittui.ui"):
+            self.assertIn(pkg_name, pyproject_data["tool"]["setuptools"]["packages"])
+        self.assertEqual(
+            pyproject_data["tool"]["setuptools"]["package-data"]["twittui"],
+            ["resources/*"],
+        )
 
         setup_text = (PROJECT_ROOT / "setup.py").read_text(encoding="utf-8")
-        self.assertIn('packages=["twittui"]', setup_text)
+        self.assertIn('packages=["twittui", "twittui.search", "twittui.ui"]', setup_text)
+        self.assertIn('"twittui": ["resources/*"]', setup_text)
         self.assertIn("with open(readme_path", setup_text)
 
         installer_text = (PROJECT_ROOT / "installer.py").read_text(encoding="utf-8")
@@ -324,6 +410,7 @@ class TestArchitectureSuggestions(unittest.TestCase):
         self.assertIn("xvfb-run", ci_text)
         self.assertIn("SNAP_USER_DATA", ci_text)
         self.assertIn("unittest discover", ci_text)
+        self.assertNotIn("TWITTUI_CACHE_DB", ci_text)
 
 
 if __name__ == "__main__":

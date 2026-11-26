@@ -17,7 +17,7 @@ setup(
     long_description=_read_readme(),
     long_description_content_type="text/markdown",
     author="TWiT Community",
-    packages=["twittui"],
+    packages=["twittui", "twittui.search", "twittui.ui"],
     py_modules=[
         "main",
         "installer",
@@ -71,13 +71,7 @@ setup(
         ],
     },
     package_data={
-        "": [
-            "feed-style.css",
-            "feed-style.xsl",
-            "twittv.apib",
-            "README.md",
-            "resources/*",
-        ],
+        "twittui": ["resources/*"],
     },
     include_package_data=True,
     python_requires=">=3.10",

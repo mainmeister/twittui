@@ -568,7 +568,7 @@ TwitTUI centralizes configuration inside `.env` files and manages live state upd
 
 ### 12.1 Unified Python Packaging (`pyproject.toml`, `setup.py`, `requirements.txt`)
 Packaging metadata is synchronized across `pyproject.toml`, `setup.py`, and `requirements.txt`:
-- Distributes both the `twittui` package (`packages=["twittui"]`) and top-level compatibility modules (`py_modules`).
+- Distributes the `twittui`, `twittui.search`, and `twittui.ui` packages, top-level compatibility modules (`py_modules`), and package-local runtime resources in `twittui/resources/`.
 - Conditions `toga-gtk` and `PyGObject`/`pycairo` on `sys_platform == "linux"` so macOS, Windows, and headless Linux environments install cleanly.
 - Declares `yt-dlp` and structured `[project.optional-dependencies]` / `extras_require` groups (`gtk`, `textual`, `youtube`, `security` [`defusedxml`, `nh3`], `fast-search` [`rapidfuzz`], `xml` [`lxml`], `dev` [`PyYAML`, `ruff`, `mypy`]).
 
@@ -593,14 +593,14 @@ TwitTUI includes production Snap packaging configurations supporting cross-distr
 ### 12.4 Continuous Integration (`.github/workflows/ci.yml`)
 GitHub Actions runs on pushes and pull requests across Python 3.11 and 3.12 on `ubuntu-latest`:
 - Installs GTK 3 / PyGObject / `shared-mime-info` / `xvfb` and optional extras (`security`, `fast-search`, `dev` including `PyYAML`).
-- Runs `python -m py_compile *.py twittui/*.py`.
-- Executes the complete `unittest` suite under `xvfb-run -a` with `SNAP_USER_DATA` and `TWITTUI_CACHE_DB` isolated to `${{ runner.temp }}`.
+- Runs `python -m py_compile *.py twittui/*.py twittui/ui/*.py twittui/search/*.py`.
+- Executes the complete `unittest` suite under `xvfb-run -a` with `SNAP_USER_DATA` isolated to `${{ runner.temp }}`; it does not override `TWITTUI_CACHE_DB`, so test fixtures retain their per-test cache paths.
 
 ---
 
 ## 13. Quality Assurance & Automated Test Suite
 
-TwitTUI maintains an automated test suite comprising **300 unit and integration tests across 25 test modules**, running cleanly on both headless terminals and graphical sessions without hanging on interactive TTYs or mutating `.env`.
+TwitTUI maintains an automated test suite comprising **324 unit and integration tests across 25 test modules**, running cleanly on both headless terminals and graphical sessions without hanging on interactive TTYs or mutating `.env`.
 
 ```
 test_*.py Test Coverage Matrix:
@@ -635,4 +635,4 @@ The test suite runs directly with Python's standard `unittest` runner:
 ```bash
 python -m unittest discover -s . -p "test_*.py" -v
 ```
-All 300 tests execute reliably without interactive TTY prompts or developer `.env` modifications, confirming regression-free operation across the entire codebase.
+All 324 tests execute reliably without interactive TTY prompts or developer `.env` modifications, confirming regression-free operation across the entire codebase.

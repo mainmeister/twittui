@@ -1,5 +1,5 @@
 **Runtime Environment Verified (Baseline Audit)**: Python 3.12.3, `toga` / `toga-gtk` / `toga-textual` 0.5.7, `textual` 3.7.1, 263 discovered `unittest` cases across 20 test modules.
-**Post-Remediation Status**: All **23 confirmed bugs** and **7 architectural/quality suggestions** implemented and verified — **317 / 317 `unittest` cases passing across 25 test modules** (`.env` untouched, zero broad silent `except Exception: pass` handlers remaining).
+**Post-Remediation Status**: All **23 confirmed bugs** and **7 architectural/quality suggestions** implemented and verified — **324 / 324 `unittest` cases passing across 25 test modules** (`.env` untouched, zero broad silent `except Exception: pass` handlers remaining).
 
 > **Path Note**: The requested path referenced `/home/mainmeister/PythonProjects/twittui/antigravity_neon_bugs_or_suggestions.md`; because `/home/mainmeister/PythonProjects` does not exist and the active project workspace is `/home/mainmeister/PycharmProjects/twittui`, this report was saved inside the active repository root.
 
@@ -499,7 +499,11 @@ twittui/
     └── textual_backend.py
 ```
 - **Applied Implementation & Verification**:
-  Created the cohesive `twittui/` package (`__init__.py`, `logging_config.py`, `shows.py`, `config.py`, `rate_limiter.py`, `media.py`, `viewer.py`, `cache.py`), extracting ~870+ lines out of `twittui_form.py` while keeping all public symbols and test mock targets 100% backward-compatible. Verified by `test_architecture_suggestions.py:test_twittui_package_exports_and_form_compat`.
+  Completed the full architectural decomposition of the 8,109-line `twittui_form.py` monolith into the complete `twittui/` package layout:
+  - **Core Package (`twittui/`)**: `_compat.py` (shared `PROJECT_ROOT`, `compat_attr`, `ApiRateLimiter`/`api_rate_limiter`, `quiet_print`, `launch_stream_safe`), `cli.py`, `config.py` (`ConfigMixin` + `.env`/`0o600` helpers), `rate_limiter.py`, `cache.py`, `shows.py`, `catalog.py` (`CatalogMixin`), `rss.py` (`RssMixin`), `media.py` (`MediaMixin`), `downloader.py` (`DownloaderMixin`), `viewer.py` (`ViewerMixin`), and `logging_config.py`.
+  - **Search & UI Subpackages**: `twittui/search/{__init__,tiered_search,double_metaphone}.py` and `twittui/ui/{__init__,form,preferences,metadata,textual_backend}.py` (`TwitTUIForm` composing all 8 cohesive mixins in `twittui/ui/form.py`).
+  - **Thin Facade & Packaging**: Reduced `twittui_form.py` from **8,109 lines → 173 lines (-97.9%)** as a backward-compatibility facade preserving 100% of historical imports and test monkeypatch targets; updated `pyproject.toml` and `setup.py` for `twittui`, `twittui.search`, and `twittui.ui`, and bundled runtime help, API, RSS styles, and icons under `twittui/resources/` with package-relative lookup.
+  - **Verification**: Verified by `test_architecture_suggestions.py` (`test_twittui_package_exports_and_form_compat`, `test_monolith_decomposed_into_package_layout`, `test_package_runtime_resources_and_icon_fallback`, `test_no_silent_broad_except_pass_handlers_remain` over `twittui/**/*.py`, `test_packaging_hygiene_and_ci_workflow`) and full 324-test suite.
 
 ### 2. Replace Pervasive Silent Exception Swallowing with Structured Logging
 An AST audit across the 7 source modules found **242 broad `except Exception` handlers**, of which **142 are completely silent `except Exception: pass`** (`twittui_form.py`: 84; `toga_textual_backend.py`: 49; `main.py`: 4; `tiered_search.py`: 3; `installer.py`: 2). This pattern hid bugs #6 (`TextualWebView` crash) and #8 (dead GTK auto-scroll) from developers and tests.
@@ -523,7 +527,7 @@ An AST audit across the 7 source modules found **242 broad `except Exception` ha
   - `setup.py:8` leaks an unclosed `open("README.md")` handle, and `package_data={"": [...]}` does not behave reliably for `py_modules`-only distributions.
 - **Suggestion**: Delete redundant `setup.py` and consolidate on `pyproject.toml` using `[project.optional-dependencies]` (`gtk`, `textual`, `youtube`, `security`, `fast-search`, `dev`), moving source modules into a proper `twittui/` package so package data (`resources/`, `feed-style.*`, `twittv.apib`) is cleanly included via `importlib.resources`.
 - **Applied Implementation & Verification**:
-  Unified `pyproject.toml`, `setup.py` (retained for Snap/`test_snap.py`/`test_install.py` compatibility, fixing its unclosed `open("README.md")` handle), and `requirements.txt` with `packages=["twittui"]`, platform-conditioned `toga-gtk`, `yt-dlp`, optional extras (`gtk`, `textual`, `youtube`, `security`, `fast-search`, `xml`, `dev`), and `--collect-all=twittui` in `installer.py`. Verified by `test_architecture_suggestions.py:test_packaging_hygiene_and_ci_workflow`.
+  Unified `pyproject.toml`, `setup.py` (retained for Snap/`test_snap.py`/`test_install.py` compatibility, fixing its unclosed `open("README.md")` handle), and `requirements.txt` with `twittui`, `twittui.search`, and `twittui.ui` packages, package-local runtime resources, platform-conditioned `toga-gtk`, `yt-dlp`, optional extras (`gtk`, `textual`, `youtube`, `security`, `fast-search`, `xml`, `dev`), and `--collect-all=twittui` in `installer.py`. Verified by `test_architecture_suggestions.py:test_packaging_hygiene_and_ci_workflow`.
 
 ### 5. Consolidate the Four Diverging Show Registries
 Show-to-feed/slug/abbreviation tables are duplicated across four separate dictionaries in `twittui_form.py`:
@@ -541,7 +545,7 @@ Several shows (e.g., *FLOSS Weekly*, *Hands-On Photography*, *This Week in Enter
 - Remove or relocate untracked/scratch artifacts (`build.log`, `build_verbose.log`, `parts/twittui/*/.env`) and consider moving large static API captures (`shows.json`, `shows_2.json`, `shows_3.json`, `shows_4.json` — ~1.8 MB total, `sn_ballecer.txt`, `scenarios.jsonl`) out of the repository root.
 - Add a GitHub Actions CI workflow running `ruff`, `mypy`, and the test suite (both Textual headless and `xvfb-run` GTK tests) with `SNAP_USER_DATA` pointed at a temp directory and `PyYAML` installed.
 - **Applied Implementation & Verification**:
-  Updated `.gitignore` (`*.egg-info/`, `*.log`, `*.spec`), untracked `twittui.egg-info/` via `git rm -r --cached`, and added `.github/workflows/ci.yml` running `py_compile` and `xvfb-run -a python -m unittest discover` across Python 3.11 and 3.12 with `PyYAML` and isolated `SNAP_USER_DATA` / `TWITTUI_CACHE_DB`. Verified by `test_architecture_suggestions.py:test_packaging_hygiene_and_ci_workflow`.
+  Updated `.gitignore` (`*.egg-info/`, `*.log`, `*.spec`), untracked `twittui.egg-info/` via `git rm -r --cached`, and added `.github/workflows/ci.yml` running `py_compile` and `xvfb-run -a python -m unittest discover` across Python 3.11 and 3.12 with `PyYAML` and isolated `SNAP_USER_DATA`; the workflow leaves test-specific cache paths to the test fixtures. Verified by `test_architecture_suggestions.py:test_packaging_hygiene_and_ci_workflow`.
 
 ### 7. Reconcile Extensive Documentation Drift in `Technical_review.md`
 `Technical_review.md` (committed `18ea458`) contains numerous statements that contradict the actual implementation:
@@ -561,7 +565,7 @@ Several shows (e.g., *FLOSS Weekly*, *Hands-On Photography*, *This Week in Enter
 | All 263 tests pass via `python -m unittest discover` (L600-604) | Hangs indefinitely on interactive TTYs in `test_install.py` and silently skips YAML checks in `test_snap.py`. |
 
 - **Applied Implementation & Verification**:
-  Reconciled all 11 drifted statements in `Technical_review.md` and updated its architecture diagram, SQLite WAL/TTL schema, `twittui/` package layout, `SHOW_REGISTRY`, security/logging details, Snap/PyInstaller/CI infrastructure, and 25-module / 300-test suite coverage matrix.
+  Reconciled all 11 drifted statements in `Technical_review.md` and updated its architecture diagram, SQLite WAL/TTL schema, `twittui/` package layout and bundled resources, `SHOW_REGISTRY`, security/logging details, Snap/PyInstaller/CI infrastructure, and 25-module / 324-test suite coverage matrix.
 
 ---
 
@@ -596,8 +600,8 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 | **1. Critical / High** | 7 (#1–#7) | Complete | `test_critical_fixes.py` (7 tests) |
 | **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (21 tests), `test_episode_activation.py` (3 tests), updated `test_install.py` / `test_snap.py` (10 tests) / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` / `test_open_destination.py` / `test_backend_factory.py` |
 | **3. Low / Edge Cases** | 3 (#21–#23) | Complete | `test_low_fixes.py` (7 tests) |
-| **4. Architectural & Quality Suggestions** | 7 (#1–#7) | Complete | `test_architecture_suggestions.py` (10 tests) |
-| **Total Test Suite** | **30 items** | **322 / 322 Passing** | `python -W always::ResourceWarning -m unittest discover -s . -p "test_*.py" -v` (25 modules, 0 `ResourceWarning`s, `.env` untouched) |
+| **4. Architectural & Quality Suggestions** | 7 (#1–#7) | Complete | `test_architecture_suggestions.py` (12 tests) |
+| **Total Test Suite** | **30 items** | **324 / 324 Passing** | `python -W always::ResourceWarning -m unittest discover -s . -p "test_*.py" -v` (25 modules, 0 `ResourceWarning`s; pending asyncio task warning at shutdown; `.env` untouched) |
 
 ---
 
@@ -698,8 +702,10 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 
 ### Section 4: Architectural & Quality Suggestions Implemented (#1–#7)
 
-1. **Decomposed Core Subsystems into the `twittui/` Package (Suggestion #1)**:
-   - Created `twittui/` with cohesive modules (`__init__.py`, `logging_config.py`, `shows.py`, `config.py`, `rate_limiter.py`, `media.py`, `viewer.py`, `cache.py`), extracting ~870+ lines out of `twittui_form.py` while keeping all public symbols and mock targets (`twittui_form.requests`, `twittui_form.resolve_stream_url`, `twittui_form.subprocess.Popen`) 100% backward-compatible.
+1. **Decomposed the 8,109-Line `twittui_form.py` Monolith into the `twittui/` Package Layout (Suggestion #1)**:
+   - Partitioned all 176 members of `TwitTUIForm` (verified 100% via AST) into cohesive domain and UI modules matching the suggested layout: `twittui/_compat.py`, `twittui/cli.py`, `twittui/config.py` (`ConfigMixin`), `twittui/rate_limiter.py`, `twittui/cache.py`, `twittui/shows.py`, `twittui/catalog.py` (`CatalogMixin`), `twittui/rss.py` (`RssMixin`), `twittui/media.py` (`MediaMixin`), `twittui/downloader.py` (`DownloaderMixin`), `twittui/viewer.py` (`ViewerMixin`), `twittui/logging_config.py`, `twittui/search/{__init__,tiered_search,double_metaphone}.py`, and `twittui/ui/{__init__,form,preferences,metadata,textual_backend}.py`.
+   - Reduced `twittui_form.py` from **8,109 lines → 173 lines (-97.9%)** as a thin backward-compatibility facade preserving every historical import and mock target (`twittui_form.requests`, `twittui_form.resolve_stream_url`, `twittui_form.launch_stream_safe`, `twittui_form.subprocess.Popen`, `twittui_form.api_rate_limiter`, etc.).
+   - Updated `pyproject.toml`, `setup.py`, `.github/workflows/ci.yml`, and `test_architecture_suggestions.py` (`test_monolith_decomposed_into_package_layout`, recursive `twittui/**/*.py` AST guard) so all subpackages build, compile, and test cleanly.
 2. **Structured Logging & Elimination of Silent `except Exception: pass` Handlers (Suggestion #2)**:
    - Implemented `twittui/logging_config.py` (`configure_logging`, `get_logger`, `reset_logging`) with `--log-file` / `--log-level` CLI switches in `main.py` and `TWITTUI_LOG_FILE` / `TWITTUI_LOG_LEVEL` environment support, creating `0o600` log files while keeping default logging silent (`NullHandler`, `propagate = False`).
    - Replaced all broad silent `except Exception: pass` handlers across `twittui_form.py`, `toga_textual_backend.py`, `main.py`, `tiered_search.py`, `installer.py`, and `twittui/*.py` (0 remaining, guarded by an AST regression test in `test_architecture_suggestions.py`).
@@ -708,15 +714,15 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
    - Enforced a 24-hour TTL (`SHOW_DATE_BOUNDS_TTL_SECONDS = 86400`) on `show_date_bounds` rows during startup cache initialization, automatically expiring and purging stale entries.
    - Upgraded `_refresh_show_dates()` to run up to 4 archive date-bound scrapes concurrently (`max_concurrent=4`) while preserving exact single-show and catalog wait-modal coordination.
 4. **Unified Dependency & Packaging Metadata (Suggestion #4)**:
-   - Synchronized `pyproject.toml`, `setup.py` (fixing its unclosed `open("README.md")` file handle with a context manager), and `requirements.txt` with `packages=["twittui"]`, platform-conditioned `toga-gtk` (`sys_platform == "linux"`), `yt-dlp`, and optional extras (`gtk`, `textual`, `youtube`, `security` [`defusedxml`, `nh3`], `fast-search` [`rapidfuzz`], `xml` [`lxml`], `dev` [`PyYAML`, `ruff`, `mypy`]).
+   - Synchronized `pyproject.toml`, `setup.py` (fixing its unclosed `open("README.md")` file handle with a context manager), and `requirements.txt` with `twittui`, `twittui.search`, and `twittui.ui` packages, runtime resources in `twittui/resources/`, platform-conditioned `toga-gtk` (`sys_platform == "linux"`), `yt-dlp`, and optional extras (`gtk`, `textual`, `youtube`, `security` [`defusedxml`, `nh3`], `fast-search` [`rapidfuzz`], `xml` [`lxml`], `dev` [`PyYAML`, `ruff`, `mypy`]).
    - Added `"twittui"` to PyInstaller collection (`--collect-all=twittui`) in `installer.py`.
 5. **Consolidated Four Diverging Show Registries into `SHOW_REGISTRY` (Suggestion #5)**:
    - Created `ShowEntry` and `SHOW_REGISTRY` in `twittui/shows.py` as the single source of truth deriving `KNOWN_SHOW_FEEDS`, `MEMBERFUL_SHOW_FEEDS`, `SHOW_SEARCH_SLUGS` (replacing inline `abbrevs` in `search_episodes()`), and `TRANSCRIPT_SLUG_MAP` (replacing inline `short_map` in `generate_transcript_slug_candidates()`), filling in missing entries for *FLOSS Weekly*, *Hands-On Photography*, *This Week in Enterprise Tech*, *This Week in Google*, *All About Android*, *Intelligent Machines*, *Smart Tech Today*, and *Know How*.
 6. **Repository Hygiene & GitHub Actions CI (Suggestion #6)**:
    - Added `*.egg-info/`, `*.log`, and `*.spec` to `.gitignore` and removed `twittui.egg-info/` from git tracking (`git rm -r --cached`).
-   - Added `.github/workflows/ci.yml` running `py_compile *.py twittui/*.py` and the full `unittest` suite under `xvfb-run` on Python 3.11 and 3.12 with `PyYAML` installed and isolated `SNAP_USER_DATA` / `TWITTUI_CACHE_DB`.
+   - Added `.github/workflows/ci.yml` compiling top-level, `twittui/`, `twittui/ui/`, and `twittui/search/` modules and running the full `unittest` suite under `xvfb-run` on Python 3.11 and 3.12 with `PyYAML` installed and isolated `SNAP_USER_DATA`; test fixtures retain their own cache paths.
 7. **Reconciled Documentation Drift in `Technical_review.md` (Suggestion #7)**:
-   - Updated every drifted section of `Technical_review.md` to accurately reflect the `twittui/` architecture, `SHOW_REGISTRY`, `RateLimitScreen`, `TextualSelectFolderScreen`, `patch_toga_gtk_app()`, allowlist `HTMLParser` / `nh3` / `bleach` sanitizer, path-segment `_LocalHTMLHandler` token + clean shutdown, non-reentrant `ApiRateLimiter.lock`, normalized WAL SQLite schema + SHA-256 keys + 24-hour TTL, `tiered_search.py` threshold (`68.0`) & field priority, debounced `0o600` `.env` persistence, Snap/PyInstaller/CI tooling, and the 25-module / 321-test suite matrix.
+   - Updated every drifted section of `Technical_review.md` to accurately reflect the `twittui/` architecture and packaged resources, `SHOW_REGISTRY`, `RateLimitScreen`, `TextualSelectFolderScreen`, `patch_toga_gtk_app()`, allowlist `HTMLParser` / `nh3` / `bleach` sanitizer, path-segment `_LocalHTMLHandler` token + clean shutdown, non-reentrant `ApiRateLimiter.lock`, normalized WAL SQLite schema + SHA-256 keys + 24-hour TTL, `tiered_search.py` threshold (`68.0`) & field priority, debounced `0o600` `.env` persistence, Snap/PyInstaller/CI tooling, and the 25-module / 324-test suite matrix.
 
 ---
 
@@ -724,9 +730,9 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 
 | Category | Files Added / Modified / Untracked |
 | :--- | :--- |
-| **New Core Package (`twittui/`)** | `twittui/__init__.py`, `twittui/cache.py`, `twittui/config.py`, `twittui/logging_config.py`, `twittui/media.py`, `twittui/rate_limiter.py`, `twittui/shows.py`, `twittui/viewer.py` |
-| **Core Application Modules** | `twittui_form.py`, `toga_textual_backend.py`, `main.py`, `tiered_search.py`, `double_metaphone.py`, `installer.py` |
-| **Packaging, Snap & CI** | `pyproject.toml`, `setup.py`, `requirements.txt`, `.env.example`, `snap/snapcraft.yaml`, `snap/local/launcher.sh`, `.gitignore`, `.github/workflows/ci.yml`, untracked `twittui.egg-info/*` |
+| **New Core Package (`twittui/`)** | `twittui/__init__.py`, `twittui/_compat.py`, `twittui/cache.py`, `twittui/catalog.py`, `twittui/cli.py`, `twittui/config.py`, `twittui/downloader.py`, `twittui/logging_config.py`, `twittui/media.py`, `twittui/rate_limiter.py`, `twittui/rss.py`, `twittui/shows.py`, `twittui/viewer.py`, `twittui/resources/*`, `twittui/search/{__init__,tiered_search,double_metaphone}.py`, `twittui/ui/{__init__,form,metadata,preferences,textual_backend}.py` |
+| **Core Application Modules** | `twittui_form.py` (173-line compatibility facade), `toga_textual_backend.py`, `main.py`, `tiered_search.py`, `double_metaphone.py`, `installer.py` |
+| **Packaging, Snap & CI** | `pyproject.toml`, `setup.py`, `requirements.txt`, `requirements-snap.txt`, `.env.example`, `snap/snapcraft.yaml`, `snap/local/launcher.sh`, `.gitignore`, `.github/workflows/ci.yml`, untracked `twittui.egg-info/*` |
 | **Documentation** | `Technical_review.md`, `antigravity_neon_bugs_or_suggestions.md` |
 | **New Regression Suites** | `test_critical_fixes.py`, `test_double_metaphone.py`, `test_medium_fixes.py`, `test_low_fixes.py`, `test_architecture_suggestions.py` |
 | **Updated Test Suites** | `test_episode_activation.py`, `test_episode_search.py`, `test_install.py`, `test_open_destination.py`, `test_preferences.py`, `test_security.py`, `test_snap.py`, `test_tooltips.py`, `test_tui_streaming_and_stdout.py` |

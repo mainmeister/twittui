@@ -42,13 +42,12 @@ jobs:
 
       - name: Syntax check all modules
         run: |
-          python -m py_compile *.py twittui/*.py
+          python -m py_compile *.py twittui/*.py twittui/ui/*.py twittui/search/*.py
 
       - name: Run full test suite (headless Textual + Xvfb GTK)
         env:
           TOGA_BACKEND: toga_textual
           SNAP_USER_DATA: ${{ runner.temp }}/twittui_snap_data
-          TWITTUI_CACHE_DB: ${{ runner.temp }}/twittui_ci_cache.db
         run: |
           mkdir -p "$SNAP_USER_DATA"
           xvfb-run -a python -m unittest discover -s . -p "test_*.py" -v
