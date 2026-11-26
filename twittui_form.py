@@ -16,6 +16,7 @@ import shlex
 import subprocess
 import threading
 import time
+import weakref
 from collections import deque
 from collections.abc import ItemsView, KeysView, Mapping, ValuesView
 from typing import Any
@@ -304,6 +305,23 @@ def patch_toga_icons(include_gtk: bool = True) -> None:
         _logger.debug("Ignored exception in %s", 'patch_toga_icons', exc_info=True)
 
 
+def _close_idle_event_loop(loop: Any) -> None:
+    """Close an idle, non-running event loop owned by a discarded App instance."""
+    if loop is None:
+        return
+    try:
+        if not loop.is_closed() and not loop.is_running():
+            try:
+                policy_local = getattr(asyncio.get_event_loop_policy(), "_local", None)
+                if getattr(policy_local, "_loop", None) is loop:
+                    asyncio.set_event_loop(None)
+            except (AttributeError, RuntimeError):
+                _logger.debug("Ignored exception clearing thread-local loop reference", exc_info=True)
+            loop.close()
+    except Exception:
+        _logger.debug("Ignored exception in %s", '_close_idle_event_loop', exc_info=True)
+
+
 def patch_toga_gtk_app() -> None:
     """Patch toga_gtk.app.App to use None application_id and NON_UNIQUE flags, preventing AppArmor D-Bus ownership denials in sandboxes."""
     try:
@@ -320,6 +338,9 @@ def patch_toga_gtk_app() -> None:
                 orig_init(self, interface)
             finally:
                 interface._app_id = orig_app_id
+            loop = getattr(self, 'loop', None)
+            if loop is not None:
+                weakref.finalize(self, _close_idle_event_loop, loop)
             try:
                 current_flags = self.native.get_flags()
                 self.native.set_flags(current_flags | Gio.ApplicationFlags.NON_UNIQUE)
@@ -496,6 +517,9 @@ class TwitTUIForm(toga.App):
                     raise
             else:
                 raise
+        impl_loop = getattr(getattr(self, '_impl', None), 'loop', None)
+        if impl_loop is not None:
+            weakref.finalize(self, _close_idle_event_loop, impl_loop)
 
     def _is_textual_app(self) -> bool:
         """Return True if this form instance is backed by Toga Textual."""
@@ -1438,6 +1462,11 @@ class TwitTUIForm(toga.App):
     def save_env_setting(self, key: str, value: str) -> None:
         """Persist a configuration setting key-value pair to the .env file with restricted permissions."""
         snap_data = os.environ.get('SNAP_USER_DATA') or os.environ.get('SNAP_USER_COMMON')
+        if not snap_data:
+            app_id = getattr(self, 'app_id', '') or ''
+            if app_id == 'org.twit.test' or app_id.startswith('org.twit.test.'):
+                _logger.debug("Skipping .env write for isolated test app_id=%s (%s)", app_id, key)
+                return
         if snap_data:
             try:
                 os.makedirs(snap_data, exist_ok=True)

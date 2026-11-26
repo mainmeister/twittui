@@ -16,6 +16,7 @@ from pathlib import Path
 import time
 from typing import Any
 import warnings
+import weakref
 from rich.text import Text
 from travertino.size import at_least
 from textual._context import NoActiveAppError, active_app, active_message_pump
@@ -42,6 +43,23 @@ import toga.platform
 from toga_textual.widgets.base import Widget
 
 _logger = logging.getLogger("twittui.textual_backend")
+
+
+def _close_idle_event_loop(loop: Any) -> None:
+    """Close an idle, non-running asyncio event loop owned by a discarded App instance."""
+    if loop is None:
+        return
+    try:
+        if not loop.is_closed() and not loop.is_running():
+            try:
+                policy_local = getattr(asyncio.get_event_loop_policy(), "_local", None)
+                if getattr(policy_local, "_loop", None) is loop:
+                    asyncio.set_event_loop(None)
+            except (AttributeError, RuntimeError):
+                _logger.debug("Ignored exception clearing thread-local loop reference", exc_info=True)
+            loop.close()
+    except Exception:
+        _logger.debug("Ignored exception in %s", '_close_idle_event_loop', exc_info=True)
 
 
 @contextmanager
@@ -1989,24 +2007,28 @@ def patch_toga_textual() -> None:
             def _patched_app_init(self: Any, interface: Any) -> None:
                 orig_app_init(self, interface)
                 loop = getattr(self, "loop", None)
-                if loop is not None and not getattr(loop, "_twittui_ctx_wrapped", False):
-                    orig_call_soon_threadsafe = loop.call_soon_threadsafe
+                if loop is not None:
+                    weakref.finalize(self, _close_idle_event_loop, loop)
+                    if not getattr(loop, "_twittui_ctx_wrapped", False):
+                        orig_call_soon_threadsafe = loop.call_soon_threadsafe
+                        self_ref = weakref.ref(self)
 
-                    def _ctx_call_soon_threadsafe(callback: Any, *cb_args: Any, context: Any = None) -> Any:
-                        if context is not None:
-                            return orig_call_soon_threadsafe(callback, *cb_args, context=context)
+                        def _ctx_call_soon_threadsafe(callback: Any, *cb_args: Any, context: Any = None) -> Any:
+                            if context is not None:
+                                return orig_call_soon_threadsafe(callback, *cb_args, context=context)
 
-                        def _wrapped(*inner_args: Any) -> Any:
-                            native_app = getattr(self, "native", None)
-                            if native_app is not None and getattr(native_app, "_running", False):
-                                with _ensure_active_app(native_app):
-                                    return callback(*inner_args)
-                            return callback(*inner_args)
+                            def _wrapped(*inner_args: Any) -> Any:
+                                app_impl = self_ref()
+                                native_app = getattr(app_impl, "native", None) if app_impl is not None else None
+                                if native_app is not None and getattr(native_app, "_running", False):
+                                    with _ensure_active_app(native_app):
+                                        return callback(*inner_args)
+                                return callback(*inner_args)
 
-                        return orig_call_soon_threadsafe(_wrapped, *cb_args)
+                            return orig_call_soon_threadsafe(_wrapped, *cb_args)
 
-                    loop.call_soon_threadsafe = _ctx_call_soon_threadsafe
-                    loop._twittui_ctx_wrapped = True
+                        loop.call_soon_threadsafe = _ctx_call_soon_threadsafe
+                        loop._twittui_ctx_wrapped = True
 
             toga_textual.app.App.__init__ = _patched_app_init
             toga_textual.app.App.create_menus = lambda self: None

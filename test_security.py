@@ -157,20 +157,21 @@ class TestTwitTUISecurity(unittest.TestCase):
 
     def test_on_streamer_change_persists_setting(self) -> None:
         """Verify on_streamer_change updates os.environ and calls save_env_setting."""
-        form = TwitTUIForm(formal_name="TwitTUI", app_id="org.twit.test")
-        import toga
-        form.streamer_input = toga.TextInput(value="env LC_ALL=C vlc %f")
-        saved = {}
-        form.save_env_setting = lambda k, v: saved.update({k: v})
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            form = TwitTUIForm(formal_name="TwitTUI", app_id="org.twit.test")
+            import toga
+            form.streamer_input = toga.TextInput(value="env LC_ALL=C vlc %f")
+            saved = {}
+            form.save_env_setting = lambda k, v: saved.update({k: v})
 
-        form.on_streamer_change()
-        self.assertEqual(os.environ.get('twitclubstreamer'), "env LC_ALL=C vlc %f")
-        self.assertEqual(saved.get('twitclubstreamer'), "env LC_ALL=C vlc %f")
+            form.on_streamer_change()
+            self.assertEqual(os.environ.get('twitclubstreamer'), "env LC_ALL=C vlc %f")
+            self.assertEqual(saved.get('twitclubstreamer'), "env LC_ALL=C vlc %f")
 
-        form.streamer_input.value = "mpv %f"
-        form.on_streamer_change()
-        self.assertEqual(os.environ.get('twitclubstreamer'), "mpv %f")
-        self.assertEqual(saved.get('twitclubstreamer'), "mpv %f")
+            form.streamer_input.value = "mpv %f"
+            form.on_streamer_change()
+            self.assertEqual(os.environ.get('twitclubstreamer'), "mpv %f")
+            self.assertEqual(saved.get('twitclubstreamer'), "mpv %f")
 
     def test_initial_streamer_migrates_legacy_defaults(self) -> None:
         """Verify form initializes legacy defaults (e.g. vlc {url}, vlc %f) to env LC_ALL=C vlc %f."""

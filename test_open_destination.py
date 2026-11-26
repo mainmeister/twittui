@@ -15,7 +15,18 @@ class TestOpenDestinationFolder(unittest.TestCase):
     """Test destination directory opening across platforms."""
 
     def setUp(self) -> None:
+        self._env_backup = dict(os.environ)
+        self._tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp_dir.cleanup)
+        os.environ['SNAP_USER_DATA'] = self._tmp_dir.name
         self.form = TwitTUIForm(formal_name="TwitTUI", app_id="org.twit.test")
+
+    def tearDown(self) -> None:
+        loop = getattr(self.form, 'loop', None)
+        if loop and not loop.is_running() and not loop.is_closed():
+            loop.close()
+        os.environ.clear()
+        os.environ.update(self._env_backup)
 
     def test_open_destination_folder_creates_directory_if_missing(self) -> None:
         """Verify that open_destination_folder creates the folder if it does not exist."""

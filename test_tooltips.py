@@ -115,6 +115,9 @@ class TestMainFormUITooltips(unittest.TestCase):
             self.form.startup()
 
     def tearDown(self) -> None:
+        loop = getattr(self.form, 'loop', None)
+        if loop and not loop.is_running() and not loop.is_closed():
+            loop.close()
         os.environ.clear()
         os.environ.update(self._env_backup)
 

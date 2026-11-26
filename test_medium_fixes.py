@@ -1199,6 +1199,66 @@ class TestMediumFixes(unittest.TestCase):
 
         asyncio.run(run_edge_checks())
 
+    # ------------------------------------------------------------------
+    # Bug 19: Test suite TTY hang, real .env guard, and event-loop cleanup
+    # ------------------------------------------------------------------
+    def test_19_test_suite_hygiene_env_guard_tty_exit_and_loop_cleanup(self) -> None:
+        """Verify test app_ids cannot mutate real .env without SNAP_USER_DATA, CLI exits on TTY, and loops close cleanly."""
+        import gc
+        import warnings
+        from main import resolve_toga_backend
+
+        # 19a. Defense-in-depth: org.twit.test* skips real .env writes when SNAP_USER_DATA is unset,
+        #      but still writes when SNAP_USER_DATA points to an isolated temp directory.
+        with patch.dict(os.environ, {}, clear=False), \
+             patch("twittui_form.set_key") as mock_set_key, \
+             patch("twittui_form.write_restricted_file") as mock_write_restricted:
+            os.environ.pop("SNAP_USER_DATA", None)
+            os.environ.pop("SNAP_USER_COMMON", None)
+            form_root = TwitTUIForm("GuardTest", "org.twit.test", cache_db_path=":memory:")
+            form_sub = TwitTUIForm("GuardSubTest", "org.twit.test.sub", cache_db_path=":memory:")
+            form_root.save_env_setting("TWITAUDIOONLY", "1")
+            form_sub.save_env_setting("TWITFUZZYSEARCH", "0")
+            mock_set_key.assert_not_called()
+            mock_write_restricted.assert_not_called()
+
+        with tempfile.TemporaryDirectory() as tmp_dir, \
+             patch.dict(os.environ, {"SNAP_USER_DATA": tmp_dir}, clear=False):
+            form_iso = TwitTUIForm("IsoTest", "org.twit.test.iso", cache_db_path=":memory:")
+            form_iso.save_env_setting("TWITAUDIOONLY", "1")
+            iso_env = os.path.join(tmp_dir, ".env")
+            self.assertTrue(os.path.isfile(iso_env))
+            with open(iso_env, "r", encoding="utf-8") as fh:
+                self.assertIn("TWITAUDIOONLY", fh.read())
+
+        # 19b. --clean and --install terminate via SystemExit even on an interactive TTY without calling input()
+        with patch("sys.stdin.isatty", return_value=True), \
+             patch("builtins.input", side_effect=AssertionError("Interactive prompt must not be reached")), \
+             patch("installer.clean_build_artifacts"), \
+             patch("installer.install_twittui"):
+            with self.assertRaises(SystemExit) as cm_clean:
+                resolve_toga_backend(["--clean"])
+            self.assertEqual(cm_clean.exception.code, 0)
+            with self.assertRaises(SystemExit) as cm_install:
+                resolve_toga_backend(["--install", "--install-dir", "/tmp/testbin"])
+            self.assertEqual(cm_install.exception.code, 0)
+
+        # 19c. Discarded TwitTUIForm instances close idle event loops cleanly with zero ResourceWarnings
+        gc.collect()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            f1 = TwitTUIForm("LoopGC1", "org.twit.test.gc1", cache_db_path=":memory:")
+            loop1 = f1.loop
+            f2 = TwitTUIForm("LoopGC2", "org.twit.test.gc2", cache_db_path=":memory:")
+            del f1
+            gc.collect()
+            self.assertTrue(loop1.is_closed(), "Expected discarded TwitTUIForm idle event loop to be closed")
+            del f2
+            toga.App.app = None
+            gc.collect()
+        loop_warnings = [w for w in caught if "unclosed event loop" in str(w.message)]
+        self.assertEqual(loop_warnings, [], f"Unexpected unclosed event loop warnings: {loop_warnings}")
+
 
 if __name__ == "__main__":
     unittest.main()

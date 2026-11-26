@@ -119,9 +119,14 @@ class TestBackendFactoryIsolation(unittest.TestCase):
 
             with patch('toga_gtk.icons.GdkPixbuf.Pixbuf.new_from_file', side_effect=GLib.GError('Simulated loader failure')):
                 app = toga.App("TestApp", "org.test.app")
-                self.assertIsNotNone(app)
-                self.assertIsNotNone(app.icon)
-                self.assertIsNotNone(app.icon._impl)
+                try:
+                    self.assertIsNotNone(app)
+                    self.assertIsNotNone(app.icon)
+                    self.assertIsNotNone(app.icon._impl)
+                finally:
+                    loop = getattr(getattr(app, '_impl', None), 'loop', None)
+                    if loop is not None and not loop.is_running() and not loop.is_closed():
+                        loop.close()
         except ImportError:
             pass
 
@@ -167,8 +172,13 @@ class TestBackendFactoryIsolation(unittest.TestCase):
             toga.platform.get_backend.cache_clear()
             toga.platform.get_factory.cache_clear()
             app = toga.App("TestAppFlags", "org.test.flags")
-            self.assertIsNone(app._impl.native.get_application_id())
-            self.assertTrue(bool(app._impl.native.get_flags() & Gio.ApplicationFlags.NON_UNIQUE))
+            try:
+                self.assertIsNone(app._impl.native.get_application_id())
+                self.assertTrue(bool(app._impl.native.get_flags() & Gio.ApplicationFlags.NON_UNIQUE))
+            finally:
+                loop = getattr(getattr(app, '_impl', None), 'loop', None)
+                if loop is not None and not loop.is_running() and not loop.is_closed():
+                    loop.close()
         except ImportError:
             pass
 
