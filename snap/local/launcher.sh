@@ -3,22 +3,34 @@ set -e
 
 # If running inside Snap environment
 if [ -n "$SNAP" ]; then
+    # Ensure bundled Snap tools (mpv, ffmpeg, python3) take precedence on PATH
+    export PATH="$SNAP/bin:$SNAP/usr/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
+
     # Ensure SNAP_USER_DATA directory exists
     if [ -n "$SNAP_USER_DATA" ] && [ ! -d "$SNAP_USER_DATA" ]; then
         mkdir -p "$SNAP_USER_DATA"
     fi
 
-    # Set up user configuration if not already present (owner-only 0600 permissions)
+    # Set up user configuration if not already present (atomic owner-only 0600 permissions)
     if [ -n "$SNAP_USER_DATA" ] && [ ! -f "$SNAP_USER_DATA/.env" ]; then
         if [ -f "$SNAP/.env.example" ]; then
-            cp "$SNAP/.env.example" "$SNAP_USER_DATA/.env" 2>/dev/null || true
-            chmod 600 "$SNAP_USER_DATA/.env" 2>/dev/null || true
+            ENV_TMP=$(mktemp "$SNAP_USER_DATA/.env.XXXXXX" 2>/dev/null) || ENV_TMP=""
+            if [ -n "$ENV_TMP" ]; then
+                if command -v install >/dev/null 2>&1; then
+                    if install -m 600 "$SNAP/.env.example" "$ENV_TMP" 2>/dev/null; then
+                        ln "$ENV_TMP" "$SNAP_USER_DATA/.env" 2>/dev/null || true
+                    fi
+                elif (umask 077 && cp "$SNAP/.env.example" "$ENV_TMP") 2>/dev/null; then
+                    ln "$ENV_TMP" "$SNAP_USER_DATA/.env" 2>/dev/null || true
+                fi
+                rm -f "$ENV_TMP" 2>/dev/null || true
+            fi
         fi
     fi
 
-    # Under strict Snap confinement, default to bundled mpv when vlc is unavailable
+    # Under strict Snap confinement, prefer bundled mpv even if host VLC is visible on PATH
     if [ -z "$TWITCLUBSTREAMER" ] && [ -z "$twitclubstreamer" ]; then
-        if ! command -v vlc >/dev/null 2>&1 && [ -x "$SNAP/usr/bin/mpv" ]; then
+        if [ -x "$SNAP/usr/bin/mpv" ] || [ -x "$SNAP/bin/mpv" ]; then
             export TWITCLUBSTREAMER="mpv %f"
         fi
     fi

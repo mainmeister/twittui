@@ -1434,6 +1434,19 @@ class TwitTUIForm(toga.App):
 
         _dispatch_next()
 
+    @staticmethod
+    def _default_streamer_template() -> str:
+        """Prefer the bundled mpv in a strict Snap, regardless of host VLC visibility."""
+        snap_root = os.environ.get('SNAP')
+        if snap_root:
+            bundled_mpv_paths = (
+                os.path.join(snap_root, 'usr', 'bin', 'mpv'),
+                os.path.join(snap_root, 'bin', 'mpv'),
+            )
+            if any(os.access(path, os.X_OK) for path in bundled_mpv_paths):
+                return 'mpv %f'
+        return 'env LC_ALL=C vlc %f'
+
     def get_initial_streamer_setting(self) -> str:
         """Resolve and migrate streamer command template, persisting if migrating legacy defaults."""
         raw = os.getenv('twitclubstreamer')
@@ -1442,8 +1455,13 @@ class TwitTUIForm(toga.App):
         if raw is None or not raw.strip():
             raw = os.getenv('TWIT_CLUB_STREAMER')
         val = (raw or '').strip()
-        if not val or val in ('vlc {url}', 'vlc %f', 'vlc', '{url}', '%f'):
-            val = 'env LC_ALL=C vlc %f'
+        default_tpl = self._default_streamer_template()
+        if (
+            not val
+            or val in ('vlc {url}', 'vlc %f', 'vlc', '{url}', '%f')
+            or (default_tpl == 'mpv %f' and val == 'env LC_ALL=C vlc %f')
+        ):
+            val = default_tpl
             self.save_env_setting('twitclubstreamer', val)
         os.environ['twitclubstreamer'] = val
         os.environ['TWITCLUBSTREAMER'] = val
@@ -3870,7 +3888,7 @@ class TwitTUIForm(toga.App):
         val = self.streamer_input.value if hasattr(self, 'streamer_input') and self.streamer_input else ''
         val_str = (val or '').strip()
         if not val_str:
-            val_str = 'env LC_ALL=C vlc %f'
+            val_str = self._default_streamer_template()
         os.environ['twitclubstreamer'] = val_str
         os.environ['TWITCLUBSTREAMER'] = val_str
         self._schedule_env_save('twitclubstreamer', val_str)

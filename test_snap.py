@@ -2,6 +2,7 @@
 
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -78,8 +79,13 @@ class TestSnapPackaging(unittest.TestCase):
             self.assertIn("shared-mime-info", stage_packages)
             self.assertIn("mpv", stage_packages)
             self.assertIn("ffmpeg", stage_packages)
+            override_pull = twittui_part.get("override-pull", "")
+            self.assertIn(".env", override_pull)
+            self.assertIn("craftctl default", override_pull)
             override_build = twittui_part.get("override-build", "")
             self.assertIn("update-mime-database", override_build)
+            self.assertIn("requirements-snap.txt", override_build)
+            self.assertIn("pip install --no-deps .", override_build)
             self.assertNotIn("cp -a *.py", override_build)
             for list_key in ("stage", "prime"):
                 entries = twittui_part.get(list_key, [])
@@ -105,12 +111,39 @@ class TestSnapPackaging(unittest.TestCase):
                 self.assertNotIn("*.md", entries)
                 self.assertIn(".env.example", entries)
 
+            self.assertIn("override-pull:", content)
+            self.assertIn("craftctl default", content)
+            self.assertIn("requirements-snap.txt", content)
+            self.assertIn("pip install --no-deps .", content)
             self.assertIn("update-mime-database", content)
             self.assertNotIn("cp -a *.py", content)
 
-        # Verify .env.example template referenced by launcher.sh exists and contains no secrets
+        # Verify .env.example template referenced by launcher.sh exists, uses valid keys, and contains no secrets
         env_example_path = os.path.join(self.project_root, ".env.example")
         self.assertTrue(os.path.isfile(env_example_path), ".env.example must exist for Snap launcher")
+        with open(env_example_path, "r", encoding="utf-8") as f:
+            env_example_content = f.read()
+        self.assertIn("TWITCLUBSHOWFOLDERS=0", env_example_content)
+        self.assertNotIn("TWITSHOWFOLDERS=", env_example_content)
+        # Blank optional overrides must remain commented out so load_dotenv(override=True) does not clobber launcher exports
+        uncommented_lines = [
+            line.strip() for line in env_example_content.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        self.assertNotIn("TWITCLUBSTREAMER=", uncommented_lines)
+        self.assertNotIn("TWITCLUBDESTINATION=", uncommented_lines)
+
+        # Verify pinned requirements-snap.txt lockfile exists and pins every non-comment entry with ==
+        lockfile_path = os.path.join(self.project_root, "requirements-snap.txt")
+        self.assertTrue(os.path.isfile(lockfile_path), "requirements-snap.txt lockfile must exist")
+        with open(lockfile_path, "r", encoding="utf-8") as f:
+            lock_lines = [
+                line.strip() for line in f.read().splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+        self.assertGreaterEqual(len(lock_lines), 10)
+        for dep in lock_lines:
+            self.assertIn("==", dep, f"Lockfile dependency must be pinned with '==': {dep}")
 
     def test_yaml_fallback_parser_and_pyyaml_dev_dependency(self) -> None:
         """Verify the YAML fallback parser always runs (even when PyYAML is present) and pyproject declares PyYAML."""
@@ -175,11 +208,74 @@ class TestSnapPackaging(unittest.TestCase):
 
         self.assertIn("#!/bin/bash", content)
         self.assertIn("SNAP", content)
+        self.assertIn("$SNAP/bin:$SNAP/usr/bin", content)
+        self.assertIn("install -m 600", content)
+        self.assertIn('export TWITCLUBSTREAMER="mpv %f"', content)
         self.assertIn("PYTHONPATH", content)
         self.assertIn("GDK_PIXBUF_MODULEDIR", content)
         self.assertIn("LD_LIBRARY_PATH", content)
         self.assertIn("unset GTK_MODULES", content)
         self.assertIn("GSETTINGS_SCHEMA_DIR", content)
+
+    def test_launcher_prefers_bundled_mpv_and_initializes_private_env(self) -> None:
+        """Verify host VLC visibility cannot override bundled mpv or user configuration."""
+        launcher_path = os.path.join(self.project_root, "snap", "local", "launcher.sh")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            snap_root = os.path.join(tmp_dir, "snap")
+            snap_bin = os.path.join(snap_root, "bin")
+            snap_usr_bin = os.path.join(snap_root, "usr", "bin")
+            snap_user_data = os.path.join(tmp_dir, "user-data")
+            host_bin = os.path.join(tmp_dir, "host-bin")
+            home = os.path.join(tmp_dir, "home")
+            for path in (snap_bin, snap_usr_bin, snap_user_data, host_bin, home):
+                os.makedirs(path, exist_ok=True)
+
+            with open(os.path.join(snap_root, ".env.example"), "w", encoding="utf-8") as fh:
+                fh.write("TWITCLUBSHOWFOLDERS=0\n")
+            for path, content in (
+                (os.path.join(snap_usr_bin, "mpv"), "#!/bin/sh\nexit 0\n"),
+                (os.path.join(host_bin, "vlc"), "#!/bin/sh\nexit 0\n"),
+                (
+                    os.path.join(snap_bin, "python3"),
+                    "#!/bin/sh\nprintf 'streamer=%s\\n' \"${TWITCLUBSTREAMER:-}\"\n",
+                ),
+            ):
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+                os.chmod(path, 0o755)
+
+            env = {
+                "HOME": home,
+                "PATH": f"{host_bin}:/usr/bin:/bin",
+                "SNAP": snap_root,
+                "SNAP_USER_DATA": snap_user_data,
+            }
+            result = subprocess.run(
+                ["bash", launcher_path, "--tui"],
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("streamer=mpv %f", result.stdout)
+
+            env_file = os.path.join(snap_user_data, ".env")
+            self.assertTrue(os.path.isfile(env_file))
+            self.assertEqual(stat.S_IMODE(os.stat(env_file).st_mode), 0o600)
+            with open(env_file, "r", encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), "TWITCLUBSHOWFOLDERS=0\n")
+
+            with open(env_file, "w", encoding="utf-8") as fh:
+                fh.write("TWITCLUBSTREAMER=custom-player %f\n")
+            subprocess.run(
+                ["bash", launcher_path, "--tui"],
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            with open(env_file, "r", encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), "TWITCLUBSTREAMER=custom-player %f\n")
 
     def test_requirements_and_setup(self) -> None:
         """Verify requirements.txt and setup.py/pyproject.toml exist and declare core dependencies."""

@@ -14,6 +14,7 @@ confinement: strict
 icon: snap/gui/twittui.png
 
 environment:
+  PATH: ${SNAP}/bin:${SNAP}/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   PYTHONPATH: ${SNAP}/lib/python3.12/site-packages:${SNAP}/lib/python3.14/site-packages:${SNAP}/lib/python3.10/site-packages:${SNAP}/usr/lib/python3/dist-packages:${SNAP}:${PYTHONPATH}
   LD_LIBRARY_PATH: ${SNAP}/usr/lib/${CRAFT_ARCH_TRIPLET_BUILD_FOR}:${SNAP}/usr/lib:${SNAP}/usr/lib/${CRAFT_ARCH_TRIPLET_BUILD_FOR}/pulseaudio:${LD_LIBRARY_PATH}
   GI_TYPELIB_PATH: ${SNAP}/usr/lib/${CRAFT_ARCH_TRIPLET_BUILD_FOR}/girepository-1.0:${SNAP}/usr/lib/girepository-1.0:${GI_TYPELIB_PATH}
@@ -109,6 +110,11 @@ parts:
       - shared-mime-info
       - mpv
       - ffmpeg
+    override-pull: |
+      craftctl default
+      # Purge developer .env secrets (preserving .env.example) and local build/VCS artifacts
+      find . -maxdepth 1 \( -name '.env' -o -name '*.env' \) -delete
+      rm -rf .git .venv parts stage prime .scratch *.snap
     override-build: |
       set -ex
       # Use system Python 3.12 from core24 base, not host Python 3.14
@@ -117,11 +123,11 @@ parts:
       VENV_DIR="$CRAFT_PART_BUILD/venv"
       rm -rf "$VENV_DIR"
       $PYTHON -m venv "$VENV_DIR"
-      # Install pip and requirements into the venv
+      # Install pinned dependencies from requirements-snap.txt for reproducible builds
       "$VENV_DIR/bin/python3" -m ensurepip 2>/dev/null || true
       "$VENV_DIR/bin/python3" -m pip install --upgrade pip
-      "$VENV_DIR/bin/python3" -m pip install -r requirements.txt
-      "$VENV_DIR/bin/python3" -m pip install .
+      "$VENV_DIR/bin/python3" -m pip install -r requirements-snap.txt
+      "$VENV_DIR/bin/python3" -m pip install --no-deps .
       # Copy Python venv to install directory
       mkdir -p $CRAFT_PART_INSTALL
       cp -a "$VENV_DIR/bin" $CRAFT_PART_INSTALL/

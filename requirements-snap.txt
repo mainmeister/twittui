@@ -1,0 +1,27 @@
+# Pinned runtime dependency lockfile for reproducible Snapcraft (core24 / Python 3.12) builds.
+# Regenerate from a clean core24 Python 3.12 environment when upgrading dependencies.
+certifi==2026.10.23
+charset-normalizer==3.5.2
+idna==3.20
+linkify-it-py==2.2.0
+markdown-it-py==4.3.0
+mdit-py-plugins==0.7.0
+mdurl==0.1.2
+packaging==26.3
+platformdirs==4.14.7
+pycairo==1.29.2
+Pygments==2.21.0
+PyGObject==3.58.1
+python-dotenv==1.2.4
+requests==2.34.2
+rich==15.0.0
+textual==3.7.1
+toga==0.5.7
+toga-core==0.5.7
+toga-gtk==0.5.7
+toga-textual==0.5.7
+travertino==0.5.7
+typing_extensions==4.16.0
+uc-micro-py==1.0.3
+urllib3==2.8.0
+yt-dlp==2026.10.26

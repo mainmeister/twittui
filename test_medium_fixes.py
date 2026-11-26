@@ -1259,6 +1259,72 @@ class TestMediumFixes(unittest.TestCase):
         loop_warnings = [w for w in caught if "unclosed event loop" in str(w.message)]
         self.assertEqual(loop_warnings, [], f"Unexpected unclosed event loop warnings: {loop_warnings}")
 
+    # ------------------------------------------------------------------
+    # Bug 20: Strict Snap confinement streamer default & .env.example safety
+    # ------------------------------------------------------------------
+    def test_20_snap_strict_confinement_streamer_and_env_template(self) -> None:
+        """Verify strict Snap prefers bundled mpv over host VLC and .env.example preserves launcher exports."""
+        import shutil
+        from twittui_form import load_twittui_dotenv
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            fake_snap = os.path.join(tmp_root, "snap")
+            fake_user_data = os.path.join(tmp_root, "user_data")
+            os.makedirs(os.path.join(fake_snap, "usr", "bin"), exist_ok=True)
+            os.makedirs(fake_user_data, exist_ok=True)
+            fake_mpv = os.path.join(fake_snap, "usr", "bin", "mpv")
+            with open(fake_mpv, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/sh\nexit 0\n")
+            os.chmod(fake_mpv, 0o755)
+
+            # Copy repository .env.example into SNAP_USER_DATA/.env just as launcher.sh does
+            repo_example = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env.example")
+            snap_env = os.path.join(fake_user_data, ".env")
+            shutil.copyfile(repo_example, snap_env)
+
+            # 20a. load_twittui_dotenv() must NOT overwrite launcher-exported TWITCLUBSTREAMER / TWITCLUBDESTINATION
+            with patch.dict(
+                os.environ,
+                {
+                    "SNAP": fake_snap,
+                    "SNAP_USER_DATA": fake_user_data,
+                    "TWITCLUBSTREAMER": "mpv %f",
+                    "TWITCLUBDESTINATION": fake_user_data,
+                },
+                clear=False,
+            ):
+                os.environ.pop("twitclubstreamer", None)
+                load_twittui_dotenv()
+                self.assertEqual(os.environ.get("TWITCLUBSTREAMER"), "mpv %f")
+                self.assertEqual(os.environ.get("TWITCLUBDESTINATION"), fake_user_data)
+
+            # 20b. Inside strict Snap, _default_streamer_template() and get_initial_streamer_setting()
+            #      select bundled 'mpv %f' even when host VLC is visible, migrating the desktop default too.
+            def _which_with_host_vlc(cmd: str) -> str | None:
+                if cmd == "vlc":
+                    return "/host/bin/vlc"
+                if cmd == "mpv":
+                    return fake_mpv
+                return None
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SNAP": fake_snap,
+                    "SNAP_USER_DATA": fake_user_data,
+                    "twitclubstreamer": "env LC_ALL=C vlc %f",
+                    "TWITCLUBSTREAMER": "env LC_ALL=C vlc %f",
+                },
+                clear=False,
+            ), patch("shutil.which", side_effect=_which_with_host_vlc):
+                form = TwitTUIForm("SnapStreamTest", "org.twit.test.snap20", cache_db_path=":memory:")
+                self.assertEqual(form._default_streamer_template(), "mpv %f")
+                self.assertEqual(form.get_initial_streamer_setting(), "mpv %f")
+                # Clearing streamer input in Preferences inside strict Snap falls back to mpv %f
+                form.streamer_input = toga.TextInput(value="")
+                form.on_streamer_change()
+                self.assertEqual(os.environ.get("twitclubstreamer"), "mpv %f")
+
 
 if __name__ == "__main__":
     unittest.main()

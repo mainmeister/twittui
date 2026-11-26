@@ -1,5 +1,5 @@
 **Runtime Environment Verified (Baseline Audit)**: Python 3.12.3, `toga` / `toga-gtk` / `toga-textual` 0.5.7, `textual` 3.7.1, 263 discovered `unittest` cases across 20 test modules.
-**Post-Remediation Status**: All **23 confirmed bugs** and **7 architectural/quality suggestions** implemented and verified — **300 / 300 `unittest` cases passing across 25 test modules** (`.env` untouched, zero broad silent `except Exception: pass` handlers remaining).
+**Post-Remediation Status**: All **23 confirmed bugs** and **7 architectural/quality suggestions** implemented and verified — **317 / 317 `unittest` cases passing across 25 test modules** (`.env` untouched, zero broad silent `except Exception: pass` handlers remaining).
 
 > **Path Note**: The requested path referenced `/home/mainmeister/PythonProjects/twittui/antigravity_neon_bugs_or_suggestions.md`; because `/home/mainmeister/PythonProjects` does not exist and the active project workspace is `/home/mainmeister/PycharmProjects/twittui`, this report was saved inside the active repository root.
 
@@ -408,7 +408,10 @@ TwitTUI is an ambitious dual-backend (GTK 3 + Textual TUI) TWiT.tv podcast brows
 - **Recommended Fix**:
   Explicitly list only runtime modules (or rely solely on the `pip install .` entry point without `cp -a *.py`), add `shared-mime-info` to `stage-packages`, add a `.env.example` template (or remove the dead check), pin build dependencies from a lockfile for reproducibility, and either stage a lightweight player/ffmpeg (`mpv` or `vlc` + `ffmpeg`) or document strict-confinement streaming behavior clearly.
 - **Applied Fix & Verification**:
-  Removed `cp -a *.py` and `*.py`/`*.md` wildcards from `snap/snapcraft.yaml`, added `shared-mime-info`, `mpv`, and `ffmpeg` to `stage-packages`, created `.env.example`, and updated `snap/local/launcher.sh` and `test_snap.py`.
+  1. **Clean Runtime-Only Snap Packaging & Secret Hygiene (`snap/snapcraft.yaml:16-28, 64-154`)**: Removed `cp -a *.py` and `*.py`/`*.md` wildcards from `stage`/`prime` (installing Python modules cleanly into site-packages via `pip install --no-deps .`), added `PATH` containing `${SNAP}/bin:${SNAP}/usr/bin`, and added `override-pull:` (`craftctl default` + stripping `.env` / `*.env`, `.git`, `.venv`, `parts`, `stage`, `prime`, `.scratch`, `*.snap` while preserving `.env.example`) so local `snapcraft` runs never retain developer `.env` credential copies; also removed the stale `parts/twittui/{src,build}/.env` duplicates.
+  2. **Reproducible Dependency Lockfile (`requirements-snap.txt:1-27`, `snap/snapcraft.yaml:126-130`)**: Created `requirements-snap.txt` pinning all 25 verified `core24` / Python 3.12 runtime packages with exact `==` versions and wired `override-build:` to install from `requirements-snap.txt` + `pip install --no-deps .`.
+  3. **`shared-mime-info`, Bundled Media Tools & Strict-Confinement Streaming (`snap/snapcraft.yaml:110-112`, `snap/local/launcher.sh:5-36`, `.env.example:1-20`, `twittui_form.py:1438-1467, 3883-3891`)**: Added `shared-mime-info`, `mpv`, and `ffmpeg` to `stage-packages`; updated `snap/local/launcher.sh` to prepend `$SNAP/bin:$SNAP/usr/bin` to `PATH` and initialize `$SNAP_USER_DATA/.env` by atomically hard-linking a fully written temporary file with `0600` permissions, without replacing an existing configuration; the launcher and `_default_streamer_template()` prefer bundled `mpv %f` whenever present, even if host VLC is visible. Fixed `.env.example` (`TWITCLUBSHOWFOLDERS=0` and commented-out optional keys so `load_twittui_dotenv(override=True)` never clobbers launcher-exported `TWITCLUBSTREAMER`/`TWITCLUBDESTINATION`) and migrated the legacy VLC default in strict Snap environments.
+  4. **Verification**: Verified via `bash -n snap/local/launcher.sh`, `test_snap.py` (10 tests, including a launcher integration check), and `test_medium_fixes.py:1265-1326` (`test_20_snap_strict_confinement_streamer_and_env_template`).
 
 ---
 
@@ -577,10 +580,10 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 | Executive Summary Section | Items | Status | Regression Test Suite |
 | :--- | :---: | :---: | :--- |
 | **1. Critical / High** | 7 (#1–#7) | Complete | `test_critical_fixes.py` (7 tests) |
-| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (20 tests), `test_episode_activation.py` (3 tests), updated `test_install.py` / `test_snap.py` (9 tests) / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` / `test_open_destination.py` / `test_backend_factory.py` |
+| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (21 tests), `test_episode_activation.py` (3 tests), updated `test_install.py` / `test_snap.py` (10 tests) / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` / `test_open_destination.py` / `test_backend_factory.py` |
 | **3. Low / Edge Cases** | 3 (#21–#23) | Complete | `test_low_fixes.py` (4 tests) |
 | **4. Architectural & Quality Suggestions** | 7 (#1–#7) | Complete | `test_architecture_suggestions.py` (10 tests) |
-| **Total Test Suite** | **30 items** | **315 / 315 Passing** | `python -W always::ResourceWarning -m unittest discover -s . -p "test_*.py" -v` (25 modules, 0 loop warnings, `.env` untouched) |
+| **Total Test Suite** | **30 items** | **317 / 317 Passing** | `python -W always::ResourceWarning -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched; non-fatal PyInstaller diagnostics and a pending-task warning emitted) |
 
 ---
 
@@ -652,11 +655,11 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 19. **Test Suite TTY Hang, Real `.env` Mutation, Skipped Snap Checks & Event-Loop Leaks (#19)**:
     - Updated `test_install.py:334-354` to mock `sys.exit` with `side_effect=SystemExit(0)` and `assertRaises(SystemExit)`, verified non-blocking under a real PTY.
     - Isolated `SNAP_USER_DATA` with `tempfile.TemporaryDirectory()` across `test_security.py`, `test_episode_search.py`, `test_tooltips.py`, `test_preferences.py`, and `test_open_destination.py`, and added a defense-in-depth guard in `TwitTUIForm.save_env_setting()` (`twittui_form.py:1462-1469`) skipping real `.env` writes for `org.twit.test*` app IDs unless `SNAP_USER_DATA`/`SNAP_USER_COMMON` is explicitly set.
-    - Declared `"PyYAML>=6.0"` in `pyproject.toml:45-49` (`dev` extras, installed in `.github/workflows/ci.yml:36`), added `shared-mime-info` to `snap/snapcraft.yaml:109`, and added `_extract_yaml_list()` + `test_yaml_fallback_parser_and_pyyaml_dev_dependency()` in `test_snap.py:24-138` so Snap checks never silently skip.
+    - Declared `"PyYAML>=6.0"` in `pyproject.toml:45-49` (`dev` extras, installed in `.github/workflows/ci.yml:36`), added `shared-mime-info` to `snap/snapcraft.yaml:110`, and added `_extract_yaml_list()` + `test_yaml_fallback_parser_and_pyyaml_dev_dependency()` in `test_snap.py:24-138` so Snap checks never silently skip.
     - Eliminated all `ResourceWarning: unclosed event loop` leaks by breaking the `App <-> loop.call_soon_threadsafe` reference cycle with `weakref.ref(self)` and registering `weakref.finalize(..., _close_idle_event_loop, loop)` across Textual `App` (`toga_textual_backend.py:48-63, 2007-2032`), GTK `App` (`twittui_form.py:308-355`), and `TwitTUIForm.__init__` (`twittui_form.py:516-519`), plus explicit loop cleanup in `test_backend_factory.py`, `test_open_destination.py`, and `test_tooltips.py`, verified by `test_medium_fixes.py:1205-1260` (`test_19`).
-20. **Snap Packaging Hygiene, `shared-mime-info`, `.env.example`, and Bundled Media Tools (#20)**:
-    - Updated `snap/snapcraft.yaml` to remove `cp -a *.py` and `*.py`/`*.md` wildcards from `stage`/`prime` (relying cleanly on `pip install .` into site-packages without bundling tests or `setup.py`).
-    - Added `shared-mime-info`, `mpv`, and `ffmpeg` to `stage-packages`, created `.env.example` (staged/primed into the Snap for `snap/local/launcher.sh`), and ensured `update-mime-database` runs during build.
+20. **Snap Packaging Hygiene, `shared-mime-info`, Lockfile, `.env.example`, and Bundled Media Tools (#20)**:
+    - Hardened `snap/snapcraft.yaml:16-154` to remove `cp -a *.py` and `*.py`/`*.md` wildcards, expose `${SNAP}/bin:${SNAP}/usr/bin` on `PATH`, add `override-pull:` stripping developer `.env`/`*.env` and build artifacts (purging stale `parts/twittui/{src,build}/.env`), stage `shared-mime-info`, `mpv`, and `ffmpeg`, run `update-mime-database`, and install pinned dependencies from `requirements-snap.txt:1-27` + `pip install --no-deps .`.
+    - Fixed `.env.example:1-20` (`TWITCLUBSHOWFOLDERS=0` and commented-out optional overrides so `load_twittui_dotenv(override=True)` preserves launcher exports), updated `snap/local/launcher.sh:5-36` to prepend `$SNAP/bin:$SNAP/usr/bin`, atomically initialize `$SNAP_USER_DATA/.env` with `0600` permissions, and prefer bundled `mpv %f` even when host VLC is visible. Added `TwitTUIForm._default_streamer_template()` (`twittui_form.py:1438-1467, 3883-3891`) to apply the same strict-Snap default and migrate the legacy VLC template, verified by `test_snap.py` and `test_medium_fixes.py:1265-1326` (`test_20`).
 
 ---
 
