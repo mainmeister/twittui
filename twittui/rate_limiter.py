@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections import deque
+from contextlib import contextmanager
 import os
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import requests
 
@@ -28,6 +29,17 @@ class ApiRateLimiter:
         self.wait_callback: Callable[[bool], Any] | None = None
         self.rate_limit = rate_limit
         self._http_get_provider = http_get_provider
+        self._local = threading.local()
+
+    @contextmanager
+    def suppress_wait_notifications(self) -> Iterator[None]:
+        """Suppress modal wait callbacks on the current thread while preserving rate limiting."""
+        prev = getattr(self._local, "suppress_wait", False)
+        self._local.suppress_wait = True
+        try:
+            yield
+        finally:
+            self._local.suppress_wait = prev
 
     def _sleep(self, delay: float) -> None:
         time.sleep(delay)
@@ -67,7 +79,7 @@ class ApiRateLimiter:
         return 5
 
     def get(self, url: str, **kwargs: Any) -> Any:
-        callback = self.wait_callback
+        callback = None if getattr(self._local, "suppress_wait", False) else self.wait_callback
         if callback:
             callback(True)
         try:

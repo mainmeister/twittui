@@ -271,7 +271,10 @@ TwitTUI is an ambitious dual-backend (GTK 3 + Textual TUI) TWiT.tv podcast brows
 - **Recommended Fix**:
   Always fetch and cache canonical newest-first pages (sort client-side in memory); track `fetched_pages` to avoid duplicate requests; normalize episodes into per-episode SQLite rows `(show_id, episode_key, data_json)`; and paginate on demand (or backfill asynchronously without blocking the UI behind a modal).
 - **Applied Fix & Verification**:
-  Tracked fetched pages in `fetch_episodes()` to prevent duplicate page requests, deferred per-page SQLite persistence until multi-page pagination finishes (`_defer_episodes_persist`), and normalized episode persistence into per-episode WAL-mode SQLite rows (`twittui_episodes` in `twittui/cache.py`). Verified by `test_medium_fixes.py:test_12_fetch_episodes_avoids_double_page_fetch_and_defers_sqlite_writes` and `test_architecture_suggestions.py`.
+  1. **Canonical Newest-First Fetching, Deduplicated `fetched_pages` & Gap-Safe Reconciliation (`twittui_form.py:5908-6025`)**: Updated `fetch_episodes()` to always fetch and cache canonical newest-first (`-airingDate`) pages when `sort` is not explicitly supplied (leaving UI sort changes client-side in `update_episodes_display()`), tracked `fetched_pages` so no page is ever re-requested across reconciliation passes, and preserved uncached `tail_new_items`/`tail_acc` entries on any page containing a cache hit instead of dropping the remainder of that page.
+  2. **Two-Phase Non-Blocking Backfill & Thread-Local Rate-Limiter Wait Suppression (`twittui_form.py:7537-7713, 1577-1580, 7851-7854`, `twittui/rate_limiter.py:32-43, 81-89`)**: Refactored `load_episodes_for_selected_show()` so Phase 1 loads Page 1 under the modal wait dialog, immediately renders the first 50 episodes, closes the modal wait overlay, and invokes `callback()` (dismissing `SplashScreen`), while Phase 2 backfills remaining pages asynchronously inside `api_rate_limiter.suppress_wait_notifications()` (sharing the global rate-limiter window without re-opening modal wait dialogs). Sort toggles during backfill (`_episodes_backfilling`) sort immediately in memory without restarting Page 1.
+  3. **Normalized Per-Episode WAL SQLite Storage & Single Deferred Persist (`twittui/cache.py:141-246`, `twittui_form.py:7562-7684`)**: Normalized episode storage into per-episode `twittui_episodes` rows in WAL mode and deferred SQLite writes via `_defer_episodes_persist` so multi-page loads persist **once** instead of O(N²) per page.
+  4. **Verification**: Verified by `test_medium_fixes.py:364-569` (`test_12_fetch_episodes_avoids_double_page_fetch_and_defers_sqlite_writes` and `test_12b_canonical_sort_gap_preservation_and_nonblocking_backfill`) and `test_architecture_suggestions.py`.
 
 ---
 
@@ -555,10 +558,10 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 | Executive Summary Section | Items | Status | Regression Test Suite |
 | :--- | :---: | :---: | :--- |
 | **1. Critical / High** | 7 (#1–#7) | Complete | `test_critical_fixes.py` (7 tests) |
-| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (13 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
+| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (14 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
 | **3. Low / Edge Cases** | 3 (#21–#23) | Complete | `test_low_fixes.py` (4 tests) |
 | **4. Architectural & Quality Suggestions** | 7 (#1–#7) | Complete | `test_architecture_suggestions.py` (10 tests) |
-| **Total Test Suite** | **30 items** | **305 / 305 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
+| **Total Test Suite** | **30 items** | **306 / 306 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
 
 ---
 
@@ -607,8 +610,9 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 11. **Dead RSS Cache Lookup in `get_available_resolutions()` (#11)**:
     - Replaced the dead `f"rss_{feed_file}"`-only cache lookup (`twittui_form.py:5351-5398`) with mode-ordered lookups of the live `f"{show_key}_video"` and `f"{show_key}_audio"` keys written by `fetch_show_rss_items()` (`twittui_form.py:2130-2139, 2231-2236`), snapshotted safely under `self._cache_lock`.
     - Fixed `get_available_resolutions()` (`twittui_form.py:5184-5230`) with `_scalar_str()` to extract and stringify `target_num`/`target_title`/`clean_path`/`ep_id` from plain episode dicts (including integer `episodeNumber`), fall back to target show metadata when `"All TWiT.tv Shows"` is selected, and normalize display-formatted show labels via `_show_names_by_display`, verified by `test_medium_fixes.py:290-360` (`test_11`, `test_11b`).
-12. **Episode Cache Reconciliation Double-Fetch & Write Amplification (#12)**:
-    - Tracked fetched pages during pagination in `fetch_episodes()` to prevent duplicate page re-fetches on sort changes and deferred SQLite cache persistence until multi-page pagination completes (eliminating O(N²) per-page write amplification).
+12. **Episode Cache Reconciliation Double-Fetch, Modal Lockup & Write Amplification (#12)**:
+    - Updated `fetch_episodes()` (`twittui_form.py:5908-6025`) to always fetch canonical newest-first (`-airingDate`) pages by default (sorting client-side in memory), track `fetched_pages` across reconciliation loops so no page is ever requested twice, and preserve uncached gap episodes on pages with cache hits.
+    - Refactored `load_episodes_for_selected_show()` (`twittui_form.py:7537-7713`) into two-phase loading: Phase 1 displays Page 1 and immediately releases the modal wait / `SplashScreen`, while Phase 2 asynchronously backfills pages 2+ under `api_rate_limiter.suppress_wait_notifications()` (`twittui/rate_limiter.py:32-43, 81-89`) with a single deferred write into normalized WAL-mode `twittui_episodes` rows (`twittui/cache.py:141-246`); sort clicks during backfill (`_episodes_backfilling`) re-sort immediately in memory without restarting Page 1. Verified by `test_medium_fixes.py:364-569` (`test_12`, `test_12b`).
 13. **YouTube Bracket Filenames, Misnamed Audio Containers & Non-Atomic Replace (#13)**:
     - Wrapped `temp_prefix` and `dest_path` with `glob.escape()` in `download_youtube_video()` so bracketed episode titles (`[...]`) resolve and clean up properly.
     - Aligned output file extensions to the actual downloaded audio container (`.m4a`/`.webm`/`.opus`) when `ffmpeg` is absent.

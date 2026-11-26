@@ -437,6 +437,136 @@ class TestMediumFixes(unittest.TestCase):
         self.assertEqual(len(save_calls), 1)
         self.assertEqual(save_calls[0], ("1636", 110))
 
+    def test_12b_canonical_sort_gap_preservation_and_nonblocking_backfill(self) -> None:
+        """Uncached fetches use canonical -airingDate, page-1 hits never drop gap items, and backfill is non-blocking."""
+        from twittui_form import api_rate_limiter
+
+        # 1. Uncached fetch uses canonical newest-first '-airingDate' even when UI is set to Ascending Title sort
+        form = TwitTUIForm("TestApp", "org.twit.test", cache_db_path=":memory:")
+        form.show_combo = SimpleNamespace(value="Security Now")
+        form.show_ids = {"Security Now": 1636}
+        form.title_radio = SimpleNamespace(text="☑ Episode Title")
+        form.sort_order_button = SimpleNamespace(text="▲ Ascending")
+        requested_urls: list[str] = []
+
+        def fake_get_canonical(url, headers=None, timeout=None):
+            requested_urls.append(url)
+            resp = MagicMock(status_code=200)
+            resp.json.return_value = {
+                "count": 2,
+                "episodes": [
+                    {"id": 2, "label": "SN 2", "episodeNumber": 2},
+                    {"id": 1, "label": "SN 1", "episodeNumber": 1},
+                ],
+                "_links": {},
+            }
+            return resp
+
+        with patch("twittui_form.load_twittui_dotenv"), \
+             patch("twittui_form.api_rate_limiter.get", side_effect=fake_get_canonical), \
+             patch.object(form, "get_api_app_id", return_value="id"), \
+             patch.object(form, "get_api_app_key", return_value="key"):
+            form.fetch_episodes(1636, page=1)
+        self.assertEqual(len(requested_urls), 1)
+        self.assertIn("sort=-airingDate", requested_urls[0])
+
+        # 2. Partial cache where episode at index 0 of page 1 already exists does NOT discard remaining 49 page-1 items
+        form_gap = TwitTUIForm("TestGap", "org.twit.test", cache_db_path=":memory:")
+        form_gap.show_combo = SimpleNamespace(value="Security Now")
+        form_gap.show_ids = {"Security Now": 1636}
+        form_gap._episodes_cache["1636"] = [{"id": 50, "label": "SN 50", "episodeNumber": 50}]
+
+        def fake_get_gap(url, headers=None, timeout=None):
+            resp = MagicMock(status_code=200)
+            resp.json.return_value = {
+                "count": 50,
+                "episodes": [{"id": i, "label": f"SN {i}", "episodeNumber": i} for i in range(50, 0, -1)],
+                "_links": {},
+            }
+            return resp
+
+        with patch("twittui_form.load_twittui_dotenv"), \
+             patch("twittui_form.api_rate_limiter.get", side_effect=fake_get_gap), \
+             patch.object(form_gap, "get_api_app_id", return_value="id"), \
+             patch.object(form_gap, "get_api_app_key", return_value="key"):
+            reconciled = form_gap.fetch_episodes(1636, page=1)
+        self.assertEqual(len(reconciled), 50)
+        self.assertEqual({e["id"] for e in reconciled}, set(range(1, 51)))
+        self.assertTrue(form_gap._episodes_all_loaded)
+
+        # 3. Multi-page load_episodes_for_selected_show unlocks modal wait & fires callback right after page 1,
+        #    and backfills pages 2+ without firing rate-limiter modal wait notifications.
+        form_nb = TwitTUIForm("TestNB", "org.twit.test", cache_db_path=":memory:")
+        form_nb.show_combo = SimpleNamespace(value="Security Now")
+        form_nb.show_ids = {"Security Now": 1636}
+        form_nb.search_input = SimpleNamespace(value="")
+        form_nb.update_episodes_display = MagicMock()
+        form_nb._cancel_hover_timer = MagicMock()
+        wait_events: list[bool] = []
+        form_nb._set_rate_limit_wait = lambda waiting: wait_events.append(bool(waiting))
+        cb_fired: list[bool] = []
+        queued_jobs: list[tuple] = []
+
+        def fake_http_get(url, headers=None, timeout=None):
+            import re
+            m = re.search(r"page=(\d+)", url)
+            p = int(m.group(1)) if m else 1
+            resp = MagicMock(status_code=200)
+            if p == 1:
+                resp.json.return_value = {
+                    "count": 75,
+                    "episodes": [{"id": i, "label": f"SN {i}", "episodeNumber": i} for i in range(75, 25, -1)],
+                    "_links": {"next": {"href": "?page=2"}},
+                }
+            else:
+                resp.json.return_value = {
+                    "count": 75,
+                    "episodes": [{"id": i, "label": f"SN {i}", "episodeNumber": i} for i in range(25, 0, -1)],
+                    "_links": {},
+                }
+            return resp
+
+        orig_wait_cb = api_rate_limiter.wait_callback
+        limiter_wait_calls: list[bool] = []
+        api_rate_limiter.wait_callback = lambda w: limiter_wait_calls.append(bool(w))
+        try:
+            with patch("twittui_form.load_twittui_dotenv"), \
+                 patch("twittui_form.requests.get", side_effect=fake_http_get), \
+                 patch.object(api_rate_limiter, "_sleep"), \
+                 patch.object(form_nb, "get_api_app_id", return_value="id"), \
+                 patch.object(form_nb, "get_api_app_key", return_value="key"), \
+                 patch.object(form_nb, "_run_network", side_effect=lambda work, done: queued_jobs.append((work, done))):
+                api_rate_limiter.timestamps.clear()
+                form_nb.load_episodes_for_selected_show(callback=lambda: cb_fired.append(True))
+
+                # Phase 1 scheduled; modal wait open
+                self.assertEqual(len(queued_jobs), 1)
+                self.assertEqual(wait_events, [True])
+
+                # Complete Phase 1 (Page 1 only)
+                p1_result = queued_jobs[0][0]()
+                queued_jobs[0][1](p1_result)
+
+                # UI immediately unlocked with first 50 episodes & callback invoked BEFORE Phase 2 runs!
+                self.assertEqual(wait_events, [True, False])
+                self.assertEqual(cb_fired, [True])
+                self.assertEqual(len(form_nb.current_episodes), 50)
+                self.assertTrue(form_nb._episodes_backfilling)
+                self.assertEqual(len(queued_jobs), 2)
+
+                # Phase 2 runs without opening any modal wait dialog or firing rate-limiter wait_callback
+                limiter_wait_calls.clear()
+                p2_result = queued_jobs[1][0]()
+                queued_jobs[1][1](p2_result)
+
+                self.assertEqual(wait_events, [True, False])
+                self.assertEqual(limiter_wait_calls, [])
+                self.assertFalse(form_nb._episodes_backfilling)
+                self.assertTrue(form_nb._episodes_all_loaded)
+                self.assertEqual(len(form_nb.current_episodes), 75)
+        finally:
+            api_rate_limiter.wait_callback = orig_wait_cb
+
     # ------------------------------------------------------------------
     # Bug 13: YouTube [brackets] glob.escape, audio ext alignment, atomic replace
     # ------------------------------------------------------------------

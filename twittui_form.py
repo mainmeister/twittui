@@ -1574,7 +1574,7 @@ class TwitTUIForm(toga.App):
             self.sort_order_button.text = '▲ Ascending'
             self.sort_order_button.tooltip = "Currently ascending (oldest first). Click to sort descending (newest first)"
 
-        if getattr(self, '_episodes_all_loaded', False) and getattr(self, 'current_episodes', None):
+        if (getattr(self, '_episodes_all_loaded', False) or getattr(self, '_episodes_backfilling', False)) and getattr(self, 'current_episodes', None):
             self.update_episodes_display()
         else:
             self.load_episodes_for_selected_show()
@@ -5905,21 +5905,18 @@ class TwitTUIForm(toga.App):
                     'app-key': app_key
                 }
 
-                sort_was_explicit = sort is not None
+                # Always fetch and cache canonical newest-first pages unless caller
+                # explicitly passes a sort parameter; UI sort selections (Date/Number/
+                # Title/Length/Size asc/desc) are applied client-side in memory so sort
+                # changes never misalign cache order or trigger full archive re-scans.
                 if sort is None:
-                    sort = self.get_current_sort_param()
+                    sort = '-airingDate'
 
                 page = int(page or 1)
                 page_size = 50
 
                 cached_list = self._episodes_cache.get(show_id_key, [])
                 cached_keys = {self._episode_cache_key(e) for e in cached_list if self._episode_cache_key(e) is not None}
-
-                # When reconciling against an existing cache without an explicit caller sort,
-                # query canonical newest-first order so UI sort changes (sorted client-side)
-                # never trigger full re-scans of older pages.
-                if page == 1 and cached_list and not sort_was_explicit:
-                    sort = '-airingDate'
 
                 if page > 1 and cached_list and getattr(self, '_episodes_all_loaded', False):
                     start_idx = (page - 1) * page_size
@@ -5955,17 +5952,26 @@ class TwitTUIForm(toga.App):
                         last_fetched_page = 1
                         hit_cache = False
                         new_items = []
+                        tail_new_items = []
+                        seen_new_keys: set = set()
                         for ep in episodes:
                             k = self._episode_cache_key(ep)
                             if k and k in cached_keys:
                                 hit_cache = True
-                                break
-                            new_items.append(ep)
+                                continue
+                            if not k or k not in seen_new_keys:
+                                if hit_cache:
+                                    tail_new_items.append(ep)
+                                else:
+                                    new_items.append(ep)
+                                if k:
+                                    seen_new_keys.add(k)
 
                         if hit_cache:
-                            merged = new_items + cached_list
+                            merged = new_items + cached_list + tail_new_items
                         else:
-                            accumulated = list(episodes)
+                            accumulated = list(new_items)
+                            tail_acc = list(tail_new_items)
                             curr_page = 2
                             while next_link and not hit_cache:
                                 fetched_pages.add(curr_page)
@@ -5984,12 +5990,18 @@ class TwitTUIForm(toga.App):
                                     k = self._episode_cache_key(ep)
                                     if k and k in cached_keys:
                                         hit_cache = True
-                                        break
-                                    accumulated.append(ep)
+                                        continue
+                                    if not k or k not in seen_new_keys:
+                                        if hit_cache:
+                                            tail_acc.append(ep)
+                                        else:
+                                            accumulated.append(ep)
+                                        if k:
+                                            seen_new_keys.add(k)
                                 next_link = (n_data.get('_links') or {}).get('next')
                                 curr_page += 1
 
-                            merged = accumulated + cached_list
+                            merged = accumulated + cached_list + tail_acc
 
                         seen_keys = {self._episode_cache_key(e) for e in merged if self._episode_cache_key(e) is not None}
                         total_count = int(count) if str(count).isdigit() else None
@@ -7523,15 +7535,23 @@ class TwitTUIForm(toga.App):
         self.load_episodes_for_selected_show()
 
     def load_episodes_for_selected_show(self, callback=None) -> None:
-        """Fetch and display episodes for currently selected show in the combo box."""
+        """Fetch and display episodes for currently selected show in the combo box.
+
+        Loads page 1 immediately under the modal wait dialog so the UI unlocks
+        right away, then asynchronously backfills any remaining pages in the
+        background without blocking the UI behind a modal wait screen and with
+        a single deferred SQLite persistence write.
+        """
         self._cancel_hover_timer()
         token = self._next_episode_request()
         self.current_page = 1
+        self._episodes_backfilling = False
         selected_show = self._selected_show_name()
         self._search_catalog = None
         self._search_catalog_show = None
         if selected_show and hasattr(self, 'show_ids') and selected_show in self.show_ids:
             show_id = self.show_ids[selected_show]
+            show_id_key = str(show_id) if show_id is not None else ''
             worker = self._network_snapshot()
 
             held = False
@@ -7539,40 +7559,41 @@ class TwitTUIForm(toga.App):
                 held = True
                 self._set_rate_limit_wait(True)
 
+            persisted_box = [False]
+
+            def _persist_worker_episodes() -> None:
+                if persisted_box[0]:
+                    return
+                if (
+                    show_id_key
+                    and getattr(worker, '_episodes_from_api', False)
+                    and isinstance(getattr(worker, '_episodes_cache', None), dict)
+                    and show_id_key in worker._episodes_cache
+                ):
+                    try:
+                        worker._save_to_persistent_cache(
+                            'episodes', show_id_key, worker._episodes_cache[show_id_key]
+                        )
+                        persisted_box[0] = True
+                    except Exception:
+                        _logger.debug("Ignored exception in %s", 'TwitTUIForm.load_episodes_for_selected_show._persist_worker_episodes', exc_info=True)
+
             def fetch_all():
-                episodes = []
-                page = 1
-                batch = []
-                show_id_key = str(show_id) if show_id is not None else ''
-                # Defer per-page SQLite re-serialization inside the multi-page loop so
-                # large shows persist once instead of incurring O(N^2) write amplification.
+                # Phase 1: fetch page 1 immediately; defer SQLite persistence across pages
+                # so multi-page shows persist once instead of incurring O(N^2) write amplification.
                 worker._defer_episodes_persist = True
+                batch = []
                 try:
-                    while token == self._episode_request:
-                        batch = worker.fetch_episodes(show_id, page=page)
-                        if not batch:
-                            break
-                        episodes.extend(batch)
-                        if getattr(worker, '_episodes_all_loaded', False):
-                            break
-                        page += 1
+                    if token == self._episode_request:
+                        batch = worker.fetch_episodes(show_id, page=1) or []
                 except Exception as e:
                     print(f"Unexpected error loading episodes for show {show_id}: {e}")
                 finally:
-                    worker._defer_episodes_persist = False
-                    if (
-                        show_id_key
-                        and getattr(worker, '_episodes_from_api', False)
-                        and isinstance(getattr(worker, '_episodes_cache', None), dict)
-                        and show_id_key in worker._episodes_cache
-                    ):
-                        try:
-                            worker._save_to_persistent_cache(
-                                'episodes', show_id_key, worker._episodes_cache[show_id_key]
-                            )
-                        except Exception:
-                            _logger.debug("Ignored exception in %s", 'TwitTUIForm.load_episodes_for_selected_show.fetch_all', exc_info=True)
-                return episodes, page if batch else max(1, page - 1)
+                    all_done = getattr(worker, '_episodes_all_loaded', False) or not batch or token != self._episode_request
+                    if all_done:
+                        worker._defer_episodes_persist = False
+                        _persist_worker_episodes()
+                return list(batch), 1
 
             released = False
 
@@ -7586,41 +7607,104 @@ class TwitTUIForm(toga.App):
                 if callable(callback):
                     callback()
 
-            def done(result):
+            def _apply_episodes_to_ui(episodes_list: list, page_num: int) -> None:
+                self.current_page = page_num
+                self._triangulation_rss_fallback = getattr(worker, '_triangulation_rss_fallback', False)
+                self._episodes_from_api = getattr(worker, '_episodes_from_api', False)
+                self._episodes_all_loaded = getattr(worker, '_episodes_all_loaded', False)
+                status = getattr(worker, '_episode_api_status', '')
+                if getattr(self, 'api_status_label', None):
+                    if status or self.api_status_label.text == getattr(self, '_episode_api_status', None):
+                        self.api_status_label.text = status
+                self._episode_api_status = status
+                if hasattr(self, '_episodes_cache') and hasattr(worker, '_episodes_cache'):
+                    self._episodes_cache.update(worker._episodes_cache)
+                self.current_episodes = episodes_list
+                if self._episodes_all_loaded:
+                    self._search_catalog = list(episodes_list)
+                    self._search_catalog_show = selected_show
+                query = (self.search_input.value or '').strip() if getattr(self, 'search_input', None) else ''
+                if query:
+                    self.current_episodes = rank_and_filter_episodes(
+                        episodes_list,
+                        query,
+                        fuzzy_enabled=self.is_fuzzy_search_enabled(),
+                        phonetic_enabled=self.is_phonetic_search_enabled()
+                    )
+                self.update_episodes_display()
+
+            def done_page_1(result):
+                page1_episodes: list = []
+                page_num = 1
+                should_backfill = False
                 try:
                     if token == self._episode_request:
                         if isinstance(result, tuple) and len(result) == 2:
-                            episodes, page = result
+                            page1_episodes, page_num = result
                         else:
-                            episodes, page = (result if isinstance(result, list) else []), 1
-                        self.current_page = page
-                        self._triangulation_rss_fallback = getattr(worker, '_triangulation_rss_fallback', False)
-                        self._episodes_from_api = getattr(worker, '_episodes_from_api', False)
-                        self._episodes_all_loaded = getattr(worker, '_episodes_all_loaded', False)
-                        status = getattr(worker, '_episode_api_status', '')
-                        if getattr(self, 'api_status_label', None):
-                            if status or self.api_status_label.text == getattr(self, '_episode_api_status', None):
-                                self.api_status_label.text = status
-                        self._episode_api_status = status
-                        if hasattr(self, '_episodes_cache') and hasattr(worker, '_episodes_cache'):
-                            self._episodes_cache.update(worker._episodes_cache)
-                        self.current_episodes = episodes
-                        if self._episodes_all_loaded:
-                            self._search_catalog = list(episodes)
-                            self._search_catalog_show = selected_show
-                        query = (self.search_input.value or '').strip() if getattr(self, 'search_input', None) else ''
-                        if query:
-                            self.current_episodes = rank_and_filter_episodes(
-                                episodes,
-                                query,
-                                fuzzy_enabled=self.is_fuzzy_search_enabled(),
-                                phonetic_enabled=self.is_phonetic_search_enabled()
-                            )
-                        self.update_episodes_display()
+                            page1_episodes, page_num = (result if isinstance(result, list) else []), 1
+                        _apply_episodes_to_ui(list(page1_episodes), page_num)
+                        should_backfill = bool(page1_episodes) and not self._episodes_all_loaded
                 finally:
+                    # Unlock the UI immediately after page 1 (never hold modal wait across multi-page backfill)
                     _release_episode_wait()
 
-            self._call_run_network(fetch_all, done, on_finally=_release_episode_wait)
+                if not should_backfill:
+                    return
+
+                self._episodes_backfilling = True
+
+                def fetch_remaining():
+                    extra_episodes = []
+                    page = page_num + 1
+                    last_batch = []
+                    worker._defer_episodes_persist = True
+                    try:
+                        with api_rate_limiter.suppress_wait_notifications():
+                            while token == self._episode_request:
+                                last_batch = worker.fetch_episodes(show_id, page=page) or []
+                                if not last_batch:
+                                    break
+                                extra_episodes.extend(last_batch)
+                                if getattr(worker, '_episodes_all_loaded', False):
+                                    break
+                                page += 1
+                    except Exception as e:
+                        print(f"Unexpected error backfilling episodes for show {show_id}: {e}")
+                    finally:
+                        worker._defer_episodes_persist = False
+                        _persist_worker_episodes()
+                    return extra_episodes, page if last_batch else max(page_num, page - 1)
+
+                def _finish_backfill() -> None:
+                    if token == self._episode_request:
+                        self._episodes_backfilling = False
+                    worker._defer_episodes_persist = False
+                    _persist_worker_episodes()
+
+                def done_remaining(rem_result):
+                    try:
+                        if token != self._episode_request:
+                            return
+                        if isinstance(rem_result, tuple) and len(rem_result) == 2:
+                            extra_episodes, final_page = rem_result
+                        else:
+                            extra_episodes, final_page = (rem_result if isinstance(rem_result, list) else []), page_num
+                        combined = list(page1_episodes)
+                        seen_keys = {self._episode_cache_key(e) for e in combined if self._episode_cache_key(e) is not None}
+                        for ep in (extra_episodes or []):
+                            k = self._episode_cache_key(ep)
+                            if not k or k not in seen_keys:
+                                combined.append(ep)
+                                if k:
+                                    seen_keys.add(k)
+                        _apply_episodes_to_ui(combined, final_page)
+                    finally:
+                        _finish_backfill()
+
+                self._call_run_network(fetch_remaining, done_remaining, on_finally=_finish_backfill)
+
+            self._call_run_network(fetch_all, done_page_1, on_finally=_release_episode_wait)
         else:
             self.current_episodes = []
             self.update_episodes_display()
@@ -7764,7 +7848,7 @@ class TwitTUIForm(toga.App):
         if hasattr(self, 'size_radio') and self.size_radio:
             self.size_radio.tooltip = "Sort episodes by file size" + (" (active)" if widget == self.size_radio else "")
 
-        if getattr(self, '_episodes_all_loaded', False) and getattr(self, 'current_episodes', None):
+        if (getattr(self, '_episodes_all_loaded', False) or getattr(self, '_episodes_backfilling', False)) and getattr(self, 'current_episodes', None):
             self.update_episodes_display()
         else:
             self.load_episodes_for_selected_show()
