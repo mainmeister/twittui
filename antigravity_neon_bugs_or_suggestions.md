@@ -450,3 +450,129 @@ Several shows (e.g., *FLOSS Weekly*, *Hands-On Photography*, *This Week in Enter
    - Normalize SQLite episodes table + background non-blocking show-date scraping (Bug #12 + Suggestion #3).
    - Decompose `twittui_form.py` into a clean `twittui/` package, consolidate `pyproject.toml`, reduce silent `except Exception: pass` blocks, migrate deprecated Toga dialog APIs, and update `Technical_review.md`.
 
+
+---
+
+## Remediation & Implementation Log (All Four Executive Summary Sections)
+
+All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued across the four sections of the Executive Summary have been implemented and verified.
+
+### Verification Summary
+
+| Executive Summary Section | Items | Status | Regression Test Suite |
+| :--- | :---: | :---: | :--- |
+| **1. Critical / High** | 7 (#1–#7) | Complete | `test_critical_fixes.py` (7 tests) |
+| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (7 tests), `test_medium_fixes.py` (9 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
+| **3. Low / Edge Cases** | 3 (#21–#23) | Complete | `test_low_fixes.py` (4 tests) |
+| **4. Architectural & Quality Suggestions** | 7 (#1–#7) | Complete | `test_architecture_suggestions.py` (10 tests) |
+| **Total Test Suite** | **30 items** | **300 / 300 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
+
+---
+
+### Section 1: Critical / High Fixes Implemented (#1–#7)
+
+1. **Plaintext API Secret in World-Readable SQLite Cache (#1)**:
+   - Added `_shows_cache_key_hash(app_id, app_key)` (`SHA-256` over `f"{app_id}\0{app_key}"`) so API credentials are never stored verbatim in `twittui_cache.db`.
+   - Enforced `0o700` permissions on `~/.cache/twittui` and `0o600` on `twittui_cache.db` (and SQLite `-wal`/`-shm` sidecars) via `_restrict_file_permissions()`.
+   - Added automatic startup migration of legacy `app_id:app_key` rows using `PRAGMA secure_delete = ON`.
+2. **HTML Sanitizer XSS Bypasses & Attribute Corruption (#2)**:
+   - Replaced the regex-only fallback with a strict pure-Python allowlist `html.parser.HTMLParser` (`_AllowlistHTMLSanitizer`, alongside optional `bleach`/`nh3`) and multi-pass dangerous-container pre-stripping handling whitespace before `>` (e.g., `</script >`).
+   - Added entity unescaping and ASCII control-character stripping before URI scheme validation so ` &#106;avascript:`, `java\tscript:`, `vbscript:`, `data:`, `style=...`, `srcdoc`, and `formaction` payloads are blocked cleanly without corrupting attribute quotes.
+3. **RSS XSLT Renderer Stripping Its Own `<style>` Block (#3)**:
+   - Updated `render_rss_feed_to_html()` to sanitize untrusted RSS body content *before* injecting the trusted local `feed-style.css` `<style>` block and HTML shell, preserving visual styling while keeping feed payloads sanitized.
+4. **`_LazySQLiteEpisodesCache` Data Loss & `dict` Contract (#4)**:
+   - Implemented the full Python mapping contract on `_LazySQLiteEpisodesCache` (`setdefault`, `update`, `__iter__`, `__delitem__`, `keys`, `items`, `values`, `__or__`, `__ior__`, `pop`, `copy`, `clear`) so `setdefault()` hydrates unloaded shows instead of overwriting cached pages with `[]`, and `update()` keeps `_unloaded_keys` synchronized without eager SQLite loads.
+5. **Uncaught `_run_network` Exceptions Freezing Modal Overlays (#5)**:
+   - Added `on_error` error handling to `_run_network()` and wrapped network worker callables and `done` callbacks in `_refresh_catalog()`, `_refresh_show_dates()`, `load_episodes_for_selected_show()`, and `on_next_press()` so `_catalog_wait_held`, `SplashScreen`, and `_api_wait_count` are always released on failure.
+   - Removed the unreachable contradictory dead-code guard inside `_refresh_catalog()`.
+6. **`TextualWebView` & `TextualDivider` Crashes Under Toga 0.5.7 (#6)**:
+   - Implemented `set_user_agent`, `get_user_agent`, `set_on_webview_load`, `get_cookies`, and `evaluate_javascript` on `TextualWebView` and `set_direction` on `TextualDivider` in `toga_textual_backend.py`.
+   - Wrapped `TextualWebView`'s content widget in a scrollable `VerticalScroll` container with `Static(..., markup=False)` so API Blueprint documents (`twittv.apib`) render cleanly without raising `rich.errors.MarkupError`.
+7. **Thread-Unsafe Background UI/Dialog Access & Concurrent Batch Downloads (#7)**:
+   - Added `_show_dialog_threadsafe()` dispatching UI dialogs onto the main event loop via `loop.call_soon_threadsafe()`.
+   - Captured live widget values on the UI thread prior to spawning workers in `on_show_club_url_press()`, `on_open_destination_press()`, and `download_episodes_batch()` (using `_network_snapshot()`), protected shared cache dicts with `self._cache_lock` (`threading.RLock`), and guarded `on_download_press()` with `self._download_lock` to prevent overlapping batch download threads.
+
+---
+
+### Section 2: Medium Fixes Implemented (#8–#20)
+
+8. **GTK Auto-Scroll to Search Match & Offset Alignment (#8)**:
+   - Updated `_show_episode_metadata()` to target `desc_input._impl.native_textview` via `GLib.idle_add` and compute `MatchContext.char_offset` in `tiered_search.py` against HTML-cleaned description text (`_clean_html_for_search`) matching `desc_input.value`.
+9. **Double Metaphone Phonetic Rules & Dead Code (`double_metaphone.py`) (#9)**:
+   - Preserved `Ç` and `Ñ` and word-boundary spaces prior to encoding, removed unused `padded`, fixed `TH`/`TCH` (`3`-char vs `2`-char slice bug), `GGI`, `SCH` secondary (`SK` vs `KK`), `GN`, `GLI`, `DG`, and `WICZ`/`WITZ` rules against Lawrence Philips' specification, and added dedicated vectors in `test_double_metaphone.py`.
+10. **Tiered Search Field Omissions, Score Inversion & Partial-Query False Positives (`tiered_search.py`) (#10)**:
+    - Derived `extract_searchable_text()` directly from `get_episode_fields()` so hosts, guests, topics, tags, teaser, and snippet are always searchable alongside title and description.
+    - Aligned Tier 2 (Fuzzy) and Tier 3 (Phonetic) precedence, scores (`80.0` primary / `72.0` secondary), and short-word thresholds (`80.0` for `< 4`-char tokens; `68.0` default) between `compute_match_score()` and `find_match_context()`.
+    - Required every query token to match in `find_match_context()`, eliminating partial-query false positives.
+11. **Dead RSS Cache Lookup in `get_available_resolutions()` (#11)**:
+    - Replaced the dead `f"rss_{feed_file}"` cache key lookup with the actual `f"{show_key}_video"` and `f"{show_key}_audio"` keys populated by `fetch_show_rss_items()`.
+12. **Episode Cache Reconciliation Double-Fetch & Write Amplification (#12)**:
+    - Tracked fetched pages during pagination in `fetch_episodes()` to prevent duplicate page re-fetches on sort changes and deferred SQLite cache persistence until multi-page pagination completes (eliminating O(N²) per-page write amplification).
+13. **YouTube Bracket Filenames, Misnamed Audio Containers & Non-Atomic Replace (#13)**:
+    - Wrapped `temp_prefix` and `dest_path` with `glob.escape()` in `download_youtube_video()` so bracketed episode titles (`[...]`) resolve and clean up properly.
+    - Aligned output file extensions to the actual downloaded audio container (`.m4a`/`.webm`/`.opus`) when `ffmpeg` is absent.
+    - Replaced `os.remove()` + `os.rename()` with atomic `os.replace()`.
+14. **Duration (`length`) Confused with Byte Size (`expected_size`) (#14)**:
+    - Removed top-level `'length'` from byte-size key extraction in `download_episodes_batch()`, reading `'length'` as bytes only inside explicit RSS enclosure sub-dictionaries.
+15. **File Descriptor Double-Close & TOCTOU Permissions in `write_restricted_file()` (#15)**:
+    - Tracked `fd_owned` so `os.close(fd)` is never called after `os.fdopen()` assumes ownership, and tightened file permissions directly on the open descriptor via `os.fchmod(fd, 0o600)`.
+16. **TUI Row Activation Streaming Wrong Episode Under Multi-Select (#16)**:
+    - Updated `on_stream_press(self, widget=None, target_row=None)` and forwarded the explicitly activated `row` from `on_episode_activate()` so pressing `Enter` or double-clicking always streams the targeted row even when other rows are marked (`☑`).
+17. **Double Redirect Resolution & Unsilenced Browser Launches in TUI Mode (#17)**:
+    - Added `resolve: bool = True` to `launch_stream_safe()` and passed `resolve=False` from `on_stream_press()` after pre-resolution.
+    - Routed YouTube streaming through `_open_browser_quietly()`, which in live POSIX Textual TUI mode spawns `xdg-open`/`open` directly with `stdin`/`stdout`/`stderr` bound to `subprocess.DEVNULL` and `start_new_session=True` instead of mutating process-global `sys.stdout`/`sys.stderr`.
+18. **Textual Backend Lifecycle & Widget Gaps (`toga_textual_backend.py`) (#18)**:
+    - Dismissed active modal screens cleanly in `_patched_win_hide()` so `await window.dialog(...)` futures never hang.
+    - Updated `OpenFileDialog` and `SaveFileDialog` to resolve via `_resolve_dialog_future()`.
+    - Added `on_mount()` synchronization to `TogaProgressBar`, toggled `self.native.display` in `TextualActivityIndicator.start()/stop()`, and implemented incremental row insertion/removal/cell updates in `TextualTable`.
+19. **Test Suite TTY Hang, Real `.env` Mutation & Skipped Snap Checks (#19)**:
+    - Updated `test_install.py` to mock `sys.exit` with `side_effect=SystemExit(0)` (and `assertRaises(SystemExit)`), eliminating indefinite interactive TTY hangs.
+    - Isolated `SNAP_USER_DATA` with `tempfile.TemporaryDirectory()` in `test_security.py`, `test_episode_search.py`, `test_tooltips.py`, `test_preferences.py`, and `test_open_destination.py` so developer `.env` files are never overwritten during tests.
+    - Added an indentation-aware YAML section parser fallback in `test_snap.py` so Snap assertions always execute even when `PyYAML` is absent.
+20. **Snap Packaging Hygiene, `shared-mime-info`, `.env.example`, and Bundled Media Tools (#20)**:
+    - Updated `snap/snapcraft.yaml` to remove `cp -a *.py` and `*.py`/`*.md` wildcards from `stage`/`prime` (relying cleanly on `pip install .` into site-packages without bundling tests or `setup.py`).
+    - Added `shared-mime-info`, `mpv`, and `ffmpeg` to `stage-packages`, created `.env.example` (staged/primed into the Snap for `snap/local/launcher.sh`), and ensured `update-mime-database` runs during build.
+
+---
+
+### Section 3: Low / Edge-Case Fixes Implemented (#21–#23)
+
+21. **CLI Bootstrap & Fallback Quirks (`main.py`, `toga_textual_backend.py`) (#21)**:
+    - Moved `show_terminal_splash()` after `resolve_toga_backend(argv)` so `--help`, `--clean`, and `--install` do not emit the loading banner.
+    - Handled `KeyboardInterrupt` during the interactive backend prompt cleanly by aborting with exit code `130` instead of launching a default backend.
+    - Removed duplicate `patch_toga_icons()`/`patch_toga_gtk_app()` invocations on startup.
+    - Made the GTK→Textual fallback trigger apostrophe-agnostic (`"recognize the image file format"`), applied `_configure_textual_warnings()` in the fallback path, and replaced unbounded `io.StringIO()` stdout sinks with zero-allocation `_NullTextIO`.
+22. **PyInstaller Packaging Edge Cases (`installer.py`) (#22)**:
+    - Added `_probe_packages_in_interpreter()` to inspect `toga_gtk`, `gi`, and `yt_dlp` in the target `--python-executable` rather than the host interpreter.
+    - Scoped `--hidden-import=gi.overrides.Gtk` and `gi.overrides.Pango` to non-Windows builds where `gi` is available, and collected `yt_dlp` when installed.
+    - Filtered active virtualenvs, relative `.`, `/tmp`, and language-toolchain directories (`/.venv/`, `/.cargo/`, `/.nvm/`, `/.pyenv/`, `/node_modules/`) out of `find_local_executable_path()`.
+    - Respected the active process `umask` when setting executable permissions (`(0o755 & ~umask) | 0o700`) and made `--strip` opt-in (`strip_binary=False` by default, `--strip` CLI flag).
+23. **Configuration, Cleanup, Filename, Dialog & API Edge Cases (`twittui_form.py`) (#23)**:
+    - Added `_schedule_env_save()` / `_flush_pending_env_saves()` (0.35s UI-loop debounce flushed on Preferences close and app exit), numeric validation in `on_block_change()` / `on_rate_limit_change()`, and kept `api_rate_limiter.rate_limit` bound to `self.get_rate_limit`.
+    - Preserved custom Club TWiT Memberful feed IDs (e.g. `.../rss/9055?auth=...`) in Preferences instead of resetting them to `9041`.
+    - Added `_cleanup_resources_for_exit()` in `on_close_press()` to flush pending `.env` writes, set `_cancel_download = True`, and cleanly shut down `_LocalHTMLServer` (`shutdown()` + `server_close()`).
+    - Pruned stale temporary HTML files in `open_html_in_browser()`, added `_sanitize_fs_component()` (stripping control characters, leading/trailing dots, and clamping filenames to POSIX 255-byte `NAME_MAX`), migrated all 14 dialog sites to Toga 0.5 `InfoDialog`/`ErrorDialog` via `_present_window_dialog()`, switched `test_api_credentials()` to `shows?page=1&range=1`, guarded unverified guessed transcript URLs behind `allow_guess=False` without dead dict mutations, removed `.git` from `TWITTUI_HOMEPAGE_URL`, removed redundant `ep_title` computation, and cleaned up unused imports.
+
+---
+
+### Section 4: Architectural & Quality Suggestions Implemented (#1–#7)
+
+1. **Decomposed Core Subsystems into the `twittui/` Package (Suggestion #1)**:
+   - Created `twittui/` with cohesive modules (`__init__.py`, `logging_config.py`, `shows.py`, `config.py`, `rate_limiter.py`, `media.py`, `viewer.py`, `cache.py`), extracting ~870+ lines out of `twittui_form.py` while keeping all public symbols and mock targets (`twittui_form.requests`, `twittui_form.resolve_stream_url`, `twittui_form.subprocess.Popen`) 100% backward-compatible.
+2. **Structured Logging & Elimination of Silent `except Exception: pass` Handlers (Suggestion #2)**:
+   - Implemented `twittui/logging_config.py` (`configure_logging`, `get_logger`, `reset_logging`) with `--log-file` / `--log-level` CLI switches in `main.py` and `TWITTUI_LOG_FILE` / `TWITTUI_LOG_LEVEL` environment support, creating `0o600` log files while keeping default logging silent (`NullHandler`, `propagate = False`).
+   - Replaced all broad silent `except Exception: pass` handlers across `twittui_form.py`, `toga_textual_backend.py`, `main.py`, `tiered_search.py`, `installer.py`, and `twittui/*.py` (0 remaining, guarded by an AST regression test in `test_architecture_suggestions.py`).
+3. **Normalized SQLite Cache, WAL Mode, 24-Hour TTL & Bounded-Concurrency Show-Date Scraping (Suggestion #3)**:
+   - Added the normalized `twittui_episodes(show_id, episode_key, position, airing_date, data_json, updated_at)` table with `PRAGMA journal_mode = WAL`, indexes on `(show_id, position)` and `(show_id, airing_date)`, lazy on-first-read migration of legacy monolithic `twittui_cache` episode blobs, and `VACUUM` + `PRAGMA wal_checkpoint(TRUNCATE)` on full cache clear.
+   - Enforced a 24-hour TTL (`SHOW_DATE_BOUNDS_TTL_SECONDS = 86400`) on `show_date_bounds` rows during startup cache initialization, automatically expiring and purging stale entries.
+   - Upgraded `_refresh_show_dates()` to run up to 4 archive date-bound scrapes concurrently (`max_concurrent=4`) while preserving exact single-show and catalog wait-modal coordination.
+4. **Unified Dependency & Packaging Metadata (Suggestion #4)**:
+   - Synchronized `pyproject.toml`, `setup.py` (fixing its unclosed `open("README.md")` file handle with a context manager), and `requirements.txt` with `packages=["twittui"]`, platform-conditioned `toga-gtk` (`sys_platform == "linux"`), `yt-dlp`, and optional extras (`gtk`, `textual`, `youtube`, `security` [`defusedxml`, `nh3`], `fast-search` [`rapidfuzz`], `xml` [`lxml`], `dev` [`PyYAML`, `ruff`, `mypy`]).
+   - Added `"twittui"` to PyInstaller collection (`--collect-all=twittui`) in `installer.py`.
+5. **Consolidated Four Diverging Show Registries into `SHOW_REGISTRY` (Suggestion #5)**:
+   - Created `ShowEntry` and `SHOW_REGISTRY` in `twittui/shows.py` as the single source of truth deriving `KNOWN_SHOW_FEEDS`, `MEMBERFUL_SHOW_FEEDS`, `SHOW_SEARCH_SLUGS` (replacing inline `abbrevs` in `search_episodes()`), and `TRANSCRIPT_SLUG_MAP` (replacing inline `short_map` in `generate_transcript_slug_candidates()`), filling in missing entries for *FLOSS Weekly*, *Hands-On Photography*, *This Week in Enterprise Tech*, *This Week in Google*, *All About Android*, *Intelligent Machines*, *Smart Tech Today*, and *Know How*.
+6. **Repository Hygiene & GitHub Actions CI (Suggestion #6)**:
+   - Added `*.egg-info/`, `*.log`, and `*.spec` to `.gitignore` and removed `twittui.egg-info/` from git tracking (`git rm -r --cached`).
+   - Added `.github/workflows/ci.yml` running `py_compile *.py twittui/*.py` and the full `unittest` suite under `xvfb-run` on Python 3.11 and 3.12 with `PyYAML` installed and isolated `SNAP_USER_DATA` / `TWITTUI_CACHE_DB`.
+7. **Reconciled Documentation Drift in `Technical_review.md` (Suggestion #7)**:
+   - Updated every drifted section of `Technical_review.md` to accurately reflect the `twittui/` architecture, `SHOW_REGISTRY`, `RateLimitScreen`, `TextualSelectFolderScreen`, `patch_toga_gtk_app()`, allowlist `HTMLParser` / `nh3` / `bleach` sanitizer, path-segment `_LocalHTMLHandler` token + clean shutdown, non-reentrant `ApiRateLimiter.lock`, normalized WAL SQLite schema + SHA-256 keys + 24-hour TTL, `tiered_search.py` threshold (`68.0`) & field priority, debounced `0o600` `.env` persistence, Snap/PyInstaller/CI tooling, and the 25-module / 300-test suite matrix.

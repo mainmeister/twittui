@@ -36,7 +36,51 @@ import json
 import sqlite3
 from dotenv import find_dotenv, load_dotenv, set_key
 
-from tiered_search import rank_and_filter_episodes, compute_match_score, find_match_context, MatchContext
+from tiered_search import rank_and_filter_episodes, compute_match_score, find_match_context
+from twittui.logging_config import configure_logging, get_logger
+from twittui.cache import (
+    SHOW_DATE_BOUNDS_TTL_SECONDS,
+    _LazySQLiteEpisodesCache,
+    _restrict_file_permissions,
+    _shows_cache_key_hash,
+    delete_persistent_cache,
+    ensure_cache_schema,
+    episode_cache_key,
+    get_cache_db_path,
+    save_normalized_episodes,
+)
+from twittui.config import (
+    TWIT_API_DOCS_URL,
+    TWIT_API_KEY_URL,
+    TWITTUI_HOMEPAGE_URL,
+    load_twittui_dotenv,
+    write_restricted_file,
+)
+from twittui.media import (
+    build_stream_args,
+    is_safe_http_url,
+    launch_stream_safe as _launch_stream_safe_impl,
+    resolve_stream_url,
+    safe_xml_fromstring,
+)
+from twittui.rate_limiter import ApiRateLimiter as _BaseApiRateLimiter
+from twittui.shows import (
+    DEFAULT_SHOWS,
+    KNOWN_SHOW_FEEDS,
+    MEMBERFUL_HOST_FEEDS,
+    MEMBERFUL_SHOW_FEEDS,
+    SHOW_REGISTRY,
+    SHOW_SEARCH_SLUGS,
+    TRANSCRIPT_SLUG_MAP,
+    ShowEntry,
+    get_show_entry,
+)
+from twittui.viewer import (
+    _LocalHTMLHandler,
+    _LocalHTMLServer,
+    generate_local_server_token,
+    sanitize_html_content,
+)
 
 try:
     import defusedxml.ElementTree as DefusedET
@@ -44,9 +88,7 @@ except ImportError:
     DefusedET = None
 
 
-_logger = logging.getLogger("twittui")
-if not _logger.handlers:
-    _logger.addHandler(logging.NullHandler())
+_logger = get_logger()
 
 
 def _is_textual_environment(app: Any = None) -> bool:
@@ -55,7 +97,7 @@ def _is_textual_environment(app: Any = None) -> bool:
     if target_app is None:
         try:
             target_app = toga.App.app
-        except Exception:
+        except AttributeError:
             target_app = None
     if target_app is not None:
         impl = getattr(target_app, "_impl", None)
@@ -74,7 +116,7 @@ def _is_textual_tui_running(app: Any = None) -> bool:
     if target_app is None:
         try:
             target_app = toga.App.app
-        except Exception:
+        except AttributeError:
             target_app = None
     if target_app is None:
         return False
@@ -99,312 +141,19 @@ def print(*args: Any, **kwargs: Any) -> None:
         _logger.debug("%s", msg)
 
 
-class _LazySQLiteEpisodesCache(dict):
-    """Dictionary backed by SQLite that loads large per-show episode lists on demand."""
+class ApiRateLimiter(_BaseApiRateLimiter):
+    """TwitTUIForm-bound ApiRateLimiter that honors patches on ``twittui_form.requests``."""
 
-    def __init__(self, db_path: str | None = None, unloaded_keys: set[str] | None = None) -> None:
-        super().__init__()
-        self._db_path = db_path
-        self._unloaded_keys: set[str] = set(unloaded_keys) if unloaded_keys else set()
-
-    def _load_key(self, key: str) -> None:
-        self._unloaded_keys.discard(key)
-        if not self._db_path:
-            return
-        try:
-            with sqlite3.connect(self._db_path, timeout=10.0) as conn:
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT data_json FROM twittui_cache WHERE category = 'episodes' AND cache_key = ?",
-                    (key,),
-                )
-                row = cur.fetchone()
-                if row and row[0]:
-                    super().__setitem__(key, json.loads(row[0]))
-        except Exception:
-            pass
-
-    def __contains__(self, key: object) -> bool:
-        return super().__contains__(key) or (isinstance(key, str) and key in self._unloaded_keys)
-
-    def __getitem__(self, key: str) -> Any:
-        if not super().__contains__(key) and isinstance(key, str) and key in self._unloaded_keys:
-            self._load_key(key)
-        return super().__getitem__(key)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        if not super().__contains__(key) and isinstance(key, str) and key in self._unloaded_keys:
-            self._load_key(key)
-        return super().get(key, default)
-
-    def setdefault(self, key: str, default: Any = None) -> Any:
-        if not super().__contains__(key) and isinstance(key, str) and key in self._unloaded_keys:
-            self._load_key(key)
-        if super().__contains__(key):
-            return super().__getitem__(key)
-        self[key] = default
-        return default
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        if isinstance(key, str):
-            self._unloaded_keys.discard(key)
-        super().__setitem__(key, value)
-
-    def __delitem__(self, key: str) -> None:
-        was_unloaded = isinstance(key, str) and key in self._unloaded_keys
-        if was_unloaded:
-            self._unloaded_keys.discard(key)
-        if super().__contains__(key):
-            super().__delitem__(key)
-        elif not was_unloaded:
-            raise KeyError(key)
-
-    def pop(self, key: str, *args: Any) -> Any:
-        if not super().__contains__(key) and isinstance(key, str) and key in self._unloaded_keys:
-            self._load_key(key)
-        return super().pop(key, *args)
-
-    def update(self, *args: Any, **kwargs: Any) -> None:
-        if len(args) > 1:
-            raise TypeError(f"update expected at most 1 arguments, got {len(args)}")
-        if args:
-            other = args[0]
-            if isinstance(other, _LazySQLiteEpisodesCache):
-                # Merge already-loaded entries without triggering eager SQLite loads on unloaded keys
-                for k, v in dict.items(other):
-                    self[k] = v
-                for k in other._unloaded_keys:
-                    if not super().__contains__(k):
-                        self._unloaded_keys.add(k)
-            elif isinstance(other, Mapping):
-                for k in other:
-                    self[k] = other[k]
-            elif hasattr(other, "keys"):
-                for k in other.keys():
-                    self[k] = other[k]
-            else:
-                for k, v in other:
-                    self[k] = v
-        for k, v in kwargs.items():
-            self[k] = v
-
-    def __iter__(self) -> Any:
-        loaded = list(dict.keys(self))
-        yield from loaded
-        loaded_set = set(loaded)
-        for k in list(self._unloaded_keys):
-            if k not in loaded_set:
-                yield k
-
-    def keys(self) -> Any:
-        return KeysView(self)
-
-    def values(self) -> Any:
-        return ValuesView(self)
-
-    def items(self) -> Any:
-        return ItemsView(self)
-
-    def __or__(self, other: Any) -> Any:
-        if not isinstance(other, dict):
-            return NotImplemented
-        merged = self.copy()
-        merged.update(other)
-        return merged
-
-    def __ior__(self, other: Any) -> "_LazySQLiteEpisodesCache":
-        self.update(other)
-        return self
-
-    def clear(self) -> None:
-        self._unloaded_keys.clear()
-        super().clear()
-
-    def __len__(self) -> int:
-        return super().__len__() + len(self._unloaded_keys)
-
-    def __bool__(self) -> bool:
-        return bool(super().__len__() or self._unloaded_keys)
-
-    def copy(self) -> "_LazySQLiteEpisodesCache":
-        clone = _LazySQLiteEpisodesCache(self._db_path, set(self._unloaded_keys))
-        for k, v in dict.items(self):
-            dict.__setitem__(clone, k, v)
-        return clone
-
-
-class ApiRateLimiter:
-    """Limit API request starts across all threads in this process."""
-
-    def __init__(self, rate_limit=5):
-        self.timestamps = deque()
-        self.lock = threading.Lock()
-        self.wait_callback = None
-        self.rate_limit = rate_limit
-
-    def _sleep(self, delay):
-        time.sleep(delay)
-
-    def get_rate_limit(self):
-        if callable(self.rate_limit):
-            try:
-                val = int(self.rate_limit())
-                return val if val > 0 else 5
-            except Exception:
-                return 5
-        if self.rate_limit is not None:
-            try:
-                val = int(self.rate_limit)
-                return val if val > 0 else 5
-            except Exception:
-                pass
-        env_val = os.getenv('twitapiratelimit') or os.getenv('TWITAPIRATELIMIT') or os.getenv('twitclubratelimit') or os.getenv('TWITCLUBRATELIMIT') or os.getenv('TWIT_API_RATE_LIMIT')
-        if env_val:
-            try:
-                val = int(env_val)
-                return val if val > 0 else 5
-            except Exception:
-                pass
-        return 5
-
-    def get(self, url, **kwargs):
-        callback = self.wait_callback
-        if callback:
-            callback(True)
-        try:
-            return self._get(url, **kwargs)
-        finally:
-            if callback:
-                callback(False)
-
-    def _get(self, url, **kwargs):
-        with self.lock:
-            retried = False
-            while True:
-                now = time.monotonic()
-                while self.timestamps and now - self.timestamps[0] >= 60:
-                    self.timestamps.popleft()
-                delay = max(0, 1 - (now - self.timestamps[-1])) if self.timestamps else 0
-                limit = self.get_rate_limit()
-                if len(self.timestamps) >= limit:
-                    delay = max(delay, 60 - (now - self.timestamps[0]))
-                if delay <= 0:
-                    self.timestamps.append(now)
-                    response = requests.get(url, **kwargs)
-                    body = getattr(response, 'text', '')
-                    body_str = body.lower() if isinstance(body, str) else ''
-                    reason_str = str(getattr(response, 'reason', '')).lower()
-                    if (not retried and response.status_code == 500
-                            and 'usage limits are exceeded' in body_str):
-                        retried = True
-                        now_current = time.monotonic()
-                        latest_timestamp = self.timestamps[-1] if self.timestamps else now_current
-                        wait_time = max(0.0, 10.0 - (now_current - latest_timestamp))
-                        self._sleep(wait_time if wait_time > 0 else 10.0)
-                        continue
-                    if (not retried and response.status_code == 403
-                            and ('request blocked' in body_str or 'request blocked' in reason_str
-                                 or 'rate limit' in body_str or 'usage limit' in body_str)):
-                        retried = True
-                        now_current = time.monotonic()
-                        latest_timestamp = self.timestamps[-1] if self.timestamps else now_current
-                        wait_time = max(0.0, 10.0 - (now_current - latest_timestamp))
-                        self._sleep(wait_time if wait_time > 0 else 10.0)
-                        continue
-                    return response
-                self._sleep(delay)
+    def _resolve_http_get(self):
+        if callable(self._http_get_provider):
+            return self._http_get_provider()
+        return requests.get
 
 
 api_rate_limiter = ApiRateLimiter()
 
-
-def load_twittui_dotenv() -> None:
-    """Ensure environment variables are loaded from .env with override=True so file values take precedence."""
-    try:
-        dotenv_path = None
-        snap_data = os.environ.get('SNAP_USER_DATA') or os.environ.get('SNAP_USER_COMMON')
-        if snap_data:
-            snap_env = os.path.join(snap_data, '.env')
-            if os.path.exists(snap_env):
-                dotenv_path = snap_env
-        if not dotenv_path:
-            dotenv_path = find_dotenv(usecwd=True)
-        if not dotenv_path:
-            candidate = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
-            if os.path.exists(candidate):
-                dotenv_path = candidate
-        if dotenv_path:
-            load_dotenv(dotenv_path, override=True)
-        else:
-            load_dotenv(override=True)
-    except Exception:
-        load_dotenv(override=True)
-
-
 # Ensure environment variables are loaded
 load_twittui_dotenv()
-
-
-def _shows_cache_key_hash(app_id: str, app_key: str) -> str:
-    """Return a SHA-256 digest of API credentials so secrets are never stored verbatim in SQLite."""
-    payload = f"{app_id}\0{app_key}".encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _restrict_file_permissions(file_path: str | None, mode: int = 0o600) -> None:
-    """Enforce owner-only permissions on sensitive local files (skipping SQLite :memory:)."""
-    if not file_path or file_path == ":memory:":
-        return
-    try:
-        if os.path.exists(file_path):
-            os.chmod(file_path, mode)
-    except Exception:
-        pass
-
-
-def get_cache_db_path(app_id: str | None = None, custom_path: str | None = None) -> str:
-    """Resolve persistent SQLite cache database file path."""
-    if custom_path:
-        return custom_path
-    env_path = os.environ.get('TWITTUI_CACHE_DB') or os.environ.get('TWIT_CACHE_DB')
-    if env_path:
-        if env_path == ':memory:':
-            return ':memory:'
-        try:
-            parent = os.path.dirname(os.path.abspath(env_path))
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            return os.path.abspath(env_path)
-        except Exception:
-            return env_path
-
-    if app_id == 'org.twit.test':
-        return os.path.join(tempfile.gettempdir(), f"twittui_test_cache_{secrets.token_hex(8)}.db")
-
-    snap_data = os.environ.get('SNAP_USER_DATA') or os.environ.get('SNAP_USER_COMMON')
-    if snap_data:
-        try:
-            os.makedirs(snap_data, mode=0o700, exist_ok=True)
-            return os.path.join(snap_data, 'twittui_cache.db')
-        except Exception:
-            pass
-
-    user_cache = os.path.join(os.path.expanduser('~'), '.cache', 'twittui')
-    try:
-        os.makedirs(user_cache, mode=0o700, exist_ok=True)
-        try:
-            os.chmod(user_cache, 0o700)
-        except Exception:
-            pass
-        return os.path.join(user_cache, 'twittui_cache.db')
-    except Exception:
-        pass
-
-    try:
-        candidate_dir = os.path.dirname(os.path.abspath(__file__))
-        return os.path.join(candidate_dir, 'twittui_cache.db')
-    except Exception:
-        return os.path.abspath('twittui_cache.db')
 
 # Universal Toga Widget Tooltip Support
 def apply_tooltip_to_impl(impl: Any, tooltip_text: str | None) -> None:
@@ -425,13 +174,13 @@ def apply_tooltip_to_impl(impl: Any, tooltip_text: str | None) -> None:
             try:
                 target.set_tooltip_text(tooltip_text if tooltip_text else None)
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'apply_tooltip_to_impl', exc_info=True)
         # Textual backend support (textual.widget.Widget)
         if hasattr(target, 'tooltip'):
             try:
                 target.tooltip = tooltip_text if tooltip_text else None
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'apply_tooltip_to_impl', exc_info=True)
 
 
 def get_widget_tooltip(widget: toga.Widget) -> str | None:
@@ -485,7 +234,7 @@ def _unset_gtk_module_env() -> None:
             for var in env_vars:
                 libc.unsetenv(var.encode("ascii"))
     except Exception:
-        pass
+        _logger.debug("Ignored exception in %s", '_unset_gtk_module_env', exc_info=True)
 
 
 def patch_toga_icons(include_gtk: bool = True) -> None:
@@ -509,7 +258,7 @@ def patch_toga_icons(include_gtk: bool = True) -> None:
                     try:
                         placeholder._impl = placeholder.factory.Icon(interface=placeholder, path={})
                     except Exception:
-                        pass
+                        _logger.debug("Ignored exception in %s", 'patch_toga_icons.safe_cached_get', exc_info=True)
                     setattr(cls, attr_name, placeholder)
 
                     value = orig_cached_get(self, obj, owner)
@@ -521,7 +270,7 @@ def patch_toga_icons(include_gtk: bool = True) -> None:
             toga.icons.CachedIcon.__get__ = safe_cached_get
             toga.icons.CachedIcon._twittui_cached_icon_patched = True
     except Exception:
-        pass
+        _logger.debug("Ignored exception in %s", 'patch_toga_icons', exc_info=True)
 
     if not include_gtk:
         return
@@ -547,12 +296,12 @@ def patch_toga_icons(include_gtk: bool = True) -> None:
                                 GdkPixbuf.Colorspace.RGB, True, 8, size, size
                             )
                         except Exception:
-                            pass
+                            _logger.debug("Ignored exception in %s", 'patch_toga_icons.safe_gtk_icon_init', exc_info=True)
 
             toga_gtk.icons.Icon.__init__ = safe_gtk_icon_init
             toga_gtk.icons.Icon._twittui_gtk_icon_patched = True
     except Exception:
-        pass
+        _logger.debug("Ignored exception in %s", 'patch_toga_icons', exc_info=True)
 
 
 def patch_toga_gtk_app() -> None:
@@ -575,13 +324,13 @@ def patch_toga_gtk_app() -> None:
                 current_flags = self.native.get_flags()
                 self.native.set_flags(current_flags | Gio.ApplicationFlags.NON_UNIQUE)
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'patch_toga_gtk_app.safe_gtk_app_init', exc_info=True)
 
         if not getattr(toga_gtk.app.App, "_twittui_non_unique_patched", False):
             toga_gtk.app.App.__init__ = safe_gtk_app_init
             toga_gtk.app.App._twittui_non_unique_patched = True
     except Exception:
-        pass
+        _logger.debug("Ignored exception in %s", 'patch_toga_gtk_app', exc_info=True)
 
 
 # Initialize Toga tooltip and icon resilience support
@@ -597,274 +346,7 @@ try:
     from toga_textual_backend import patch_toga_textual
     patch_toga_textual()
 except Exception:
-    pass
-
-# Mapping of known show names/slugs to feeds.twit.tv feed filenames
-KNOWN_SHOW_FEEDS = {
-    'this week in tech': ['twit_video_hd.xml', 'twit.xml'],
-    'security now': ['sn_video_hd.xml', 'sn.xml'],
-    'macbreak weekly': ['mbw_video_hd.xml', 'mbw.xml'],
-    'windows weekly': ['ww_video_hd.xml', 'ww.xml'],
-    'tech news weekly': ['tnw_video_hd.xml', 'tnw.xml'],
-    'hands-on tech': ['hot_video_hd.xml', 'hot.xml'],
-    'hands-on ai': ['hoa_video_hd.xml', 'hoa.xml'],
-    'hands-on mac': ['hom_video_hd.xml', 'hom.xml'],
-    'hands-on windows': ['how_video_hd.xml', 'how.xml'],
-    'this week in space': ['twis_video_hd.xml', 'twis.xml'],
-    'untitled linux show': ['uls_video_hd.xml', 'uls.xml'],
-    'ios today': ['iost_video_hd.xml', 'iost.xml'],
-    'intelligent machines': ['im_video_hd.xml', 'im.xml'],
-    'ask the tech guys': ['attg_video_hd.xml', 'attg.xml'],
-    'ask the tech guy': ['attg_video_hd.xml', 'attg.xml'],
-    'the tech guy': ['ttg_video_hd.xml', 'ttg.xml'],
-    'triangulation': ['tri_video_hd.xml', 'tri.xml'],
-    'home theater geeks': ['htg_video_hd.xml', 'htg.xml'],
-    'all about android': ['aaa_video_hd.xml', 'aaa.xml'],
-    'all twit.tv shows': ['twit_video_hd.xml', 'twit.xml']
-}
-
-# Mapping of show names to Memberful / Club TWiT feed IDs (Video & Audio)
-MEMBERFUL_SHOW_FEEDS = {
-    'all twit.tv shows': [9041, 9040],
-    'this week in tech': [9067, 9066],
-    'security now': [9055, 9054],
-    'macbreak weekly': [9051, 9050],
-    'windows weekly': [9079, 9078],
-    'tech news weekly': [9059, 9058],
-    'ask the tech guys': [9061, 9060],
-    'ask the tech guy': [9061, 9060],
-    'ios today': [9049, 9048],
-    'intelligent machines': [9065, 9064],
-    'hands-on tech': [9047, 9046],
-    'hands-on photography': [9045, 9044],
-    'floss weekly': [9043, 9042],
-    'all about android': [9039, 9038],
-    'smart tech today': [9057, 9056],
-    'this week in enterprise tech': [9063, 9062],
-    'twit news': [9077, 9076],
-    'twit+ news': [9077, 9076],
-    'twit events': [9037, 9036],
-    'twit+ clips': [9162, 9161],
-    'twit+ club shows': [9162, 9161, 9073, 9072, 9053, 9052, 9075, 9074, 9069, 9068],
-    'ai inside': [9073, 9072],
-    'total jason': [9073, 9072],
-    'total leo': [9053, 9052],
-    'total mikah': [9075, 9074],
-    'total ant': [9069, 9068]
-}
-
-# Host and network-wide Club TWiT feeds for deeper episode discovery
-MEMBERFUL_HOST_FEEDS = [9073, 9072, 9053, 9052, 9075, 9074, 9069, 9068, 9162, 9161]
-
-# TWiT API Documentation URL
-TWIT_API_KEY_URL = 'https://apidocs.twit.tv/'
-TWIT_API_DOCS_URL = 'https://apidocs.twit.tv/'
-
-# TwitTUI Project Homepage URL
-TWITTUI_HOMEPAGE_URL = 'https://github.com/mainmeister/twittui.git'
-
-DEFAULT_SHOWS = [
-    ("AI Inside", "846616"),
-    ("Abby's Road", "1652"),
-    ("All About Android", "1665"),
-    ("All TWiT.tv Shows", "65161"),
-    ("Android App Arena", "1684"),
-    ("Ask The Tech Guy", "791331"),
-    ("Ask The Tech Guys", "1642"),
-    ("Hands-On AI", "862716"),
-    ("Hands-On Tech", "726171"),
-    ("Hands-On Windows", "837161"),
-    ("Home Theater Geeks", "1657"),
-    ("Intelligent Machines", "1653"),
-    ("MacBreak Weekly", "1643"),
-    ("Security Now", "1636"),
-    ("TWiT+ Clips", "825225"),
-    ("TWiT+ Club Shows", "856957"),
-    ("TWiT+ News", "856956"),
-    ("Tech News Weekly", "540261"),
-    ("This Week in Space", "832621"),
-    ("This Week in Tech", "1635"),
-    ("Total Leo", "1647"),
-    ("Total Mikah", "813334"),
-    ("Triangulation", None),
-    ("Untitled Linux Show", "832795"),
-    ("Windows Weekly", "1645"),
-    ("iOS Today", "1660")
-]
-
-
-def generate_local_server_token() -> str:
-    """Generate a random URL-safe token for local server requests."""
-    return secrets.token_urlsafe(24)
-
-
-def write_restricted_file(file_path: str, content: str) -> None:
-    """Write sensitive content to disk with 0o600 (owner-only) permissions."""
-    flags: int = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd: int = os.open(file_path, flags, 0o600)
-    fd_owned: bool = True
-    try:
-        try:
-            if hasattr(os, "fchmod"):
-                os.fchmod(fd, 0o600)
-            else:
-                os.chmod(file_path, 0o600)
-        except Exception:
-            try:
-                os.chmod(file_path, 0o600)
-            except Exception:
-                pass
-        handle = os.fdopen(fd, "w", encoding="utf-8")
-        fd_owned = False
-        with handle:
-            handle.write(content)
-    except Exception:
-        if fd_owned:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        raise
-
-
-def safe_xml_fromstring(xml_data: bytes | str) -> ET.Element:
-    """Parse XML string or bytes safely using defusedxml if available."""
-    if isinstance(xml_data, str):
-        data_bytes = xml_data.encode('utf-8', errors='replace')
-    else:
-        data_bytes = xml_data
-
-    if DefusedET is not None:
-        return DefusedET.fromstring(data_bytes)
-
-    return ET.fromstring(data_bytes)
-
-
-def is_safe_http_url(url: str) -> bool:
-    """Check if a URL uses a safe web scheme (http or https)."""
-    if not url or not isinstance(url, str):
-        return False
-    u = url.strip()
-    return u.startswith('http://') or u.startswith('https://')
-
-
-def resolve_stream_url(media_url: str, timeout: float = 10.0) -> str:
-    """Resolve redirect chains (e.g. podcast tracking/analytics URLs) to the final playable media stream URL.
-
-    Args:
-        media_url: The source media URL (may be wrapped by podcast analytics or multi-hop redirects).
-        timeout: Maximum duration in seconds for HTTP redirect resolution.
-
-    Returns:
-        The resolved destination media URL, or the unwrapped / original URL upon failure.
-    """
-    if not media_url or not isinstance(media_url, str):
-        return media_url
-
-    clean_url: str = media_url.strip()
-    parsed: urllib.parse.SplitResult = urllib.parse.urlsplit(clean_url)
-    if parsed.scheme.lower() not in {"http", "https"}:
-        return clean_url
-
-    # Do not follow redirects for YouTube stream URLs
-    if re.search(r'(?:youtube\.com/|youtu\.be/)', clean_url, re.IGNORECASE):
-        return clean_url
-
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0 (compatible; TwitTUI/1.0)'}
-        head_resp = requests.head(clean_url, headers=headers, allow_redirects=True, timeout=timeout)
-        if head_resp.status_code < 400 and head_resp.url:
-            return head_resp.url
-        with requests.get(clean_url, headers=headers, stream=True, allow_redirects=True, timeout=timeout) as get_resp:
-            if get_resp.status_code < 400 and get_resp.url:
-                return get_resp.url
-    except Exception as e:
-        print(f"Note: Could not resolve redirects for stream URL: {e}")
-
-    # Fallback: Unwrap known podcast tracking / redirect prefixes if HTTP resolution failed or was unreachable
-    try:
-        match = re.search(r'(https?://(?:cdn\.twit\.tv|twit\.cachefly\.net|episodes\.captivate\.fm|podcasts\.captivate\.fm)/.+)$', clean_url)
-        if match:
-            return match.group(1)
-        elif re.search(r'/(?:pdst\.fm|pscrb\.fm|mgln\.ai|dts\.podtrac\.com|chrt\.fm|traffic\.megaphone\.fm)/', clean_url):
-            match = re.search(r'(https?://[^/]+/(?:cap|video|members)/.+)$', clean_url)
-            if match:
-                return match.group(1)
-            else:
-                match = re.search(r'/(cdn\.twit\.tv/.+)$', clean_url)
-                if match:
-                    return f"https://{match.group(1)}"
-    except Exception:
-        pass
-
-    return clean_url
-
-
-def build_stream_args(
-    streamer_template: str,
-    media_url: str,
-) -> list[str]:
-    """Build a safe argument list for subprocess.Popen without shell=True.
-
-    Args:
-        streamer_template: Command template (e.g., 'env LC_ALL=C vlc %f').
-        media_url: Validated stream URL.
-
-    Returns:
-        List of command arguments for subprocess execution.
-
-    Raises:
-        ValueError: If media_url uses an unsupported scheme or contains whitespace.
-    """
-    if not media_url or not isinstance(media_url, str):
-        raise ValueError("Invalid media URL.")
-
-    clean_url: str = media_url.strip()
-    parsed: urllib.parse.SplitResult = urllib.parse.urlsplit(clean_url)
-    if parsed.scheme.lower() not in {"https", "http", "rtsp", "mms"}:
-        raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
-    if any(ch.isspace() for ch in clean_url):
-        raise ValueError("Media URL must not contain whitespace.")
-
-    template: str = (streamer_template or "env LC_ALL=C vlc %f").strip()
-    try:
-        tokens: list[str] = shlex.split(template)
-    except Exception:
-        tokens = [template]
-
-    if not tokens:
-        tokens = ["env", "LC_ALL=C", "vlc", "%f"]
-
-    placeholders: tuple[str, ...] = (
-        "{url}",
-        "{URL}",
-        "{stream_url}",
-        "{media_url}",
-        "{file}",
-        "%f",
-        "%s",
-        "%u",
-        "{}",
-    )
-
-    replaced: bool = False
-    final_args: list[str] = []
-    for token in tokens:
-        matched_ph: str | None = next(
-            (ph for ph in placeholders if ph in token),
-            None,
-        )
-        if matched_ph is not None:
-            final_args.append(token.replace(matched_ph, clean_url))
-            replaced = True
-        else:
-            final_args.append(token)
-
-    if not replaced:
-        final_args.append(clean_url)
-
-    return final_args
-
+    _logger.debug("Ignored exception in %s", '<module>', exc_info=True)
 
 def launch_stream_safe(
     streamer_template: str,
@@ -872,92 +354,15 @@ def launch_stream_safe(
     *,
     resolve: bool = True,
 ) -> subprocess.Popen:
-    """Spawn the external media player safely with shell=False.
-
-    Args:
-        streamer_template: Command template configured by the user.
-        media_url: Target stream URL.
-        resolve: Whether to follow HTTP redirects via resolve_stream_url() first.
-
-    Returns:
-        The spawned Popen process instance.
-    """
-    resolved_url: str = resolve_stream_url(media_url) if resolve else media_url
-    args: list[str] = build_stream_args(streamer_template, resolved_url)
-
-    if _is_textual_tui_running():
-        # On headless Unix terminals without X11/Wayland, run VLC with its dummy audio interface
-        # so it does not attempt to attach a console interface or exit immediately.
-        if (
-            sys.platform != "win32"
-            and not os.environ.get("DISPLAY")
-            and not os.environ.get("WAYLAND_DISPLAY")
-        ):
-            for idx, tok in enumerate(args):
-                base_tok = os.path.basename(tok).lower()
-                if base_tok == "vlc" and "-I" not in args and "--intf" not in args:
-                    args = args[: idx + 1] + ["-I", "dummy"] + args[idx + 1 :]
-                    break
-
-        popen_kwargs: dict[str, Any] = {
-            "shell": False,
-            "stdin": subprocess.DEVNULL,
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
-        }
-        if sys.platform == "win32":
-            detached_flag = getattr(subprocess, "DETACHED_PROCESS", 0)
-            if detached_flag:
-                popen_kwargs["creationflags"] = detached_flag
-        else:
-            popen_kwargs["start_new_session"] = True
-        return subprocess.Popen(args, **popen_kwargs)
-
-    return subprocess.Popen(args, shell=False)
-
-
-class _LocalHTMLServer(http.server.HTTPServer):
-    def __init__(self, server_address, RequestHandlerClass):
-        super().__init__(server_address, RequestHandlerClass)
-        self.pages = {}
-        self.lock = threading.Lock()
-        self.secret_token = generate_local_server_token()
-
-
-class _LocalHTMLHandler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        parsed = urllib.parse.urlparse(self.path)
-        path_parts = [p for p in parsed.path.strip('/').split('/') if p]
-
-        # Require secret session token as the first path segment
-        if not path_parts or path_parts[0] != getattr(self.server, 'secret_token', ''):
-            self.send_response(403)
-            self.send_header('Content-Type', 'text/plain; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(b'403 Forbidden: Invalid or missing session token')
-            return
-
-        path_key = path_parts[1] if len(path_parts) > 1 else 'index.html'
-
-        with self.server.lock:
-            content_bytes = self.server.pages.get(path_key) or self.server.pages.get('index.html')
-
-        if content_bytes:
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(content_bytes)))
-            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            self.end_headers()
-            self.wfile.write(content_bytes)
-        else:
-            self.send_response(404)
-            self.send_header('Content-Type', 'text/plain; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(b'404 Not Found')
-
-    def log_message(self, format, *args):
-        # Mute server request logging to preserve clean console output
-        pass
+    """Spawn the external media player safely with shell=False."""
+    return _launch_stream_safe_impl(
+        streamer_template,
+        media_url,
+        resolve=resolve,
+        resolver=resolve_stream_url,
+        is_tui_running=_is_textual_tui_running,
+        popen_fn=subprocess.Popen,
+    )
 
 
 def resolve_app_icon() -> str | None:
@@ -1059,6 +464,10 @@ class TwitTUIForm(toga.App):
         self._cancel_download = False
         self._download_lock = threading.Lock()
         self._cache_lock = threading.RLock()
+        self._pending_env_saves: dict[str, str] = {}
+        self._env_save_timer = None
+        self._last_saved_env: dict[str, str] = {}
+        self._club_url_prefix = 'https://twit.memberfulcontent.com/rss/9041?auth='
         self._hover_lock = threading.Lock()
         self._hover_timer = None
         self._hover_row_index = None
@@ -1099,8 +508,54 @@ class TwitTUIForm(toga.App):
                 if getattr(prefs_win, 'visible', False):
                     return prefs_win
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm._active_dialog_window', exc_info=True)
         return getattr(self, 'main_window', None)
+
+    def _present_window_dialog(
+        self,
+        win: Any,
+        kind: str,
+        title: str,
+        message: str,
+        on_result: Any = None,
+    ) -> None:
+        """Display a Toga 0.5 InfoDialog/ErrorDialog without emitting 0.4 deprecation warnings."""
+        if not win:
+            return
+        if isinstance(win, toga.Window) and hasattr(win, 'dialog'):
+            dlg = (
+                toga.ErrorDialog(title, message)
+                if kind == 'error'
+                else toga.InfoDialog(title, message)
+            )
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            if running_loop is not None:
+                task = running_loop.create_task(win.dialog(dlg))
+                if callable(on_result):
+                    task.add_done_callback(lambda _t: on_result(win, None))
+                return
+            res = dlg._show(win)
+            if callable(on_result):
+                fut = getattr(res, 'future', None)
+                if fut is not None and not fut.done():
+                    fut.add_done_callback(lambda _f: on_result(win, None))
+                else:
+                    on_result(win, None)
+            return
+        # Fallback for mock windows in unit tests
+        if kind == 'error':
+            if on_result is not None:
+                win.error_dialog(title, message, on_result=on_result)
+            else:
+                win.error_dialog(title, message)
+        else:
+            if on_result is not None:
+                win.info_dialog(title, message, on_result=on_result)
+            else:
+                win.info_dialog(title, message)
 
     def _show_dialog_threadsafe(
         self,
@@ -1108,6 +563,7 @@ class TwitTUIForm(toga.App):
         title: str,
         message: str,
         host_win: Any = None,
+        on_result: Any = None,
     ) -> None:
         """Display an info or error dialog safely on the UI thread."""
         def _present() -> None:
@@ -1115,10 +571,7 @@ class TwitTUIForm(toga.App):
                 win = host_win if host_win is not None else self._active_dialog_window()
                 if not win:
                     return
-                if kind == 'error':
-                    win.error_dialog(title, message)
-                else:
-                    win.info_dialog(title, message)
+                self._present_window_dialog(win, kind, title, message, on_result=on_result)
             except Exception as e:
                 print(f"Error displaying {kind} dialog '{title}': {e}")
 
@@ -1128,8 +581,91 @@ class TwitTUIForm(toga.App):
                 loop.call_soon_threadsafe(_present)
                 return
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm._show_dialog_threadsafe', exc_info=True)
         _present()
+
+    def _schedule_env_save(self, key: str, value: str, delay: float = 0.35) -> None:
+        """Debounce rapid .env writes on interactive UI loops while remaining immediate in sync tests."""
+        last_saved = getattr(self, '_last_saved_env', None)
+        if isinstance(last_saved, dict) and last_saved.get(key) == value:
+            return
+        loop = getattr(self, 'loop', None)
+        instance_overridden = 'save_env_setting' in getattr(self, '__dict__', {})
+        if (
+            delay > 0
+            and not instance_overridden
+            and loop is not None
+            and loop.is_running()
+            and threading.current_thread() is threading.main_thread()
+        ):
+            pending = getattr(self, '_pending_env_saves', None)
+            if not isinstance(pending, dict):
+                pending = {}
+                self._pending_env_saves = pending
+            pending[key] = value
+            timer = getattr(self, '_env_save_timer', None)
+            if timer is not None:
+                try:
+                    timer.cancel()
+                except Exception:
+                    _logger.debug("Ignored exception in %s", 'TwitTUIForm._schedule_env_save', exc_info=True)
+            try:
+                self._env_save_timer = loop.call_later(delay, self._flush_pending_env_saves)
+                return
+            except Exception:
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm._schedule_env_save', exc_info=True)
+        self.save_env_setting(key, value)
+        if isinstance(last_saved, dict):
+            last_saved[key] = value
+
+    def _flush_pending_env_saves(self) -> None:
+        """Immediately persist any debounced .env updates."""
+        timer = getattr(self, '_env_save_timer', None)
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm._flush_pending_env_saves', exc_info=True)
+            self._env_save_timer = None
+        pending = getattr(self, '_pending_env_saves', None)
+        if not isinstance(pending, dict) or not pending:
+            return
+        items = list(pending.items())
+        pending.clear()
+        last_saved = getattr(self, '_last_saved_env', None)
+        for k, v in items:
+            try:
+                self.save_env_setting(k, v)
+                if isinstance(last_saved, dict):
+                    last_saved[k] = v
+            except Exception as e:
+                print(f"Error flushing setting {k} to .env: {e}")
+
+    def _cleanup_resources_for_exit(self) -> None:
+        """Flush pending settings, cancel active downloads, and shut down _LocalHTMLServer cleanly."""
+        self._flush_pending_env_saves()
+        if getattr(self, '_is_downloading', False):
+            self._cancel_download = True
+        server = getattr(self, '_local_server', None)
+        if server is not None:
+            self._local_server = None
+            try:
+                # Run shutdown() on a helper thread with brief join so exit never deadlocks
+                def _stop_srv(srv=server) -> None:
+                    try:
+                        srv.shutdown()
+                    except Exception:
+                        _logger.debug("Ignored exception in %s", 'TwitTUIForm._cleanup_resources_for_exit._stop_srv', exc_info=True)
+                    try:
+                        srv.server_close()
+                    except Exception:
+                        _logger.debug("Ignored exception in %s", 'TwitTUIForm._cleanup_resources_for_exit._stop_srv', exc_info=True)
+
+                t = threading.Thread(target=_stop_srv, daemon=True)
+                t.start()
+                t.join(timeout=1.0)
+            except Exception:
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm._cleanup_resources_for_exit', exc_info=True)
 
     def _open_browser_quietly(self, url: str) -> bool:
         """Open a URL in the default browser while silencing child OS stdio in live TUI mode.
@@ -1167,7 +703,7 @@ class TwitTUIForm(toga.App):
         return get_widget_tooltip(widget)
 
     def _init_persistent_cache_db(self, db_path: str | None = None) -> None:
-        """Initialize SQLite database for persistent caching and load cached data."""
+        """Initialize normalized SQLite cache (WAL mode, 24h date-bound TTL, lazy episode loading)."""
         if db_path:
             self._cache_db_path = db_path
         elif not getattr(self, '_cache_db_path', None):
@@ -1181,35 +717,22 @@ class TwitTUIForm(toga.App):
                     default_cache_dir = os.path.abspath(os.path.join(os.path.expanduser('~'), '.cache', 'twittui'))
                     if os.path.abspath(parent) == default_cache_dir:
                         os.chmod(parent, 0o700)
-            except Exception:
-                pass
+            except OSError:
+                _logger.debug("Could not prepare cache directory for %s", self._cache_db_path, exc_info=True)
 
         try:
             with sqlite3.connect(self._cache_db_path, timeout=10.0) as conn:
-                _restrict_file_permissions(self._cache_db_path, 0o600)
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS twittui_cache (
-                        category TEXT NOT NULL,
-                        cache_key TEXT NOT NULL,
-                        data_json TEXT NOT NULL,
-                        created_at REAL NOT NULL,
-                        updated_at REAL NOT NULL,
-                        PRIMARY KEY (category, cache_key)
-                    )
-                    """
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_twittui_cache_category ON twittui_cache(category)"
-                )
+                ensure_cache_schema(conn, db_path=self._cache_db_path)
                 conn.commit()
 
+                now = time.time()
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT category, cache_key, data_json, created_at, updated_at FROM twittui_cache WHERE category != 'episodes'"
                 )
                 rows = cursor.fetchall()
                 legacy_shows_migrations: list[tuple[str, str, str, float, float]] = []
+                expired_date_bound_keys: list[str] = []
                 for category, key, data_json, created_at, updated_at in rows:
                     try:
                         val = json.loads(data_json)
@@ -1224,7 +747,11 @@ class TwitTUIForm(toga.App):
                             else:
                                 self._shows_cache[key] = val
                         elif category == 'show_date_bounds':
-                            self._show_date_cache[key] = tuple(val) if isinstance(val, (list, tuple)) else val
+                            age = now - float(updated_at or 0.0)
+                            if age <= SHOW_DATE_BOUNDS_TTL_SECONDS:
+                                self._show_date_cache[key] = tuple(val) if isinstance(val, (list, tuple)) else val
+                            else:
+                                expired_date_bound_keys.append(key)
                         elif category == 'episode_detail':
                             self._episode_detail_cache[key] = val
                         elif category == 'media_webpage':
@@ -1239,8 +766,18 @@ class TwitTUIForm(toga.App):
                             self._triangulation_archive_cache[(page_num, sort_flag)] = val
                         elif category == 'api_search':
                             self._api_search_cache[key] = val
-                    except Exception:
-                        pass
+                    except (ValueError, TypeError):
+                        _logger.debug("Skipping corrupted cache row (%s, %s)", category, key, exc_info=True)
+
+                if expired_date_bound_keys:
+                    try:
+                        conn.executemany(
+                            "DELETE FROM twittui_cache WHERE category = 'show_date_bounds' AND cache_key = ?",
+                            [(k,) for k in expired_date_bound_keys],
+                        )
+                        conn.commit()
+                    except sqlite3.Error:
+                        _logger.debug("Failed purging expired show_date_bounds rows", exc_info=True)
 
                 # Migrate legacy plaintext 'app_id:app_key' cache keys to SHA-256 hashes immediately
                 if legacy_shows_migrations:
@@ -1260,59 +797,52 @@ class TwitTUIForm(toga.App):
                                 (old_key,),
                             )
                         conn.commit()
-                    except Exception:
-                        pass
+                    except sqlite3.Error:
+                        _logger.debug("Legacy shows cache key migration failed", exc_info=True)
 
+                # Discover available cached shows across normalized & legacy tables without eager JSON decoding
+                cursor.execute("SELECT DISTINCT show_id FROM twittui_episodes")
+                norm_keys = {str(r[0]) for r in cursor.fetchall() if r and r[0] is not None}
                 cursor.execute("SELECT cache_key FROM twittui_cache WHERE category = 'episodes'")
-                episode_keys = {str(r[0]) for r in cursor.fetchall() if r and r[0] is not None}
+                legacy_keys = {str(r[0]) for r in cursor.fetchall() if r and r[0] is not None}
+                episode_keys = norm_keys | legacy_keys
                 lazy_eps = _LazySQLiteEpisodesCache(self._cache_db_path, episode_keys)
                 if isinstance(getattr(self, '_episodes_cache', None), dict):
                     for k, v in dict.items(self._episodes_cache):
                         lazy_eps[k] = v
                 self._episodes_cache = lazy_eps
-        except Exception:
-            pass
+        except sqlite3.Error:
+            _logger.debug("Failed to initialize SQLite cache at %s", self._cache_db_path, exc_info=True)
 
     def _save_to_persistent_cache(self, category: str, cache_key: str, data: Any) -> None:
-        """Save a cache entry dynamically to persistent SQLite database."""
+        """Save a cache entry dynamically to persistent SQLite database (normalized for episodes)."""
         db_path = getattr(self, '_cache_db_path', None) or get_cache_db_path(getattr(self, 'app_id', None))
         try:
             now = time.time()
-            data_json = json.dumps(data)
             with sqlite3.connect(db_path, timeout=10.0) as conn:
-                _restrict_file_permissions(db_path, 0o600)
-                conn.execute(
-                    """
-                    INSERT INTO twittui_cache (category, cache_key, data_json, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(category, cache_key) DO UPDATE SET
-                        data_json = excluded.data_json,
-                        updated_at = excluded.updated_at
-                    """,
-                    (category, str(cache_key), data_json, now, now)
-                )
+                ensure_cache_schema(conn, db_path=db_path)
+                if category == 'episodes' and isinstance(data, list):
+                    save_normalized_episodes(conn, str(cache_key), data, now=now, db_path=db_path)
+                else:
+                    data_json = json.dumps(data)
+                    conn.execute(
+                        """
+                        INSERT INTO twittui_cache (category, cache_key, data_json, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(category, cache_key) DO UPDATE SET
+                            data_json = excluded.data_json,
+                            updated_at = excluded.updated_at
+                        """,
+                        (category, str(cache_key), data_json, now, now)
+                    )
                 conn.commit()
-        except Exception:
-            pass
+        except (sqlite3.Error, TypeError, ValueError):
+            _logger.debug("Failed saving cache entry (%s, %s)", category, cache_key, exc_info=True)
 
     def _delete_from_persistent_cache(self, category: str | None = None) -> None:
         """Clear entries from persistent SQLite database."""
         db_path = getattr(self, '_cache_db_path', None) or get_cache_db_path(getattr(self, 'app_id', None))
-        try:
-            with sqlite3.connect(db_path, timeout=10.0) as conn:
-                if category:
-                    conn.execute("DELETE FROM twittui_cache WHERE category = ?", (category,))
-                    conn.commit()
-                else:
-                    conn.execute("DELETE FROM twittui_cache")
-                    conn.commit()
-                    if db_path and db_path != ':memory:':
-                        try:
-                            conn.execute("VACUUM")
-                        except Exception:
-                            pass
-        except Exception:
-            pass
+        delete_persistent_cache(db_path, category=category)
 
     def _network_snapshot(self):
         """Capture UI state before running network helpers in a worker."""
@@ -1481,7 +1011,7 @@ class TwitTUIForm(toga.App):
                 if hasattr(self._splash_window, 'update_message'):
                     self._splash_window.update_message(message)
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm.show_splash_screen', exc_info=True)
             return
 
         try:
@@ -1505,7 +1035,7 @@ class TwitTUIForm(toga.App):
                     width, height = self.main_window.size
                     window.position = (x + (width - 460) // 2, y + (height - 220) // 2)
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'TwitTUIForm.show_splash_screen', exc_info=True)
                 box = toga.Box(style=Pack(direction=COLUMN, margin=20))
                 box.add(toga.Label(title, style=Pack(margin=(0, 5))))
                 box.add(toga.Label(message, style=Pack(margin=(5, 5))))
@@ -1648,61 +1178,92 @@ class TwitTUIForm(toga.App):
         selected = self.show_combo.value if getattr(self, 'show_combo', None) else ''
         return getattr(self, '_show_names_by_display', {}).get(selected, selected or '')
 
-    def _refresh_show_dates(self, token, shows, index=0, callback=None):
+    def _refresh_show_dates(self, token, shows, index=0, callback=None, max_concurrent=4):
+        """Scrape missing show date bounds using bounded concurrency (up to ``max_concurrent`` in flight)."""
         if token != getattr(self, '_catalog_request', 0):
             return
-        while index < len(shows):
-            show_name = shows[index]
+
+        pending_shows: list[tuple[str, Any]] = []
+        for show_name in shows[index:]:
             show_id = self.show_ids.get(show_name)
-            cached = self._show_date_cache.get(str(show_id)) if show_id and getattr(self, '_show_date_cache', None) is not None else None
+            cached = (
+                self._show_date_cache.get(str(show_id))
+                if show_id and getattr(self, '_show_date_cache', None) is not None
+                else None
+            )
             if cached and cached[1] is not None:
                 current_start = self.show_date_bounds.get(show_name, (None, None))[0]
                 self.show_date_bounds[show_name] = (current_start or cached[0], cached[1])
-                index += 1
                 continue
             if not show_id:
-                index += 1
                 continue
             if self.show_date_bounds.get(show_name, (None, None))[1] is not None:
-                index += 1
                 continue
-            worker = self._network_snapshot()
+            pending_shows.append((show_name, show_id))
 
-            def done(bounds, current_name=show_name, current_id=show_id, next_index=index + 1):
-                if token != getattr(self, '_catalog_request', 0):
-                    return
-                if bounds:
-                    current_start = self.show_date_bounds.get(current_name, (None, None))[0]
-                    resolved_bounds = (current_start or bounds[0], bounds[1])
-                    if getattr(self, '_show_date_cache', None) is not None:
-                        self._show_date_cache[str(current_id)] = resolved_bounds
-                    self.show_date_bounds[current_name] = resolved_bounds
-                    selected = self._selected_show_name()
-                    self._setting_catalog = True
-                    try:
-                        self._set_show_selector_items(shows, selected)
-                    finally:
-                        self._setting_catalog = False
-                self._refresh_show_dates(token, shows, next_index, callback=callback)
-
-            def _safe_fetch_bounds(target_id=show_id):
-                try:
-                    return worker.fetch_show_date_bounds(target_id)
-                except Exception as e:
-                    print(f"Unexpected error fetching show date bounds for {target_id}: {e}")
-                    return None
-
-            try:
-                self._run_network(_safe_fetch_bounds, done)
-            except Exception as e:
-                print(f"Failed to schedule show date refresh: {e}")
-                if callable(callback):
-                    callback()
-            return
-
-        if index >= len(shows):
+        if not pending_shows:
             if callable(callback):
                 callback()
+            return
+
+        concurrency = max(1, int(max_concurrent or 1))
+        state = {
+            'next_idx': 0,
+            'in_flight': 0,
+            'finished': False,
+        }
+
+        def _complete_if_done() -> None:
+            if state['finished']:
+                return
+            if state['in_flight'] == 0 and state['next_idx'] >= len(pending_shows):
+                state['finished'] = True
+                if callable(callback):
+                    callback()
+
+        def _dispatch_next() -> None:
+            if token != getattr(self, '_catalog_request', 0):
+                return
+            while state['in_flight'] < concurrency and state['next_idx'] < len(pending_shows):
+                show_name, show_id = pending_shows[state['next_idx']]
+                state['next_idx'] += 1
+                state['in_flight'] += 1
+                worker = self._network_snapshot()
+
+                def done(bounds, current_name=show_name, current_id=show_id):
+                    state['in_flight'] = max(0, state['in_flight'] - 1)
+                    if token != getattr(self, '_catalog_request', 0):
+                        return
+                    if bounds:
+                        current_start = self.show_date_bounds.get(current_name, (None, None))[0]
+                        resolved_bounds = (current_start or bounds[0], bounds[1])
+                        if getattr(self, '_show_date_cache', None) is not None:
+                            self._show_date_cache[str(current_id)] = resolved_bounds
+                        self.show_date_bounds[current_name] = resolved_bounds
+                        selected = self._selected_show_name()
+                        self._setting_catalog = True
+                        try:
+                            self._set_show_selector_items(shows, selected)
+                        finally:
+                            self._setting_catalog = False
+                    _dispatch_next()
+                    _complete_if_done()
+
+                def _safe_fetch_bounds(target_id=show_id, w=worker):
+                    try:
+                        return w.fetch_show_date_bounds(target_id)
+                    except Exception as e:
+                        _logger.debug("Unexpected error fetching show date bounds for %s: %s", target_id, e, exc_info=True)
+                        return None
+
+                try:
+                    self._run_network(_safe_fetch_bounds, done)
+                except Exception as e:
+                    state['in_flight'] = max(0, state['in_flight'] - 1)
+                    _logger.debug("Failed to schedule show date refresh for %s: %s", show_id, e, exc_info=True)
+            _complete_if_done()
+
+        _dispatch_next()
 
     def get_initial_streamer_setting(self) -> str:
         """Resolve and migrate streamer command template, persisting if migrating legacy defaults."""
@@ -1736,7 +1297,7 @@ class TwitTUIForm(toga.App):
             try:
                 os.makedirs(snap_data, exist_ok=True)
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm.save_env_setting', exc_info=True)
             target_path = os.path.join(snap_data, '.env')
         else:
             candidate_paths = [
@@ -1764,7 +1325,7 @@ class TwitTUIForm(toga.App):
                 try:
                     os.chmod(target_path, 0o600)
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'TwitTUIForm.save_env_setting', exc_info=True)
         except Exception:
             try:
                 lines = []
@@ -1943,7 +1504,7 @@ class TwitTUIForm(toga.App):
                     s = int(val.get('seconds') or 0)
                     return h * 3600 + m * 60 + s
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'TwitTUIForm.parse_duration_to_seconds', exc_info=True)
             return -1
         s_val = str(val).strip()
         if not s_val:
@@ -1962,7 +1523,7 @@ class TwitTUIForm(toga.App):
                 elif len(parts) == 4:
                     return int(parts[0]) * 86400 + int(parts[1]) * 3600 + int(parts[2]) * 60 + int(float(parts[3]))
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm.parse_duration_to_seconds', exc_info=True)
         return -1
 
     @staticmethod
@@ -2029,7 +1590,7 @@ class TwitTUIForm(toga.App):
                     s = int(val.get('seconds') or 0)
                     return f"{h:02d}:{m:02d}:{s:02d}"
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'TwitTUIForm.format_duration', exc_info=True)
             return ''
 
         s_val = str(val).strip()
@@ -2235,7 +1796,7 @@ class TwitTUIForm(toga.App):
                         self.progress_bar.max = 100.0
                     self.progress_bar.value = max(0.0, min(float(current), 100.0))
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm.update_progress._update', exc_info=True)
 
         if hasattr(self, 'loop') and self.loop and self.loop.is_running():
             try:
@@ -3092,7 +2653,7 @@ class TwitTUIForm(toga.App):
         app_key_box.add(self.app_key_input)
         app_key_box.add(test_api_button)
 
-        # TWIT Club URL setting
+        # TWIT Club URL setting (preserve custom Memberful feed IDs if configured)
         url_box = toga.Box(style=Pack(direction=ROW, margin=5))
         url_label = toga.Label(
             'TWIT Club URL:',
@@ -3100,20 +2661,26 @@ class TwitTUIForm(toga.App):
             tooltip='Club TWiT Memberful RSS feed address or authentication key'
         )
         self.url_label = url_label
+        default_auth_prefix = 'https://twit.memberfulcontent.com/rss/9041?auth='
+        twit_club_url = (os.getenv('twitcluburl') or os.getenv('TWITCLUBURL') or os.getenv('TWIT_CLUB_URL') or '').strip()
+        active_prefix = default_auth_prefix
+        if twit_club_url.startswith(default_auth_prefix):
+            initial_url_key = twit_club_url[len(default_auth_prefix):]
+        elif '?auth=' in twit_club_url:
+            prefix_part, initial_url_key = twit_club_url.split('?auth=', 1)
+            if prefix_part.startswith('http://'):
+                prefix_part = 'https://' + prefix_part[7:]
+            if prefix_part.startswith('https://'):
+                active_prefix = f"{prefix_part}?auth="
+        else:
+            initial_url_key = twit_club_url
+        self._club_url_prefix = active_prefix
         url_prefix = toga.Label(
-            'https://twit.memberfulcontent.com/rss/9041?auth=',
+            active_prefix,
             style=Pack(margin=(0, 5)),
             tooltip='Club TWiT Memberful RSS feed base URL prefix'
         )
         self.url_prefix = url_prefix
-        twit_club_url = os.getenv('twitcluburl') or os.getenv('TWITCLUBURL') or os.getenv('TWIT_CLUB_URL') or ''
-        auth_prefix = 'https://twit.memberfulcontent.com/rss/9041?auth='
-        if twit_club_url.startswith(auth_prefix):
-            initial_url_key = twit_club_url[len(auth_prefix):]
-        elif '?auth=' in twit_club_url:
-            initial_url_key = twit_club_url.split('?auth=', 1)[1]
-        else:
-            initial_url_key = twit_club_url
         self.url_input = toga.PasswordInput(
             value=initial_url_key,
             on_change=self.on_url_change,
@@ -3305,14 +2872,14 @@ class TwitTUIForm(toga.App):
             try:
                 self.api_status_label.text = 'Cache cleared.'
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm.on_clear_cache_press', exc_info=True)
         if _is_textual_tui_running(self):
             try:
                 native_app = getattr(getattr(self, '_impl', None), 'native', None)
                 if native_app is not None and hasattr(native_app, 'notify'):
                     native_app.notify('Cache cleared.')
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm.on_clear_cache_press', exc_info=True)
 
     def on_preferences_press(self, widget=None) -> None:
         self.show_preferences_window()
@@ -3336,201 +2903,22 @@ class TwitTUIForm(toga.App):
                     if hasattr(native, 'set_transient_for'):
                         native.set_transient_for(self.main_window._impl.native)
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm.show_preferences_window', exc_info=True)
         self._preferences_window.show()
 
     def on_preferences_window_close(self, window, *args, **kwargs) -> bool:
+        self._flush_pending_env_saves()
         window.hide()
         return True
 
     def on_preferences_close_press(self, widget=None) -> None:
+        self._flush_pending_env_saves()
         if self._preferences_window is not None:
             self._preferences_window.hide()
 
     def sanitize_html(self, html_str: str) -> str:
         """Sanitize HTML content to prevent script injection and malicious payloads."""
-        if not html_str:
-            return ""
-
-        # Pre-strip paired and self-closing dangerous container tags (handling nested bypasses
-        # such as <scr<script>ipt>...</script> and whitespace before closing '>').
-        # Unpaired opening tags are intentionally left for the allowlist HTML parser below
-        # so trailing payload inside an unclosed <script> is dropped instead of exposed.
-        dangerous_tags = (
-            "script", "style", "iframe", "object", "embed", "applet",
-            "form", "input", "button", "link", "meta", "svg", "math", "base",
-        )
-        sanitized = html_str
-        for _ in range(5):
-            prev = sanitized
-            for tag in dangerous_tags:
-                sanitized = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}\s*>", "", sanitized, flags=re.IGNORECASE | re.DOTALL)
-                sanitized = re.sub(rf"<{tag}\b[^>]*/>", "", sanitized, flags=re.IGNORECASE)
-            if sanitized == prev:
-                break
-
-        # Attempt to use bleach if available
-        try:
-            import bleach
-            return bleach.clean(
-                sanitized,
-                tags=[
-                    "p", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "code",
-                    "ul", "ol", "li", "table", "thead", "tbody", "tr", "th", "td",
-                    "blockquote", "strong", "em", "a", "hr", "br", "span", "div", "img"
-                ],
-                attributes={
-                    "a": ["href", "title", "id", "name", "target", "rel"],
-                    "img": ["src", "alt", "title", "width", "height"],
-                    "th": ["align"],
-                    "td": ["align"],
-                    "*": ["class", "id"]
-                },
-                protocols=["http", "https", "mailto"],
-                strip=True,
-                strip_comments=True
-            )
-        except ImportError:
-            pass
-
-        # Attempt to use nh3 if available
-        try:
-            import nh3
-            return nh3.clean(
-                sanitized,
-                tags={
-                    "p", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "code",
-                    "ul", "ol", "li", "table", "thead", "tbody", "tr", "th", "td",
-                    "blockquote", "strong", "em", "a", "hr", "br", "span", "div", "img"
-                },
-                attributes={
-                    "a": {"href", "title", "id", "name", "target", "rel"},
-                    "img": {"src", "alt", "title", "width", "height"},
-                    "th": {"align"},
-                    "td": {"align"},
-                    "*": {"class", "id"}
-                },
-                url_schemes={"http", "https", "mailto"}
-            )
-        except ImportError:
-            pass
-
-        # Pure-Python allowlist HTML parser fallback (immune to regex/whitespace/quote bypasses)
-        allowed_tags = frozenset({
-            "p", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "code",
-            "ul", "ol", "li", "table", "thead", "tbody", "tfoot", "tr", "th", "td",
-            "blockquote", "strong", "b", "em", "i", "u", "s", "del",
-            "a", "hr", "br", "span", "div", "img", "dl", "dt", "dd", "sup", "sub",
-        })
-        void_tags = frozenset({"br", "hr", "img"})
-        drop_content_tags = frozenset({
-            "script", "style", "iframe", "object", "applet",
-            "svg", "math", "template", "noscript", "title", "head",
-        })
-        allowed_attrs = {
-            "a": frozenset({"href", "title", "id", "name", "target", "rel"}),
-            "img": frozenset({"src", "alt", "title", "width", "height"}),
-            "th": frozenset({"align", "colspan", "rowspan"}),
-            "td": frozenset({"align", "colspan", "rowspan"}),
-            "*": frozenset({"class", "id"}),
-        }
-        safe_url_schemes = frozenset({"http", "https", "mailto"})
-
-        def _clean_url_attr(val: str, is_src: bool = False) -> str | None:
-            unescaped = val
-            for _ in range(3):
-                nxt = html.unescape(unescaped)
-                if nxt == unescaped:
-                    break
-                unescaped = nxt
-            # Strip ASCII control chars and whitespace before inspecting scheme (matches browser parsing)
-            normalized = re.sub(r"[\x00-\x20\x7f]+", "", unescaped).lower()
-            if not normalized:
-                return None if is_src else ""
-            if normalized.startswith(("#", "./", "../")) or (
-                normalized.startswith("/") and not normalized.startswith("//")
-            ):
-                return val.strip()
-            scheme_match = re.match(r"^([a-z][a-z0-9+.\-]*):", normalized)
-            if scheme_match:
-                if scheme_match.group(1) in safe_url_schemes:
-                    return val.strip()
-                return None if is_src else "#"
-            prefix = re.split(r"[/?#]", normalized, maxsplit=1)[0]
-            if ":" in prefix or normalized.startswith("//"):
-                return None if is_src else "#"
-            return val.strip()
-
-        class _AllowlistHTMLSanitizer(html.parser.HTMLParser):
-            def __init__(self) -> None:
-                super().__init__(convert_charrefs=True)
-                self.parts: list[str] = []
-                self._drop_stack: list[str] = []
-
-            def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-                t = tag.lower()
-                if t in drop_content_tags:
-                    self._drop_stack.append(t)
-                    return
-                if self._drop_stack or t not in allowed_tags:
-                    return
-                tag_allowed = allowed_attrs.get(t, frozenset()) | allowed_attrs["*"]
-                rendered_attrs: list[str] = []
-                for k, v in attrs:
-                    if not k:
-                        continue
-                    attr_name = k.lower()
-                    if attr_name not in tag_allowed:
-                        continue
-                    val_str = "" if v is None else str(v)
-                    if attr_name in ("href", "src"):
-                        safe_url = _clean_url_attr(val_str, is_src=(attr_name == "src"))
-                        if safe_url is None:
-                            continue
-                        val_str = safe_url
-                    rendered_attrs.append(f'{attr_name}="{html.escape(val_str, quote=True)}"')
-                attr_suffix = (" " + " ".join(rendered_attrs)) if rendered_attrs else ""
-                if t in void_tags:
-                    self.parts.append(f"<{t}{attr_suffix} />")
-                else:
-                    self.parts.append(f"<{t}{attr_suffix}>")
-
-            def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-                t = tag.lower()
-                if t in drop_content_tags or self._drop_stack or t not in allowed_tags:
-                    return
-                self.handle_starttag(tag, attrs)
-                if t not in void_tags:
-                    self.parts.append(f"</{t}>")
-
-            def handle_endtag(self, tag: str) -> None:
-                t = tag.lower()
-                if self._drop_stack:
-                    if t in self._drop_stack:
-                        while self._drop_stack:
-                            if self._drop_stack.pop() == t:
-                                break
-                    return
-                if t in allowed_tags and t not in void_tags:
-                    self.parts.append(f"</{t}>")
-
-            def handle_data(self, data: str) -> None:
-                if not self._drop_stack:
-                    self.parts.append(html.escape(data, quote=False))
-
-            def handle_comment(self, data: str) -> None:
-                pass
-
-            def handle_pi(self, data: str) -> None:
-                pass
-
-            def handle_decl(self, decl: str) -> None:
-                pass
-
-        parser = _AllowlistHTMLSanitizer()
-        parser.feed(sanitized)
-        parser.close()
-        return "".join(parser.parts)
+        return sanitize_html_content(html_str)
 
     @staticmethod
     def _slugify(text: str) -> str:
@@ -3751,7 +3139,7 @@ class TwitTUIForm(toga.App):
             try:
                 os.chmod(cache_dir, 0o700)
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm.get_app_cache_dir', exc_info=True)
             return cache_dir
         except Exception:
             return tempfile.gettempdir()
@@ -3781,15 +3169,36 @@ class TwitTUIForm(toga.App):
             self._open_browser_quietly(f"http://127.0.0.1:{port}/{token}/{page_name}")
             return
 
-        # Fallback to local HTML file in cache directory if local HTTP server unavailable
+        # Fallback to local HTML file in cache directory if local HTTP server unavailable.
+        # Prune older fallback previews so ~/.cache/twittui never grows unboundedly.
         cache_dir = self.get_app_cache_dir()
-        temp_file = tempfile.NamedTemporaryFile("w", dir=cache_dir, delete=False, suffix=".html", encoding="utf-8")
+        try:
+            existing_previews = sorted(
+                glob.glob(os.path.join(glob.escape(cache_dir), "twittui_preview_*.html")),
+                key=os.path.getmtime,
+                reverse=True,
+            )
+            for stale_preview in existing_previews[4:]:
+                try:
+                    os.remove(stale_preview)
+                except OSError:
+                    pass
+        except Exception:
+            _logger.debug("Ignored exception in %s", 'TwitTUIForm.open_html_in_browser', exc_info=True)
+        temp_file = tempfile.NamedTemporaryFile(
+            "w",
+            dir=cache_dir,
+            prefix="twittui_preview_",
+            delete=False,
+            suffix=".html",
+            encoding="utf-8",
+        )
         temp_file.write(html_content)
         temp_file.close()
         try:
             os.chmod(temp_file.name, 0o600)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TwitTUIForm.open_html_in_browser', exc_info=True)
         file_uri = pathlib.Path(os.path.abspath(temp_file.name)).as_uri()
         self._open_browser_quietly(file_uri)
 
@@ -3813,10 +3222,7 @@ class TwitTUIForm(toga.App):
             err_msg = f"Could not locate {filename} file in the application directory."
             print(f"Error: {err_msg}")
             if hasattr(self, 'main_window') and self.main_window:
-                try:
-                    self.main_window.error_dialog("Documentation Not Found", err_msg)
-                except Exception:
-                    pass
+                self._show_dialog_threadsafe("error", "Documentation Not Found", err_msg, host_win=self.main_window)
             return
 
         try:
@@ -3826,10 +3232,7 @@ class TwitTUIForm(toga.App):
             err_msg = f"Failed to read {filename}: {e}"
             print(f"Error: {err_msg}")
             if hasattr(self, 'main_window') and self.main_window:
-                try:
-                    self.main_window.error_dialog("Read Error", err_msg)
-                except Exception:
-                    pass
+                self._show_dialog_threadsafe("error", "Read Error", err_msg, host_win=self.main_window)
             return
 
         styled_html = self.render_markdown_to_html(md_text, title=doc_title)
@@ -3853,10 +3256,7 @@ class TwitTUIForm(toga.App):
             err_msg = f"Unable to display documentation: {browser_err}"
             print(f"Error: {err_msg}")
             if hasattr(self, 'main_window') and self.main_window:
-                try:
-                    self.main_window.error_dialog("Documentation Viewer Error", err_msg)
-                except Exception:
-                    pass
+                self._show_dialog_threadsafe("error", "Documentation Viewer Error", err_msg, host_win=self.main_window)
 
     def show_readme_viewer(self) -> None:
         """Display README.md using the Hybrid Resilient Pattern (WebView with Browser fallback)."""
@@ -3878,12 +3278,7 @@ class TwitTUIForm(toga.App):
         except Exception as e:
             err_msg = f"Failed to open project homepage URL: {e}"
             print(f"Error: {err_msg}")
-            host_win = self._active_dialog_window()
-            if host_win:
-                try:
-                    host_win.error_dialog("Browser Error", err_msg)
-                except Exception:
-                    pass
+            self._show_dialog_threadsafe("error", "Browser Error", err_msg)
 
     def on_open_homepage(self, widget=None) -> None:
         """Handler for Help menu command to visit project homepage."""
@@ -3904,12 +3299,7 @@ class TwitTUIForm(toga.App):
         except Exception as e:
             err_msg = f"Failed to open API key registration URL: {e}"
             print(f"Error: {err_msg}")
-            host_win = self._active_dialog_window()
-            if host_win:
-                try:
-                    host_win.error_dialog("Browser Error", err_msg)
-                except Exception:
-                    pass
+            self._show_dialog_threadsafe("error", "Browser Error", err_msg)
 
     def on_open_api_key_url(self, widget=None) -> None:
         """Handler for Help menu command to open the TWiT API key registration / documentation URL."""
@@ -3930,10 +3320,11 @@ class TwitTUIForm(toga.App):
             if raw_val.startswith('http://'):
                 raw_val = 'https://' + raw_val[7:]
             return raw_val
+        active_prefix = getattr(self, '_club_url_prefix', None) or 'https://twit.memberfulcontent.com/rss/9041?auth='
         auth_key = self.get_club_twit_auth_key()
         if auth_key:
-            return f"https://twit.memberfulcontent.com/rss/9041?auth={auth_key}"
-        return "https://twit.memberfulcontent.com/rss/9041"
+            return f"{active_prefix}{auth_key}"
+        return active_prefix.split('?auth=', 1)[0]
 
     def render_rss_feed_to_html(self, xml_content: str | bytes) -> str:
         """Render RSS 2.0 XML podcast feed content into styled HTML using CSS/XSL styling."""
@@ -3958,7 +3349,7 @@ class TwitTUIForm(toga.App):
                         css_content = f.read()
                         break
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'TwitTUIForm.render_rss_feed_to_html', exc_info=True)
 
         # If lxml and feed-style.xsl are available, attempt XSLT transformation with hardened parser
         candidate_xsl_paths = [
@@ -4083,7 +3474,7 @@ class TwitTUIForm(toga.App):
                         if mb > 0:
                             size_str = f" • {mb} MB"
                     except Exception:
-                        pass
+                        _logger.debug("Ignored exception in %s", 'TwitTUIForm.render_rss_feed_to_html', exc_info=True)
 
                 title_html = f'<a href="{html.escape(link)}" target="_blank" rel="noopener noreferrer">{html.escape(title)}</a>' if (link and is_safe_http_url(link)) else html.escape(title)
 
@@ -4269,7 +3660,7 @@ class TwitTUIForm(toga.App):
             try:
                 return bool(self.show_folders_checkbox.value)
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm.is_show_folders_enabled', exc_info=True)
         env_val = os.getenv('twitclubshowfolders') or os.getenv('TWITCLUBSHOWFOLDERS') or os.getenv('TWIT_CLUB_SHOW_FOLDERS') or ''
         return env_val.strip().lower() in ('1', 'true', 'yes', 'on')
 
@@ -4288,7 +3679,7 @@ class TwitTUIForm(toga.App):
             val_str = 'env LC_ALL=C vlc %f'
         os.environ['twitclubstreamer'] = val_str
         os.environ['TWITCLUBSTREAMER'] = val_str
-        self.save_env_setting('twitclubstreamer', val_str)
+        self._schedule_env_save('twitclubstreamer', val_str)
 
     def on_dest_change(self, widget=None) -> None:
         """Handle download destination change, update environment, and persist to .env."""
@@ -4296,58 +3687,97 @@ class TwitTUIForm(toga.App):
         val_str = (val or '').strip()
         os.environ['twitclubdestination'] = val_str
         os.environ['TWITCLUBDESTINATION'] = val_str
-        self.save_env_setting('twitclubdestination', val_str)
+        self._schedule_env_save('twitclubdestination', val_str)
 
     def on_block_change(self, widget=None) -> None:
-        """Handle block size change, update environment, and persist to .env."""
+        """Handle block size change, validate positive integer, update environment, and persist to .env."""
         val = self.block_input.value if hasattr(self, 'block_input') and self.block_input else ''
         val_str = (val or '').strip()
-        if val_str:
-            os.environ['twitclubblocksize'] = val_str
-            os.environ['TWITCLUBBLOCKSIZE'] = val_str
-            self.save_env_setting('twitclubblocksize', val_str)
+        if not val_str:
+            return
+        try:
+            parsed = int(val_str)
+        except (ValueError, TypeError):
+            return
+        if parsed <= 0:
+            return
+        normalized = str(parsed)
+        os.environ['twitclubblocksize'] = normalized
+        os.environ['TWITCLUBBLOCKSIZE'] = normalized
+        self._schedule_env_save('twitclubblocksize', normalized)
 
     def on_rate_limit_change(self, widget=None) -> None:
-        """Handle rate limit change, update environment, limiter, and persist to .env."""
+        """Handle rate limit change, validate positive integer, update environment, and persist to .env."""
         val = self.rate_limit_input.value if hasattr(self, 'rate_limit_input') and self.rate_limit_input else ''
         val_str = (val or '').strip()
         if val_str:
-            os.environ['twitapiratelimit'] = val_str
-            os.environ['TWITAPIRATELIMIT'] = val_str
-            self.save_env_setting('twitapiratelimit', val_str)
+            try:
+                parsed = int(val_str)
+            except (ValueError, TypeError):
+                return
+            if parsed <= 0:
+                return
+            normalized = str(parsed)
+            os.environ['twitapiratelimit'] = normalized
+            os.environ['TWITAPIRATELIMIT'] = normalized
+            self._schedule_env_save('twitapiratelimit', normalized)
         try:
-            api_rate_limiter.rate_limit = self.get_rate_limit()
+            # Keep api_rate_limiter.rate_limit bound to the callable getter rather than freezing an int
+            api_rate_limiter.rate_limit = self.get_rate_limit
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TwitTUIForm.on_rate_limit_change', exc_info=True)
 
     def on_app_id_change(self, widget=None) -> None:
         """Handle TWiT API App ID change, update environment, and persist to .env."""
         val = self.app_id_input.value if hasattr(self, 'app_id_input') and self.app_id_input else ''
         val_str = (val or '').strip()
         os.environ['TWITAPI_APPLICATIONID'] = val_str
-        self.save_env_setting('TWITAPI_APPLICATIONID', val_str)
+        self._schedule_env_save('TWITAPI_APPLICATIONID', val_str)
 
     def on_app_key_change(self, widget=None) -> None:
         """Handle TWiT API App Key change, update environment, and persist to .env."""
         val = self.app_key_input.value if hasattr(self, 'app_key_input') and self.app_key_input else ''
         val_str = (val or '').strip()
         os.environ['TWITAPI_APPLICATIONKEYS'] = val_str
-        self.save_env_setting('TWITAPI_APPLICATIONKEYS', val_str)
+        self._schedule_env_save('TWITAPI_APPLICATIONKEYS', val_str)
 
     def on_url_change(self, widget=None) -> None:
-        """Handle TWiT Club URL change, update environment, and persist to .env."""
+        """Handle TWiT Club URL change, preserving custom feed IDs, updating env, and persisting to .env."""
         val = self.url_input.value if hasattr(self, 'url_input') and self.url_input else ''
         val_str = (val or '').strip()
-        auth_prefix = 'https://twit.memberfulcontent.com/rss/9041?auth='
+        auth_prefix = getattr(self, '_club_url_prefix', None) or 'https://twit.memberfulcontent.com/rss/9041?auth='
         if not val_str:
             full_url = ''
         elif val_str.startswith('http://') or val_str.startswith('https://'):
-            full_url = val_str
+            full_url = ('https://' + val_str[7:]) if val_str.startswith('http://') else val_str
+            if '?auth=' in full_url:
+                new_prefix = full_url.split('?auth=', 1)[0] + '?auth='
+                self._club_url_prefix = new_prefix
+                if getattr(self, 'url_prefix', None) is not None:
+                    try:
+                        self.url_prefix.text = new_prefix
+                    except Exception:
+                        _logger.debug("Ignored exception in %s", 'TwitTUIForm.on_url_change', exc_info=True)
         else:
             full_url = f"{auth_prefix}{val_str}"
         os.environ['twitcluburl'] = full_url
         os.environ['TWITCLUBURL'] = full_url
-        self.save_env_setting('twitcluburl', full_url)
+        self._schedule_env_save('twitcluburl', full_url)
+
+    @staticmethod
+    def _sanitize_fs_component(name: str, fallback: str = "TWiT", max_bytes: int = 255) -> str:
+        """Sanitize a filename or folder component against control chars, dotfiles, traversal, and NAME_MAX."""
+        cleaned = re.sub(r'[\x00-\x1f\x7f]', '', str(name or ''))
+        cleaned = re.sub(r'[/\\:*?"<>|]', '', cleaned)
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip('. ')
+        if not cleaned:
+            cleaned = fallback
+        if max_bytes > 0:
+            encoded = cleaned.encode('utf-8')
+            if len(encoded) > max_bytes:
+                truncated = encoded[:max_bytes].decode('utf-8', errors='ignore').rstrip('. ')
+                cleaned = truncated or fallback
+        return cleaned
 
     def get_show_folder_name(self, target) -> str:
         """Determine a clean, filesystem-safe show folder name for the target episode."""
@@ -4388,11 +3818,8 @@ class TwitTUIForm(toga.App):
         # Normalize TWiT+ prefix (e.g. TWiT+ Club Shows -> TWiT Club Shows)
         show_str = re.sub(r'^TWiT\+\s*', 'TWiT ', show_str)
 
-        # Sanitize folder name for filesystem safety
-        clean_show = re.sub(r'[/\\:*?"<>|]', '', show_str)
-        clean_show = re.sub(r'\s+', ' ', clean_show).strip()
-
-        return clean_show or "TWiT"
+        # Sanitize folder name for filesystem safety (control chars, dotfiles, traversal, NAME_MAX)
+        return self._sanitize_fs_component(show_str, fallback="TWiT", max_bytes=255)
 
     def get_target_destination_folder(self, target) -> str:
         """Get the destination directory for downloading the specified episode, accounting for Show Folders."""
@@ -4476,13 +3903,12 @@ class TwitTUIForm(toga.App):
             else:
                 base_name = clean_show
 
-        # Sanitize filename for filesystem compatibility
-        clean_base = re.sub(r'[/\\:*?"<>|]', '', base_name)
-        clean_base = re.sub(r'\s+', ' ', clean_base).strip()
-
-        if not clean_base:
-            clean_base = os.path.splitext(url_filename)[0] if url_filename else "twit_episode"
-            clean_base = re.sub(r'[/\\:*?"<>|]', '_', clean_base).strip()
+        # Sanitize filename for filesystem compatibility (control chars, dotfiles, traversal, NAME_MAX)
+        ext_bytes = len(file_ext.encode('utf-8'))
+        max_stem_bytes = max(16, 255 - ext_bytes)
+        fallback_stem = os.path.splitext(url_filename)[0] if url_filename else "twit_episode"
+        fallback_stem = self._sanitize_fs_component(fallback_stem, fallback="twit_episode", max_bytes=max_stem_bytes)
+        clean_base = self._sanitize_fs_component(base_name, fallback=fallback_stem, max_bytes=max_stem_bytes)
 
         return f"{clean_base}{file_ext}"
 
@@ -4575,26 +4001,12 @@ class TwitTUIForm(toga.App):
                 "Please install yt-dlp (e.g. 'pip install yt-dlp' or via your package manager) and try again."
             )
             print(f"Error: {error_msg}")
-
-            def _show_err():
-                try:
-                    main_win = None
-                    try:
-                        main_win = self.main_window
-                    except Exception:
-                        main_win = None
-                    if main_win:
-                        main_win.error_dialog("YouTube Downloader Required", error_msg)
-                except Exception:
-                    pass
-
-            if hasattr(self, 'loop') and self.loop and self.loop.is_running():
-                try:
-                    self.loop.call_soon_threadsafe(_show_err)
-                except Exception:
-                    _show_err()
-            else:
-                _show_err()
+            try:
+                main_win = self.main_window
+            except Exception:
+                main_win = None
+            if main_win:
+                self._show_dialog_threadsafe("error", "YouTube Downloader Required", error_msg, host_win=main_win)
             return False
 
         dest_dir = os.path.dirname(os.path.abspath(dest_path)) or '.'
@@ -4620,7 +4032,7 @@ class TwitTUIForm(toga.App):
                         elif os.path.isdir(p):
                             shutil.rmtree(p, ignore_errors=True)
                     except Exception:
-                        pass
+                        _logger.debug("Ignored exception in %s", 'TwitTUIForm.download_youtube_video._cleanup_stale_parts', exc_info=True)
 
         def _find_and_promote_output(audio_mode: bool, ffmpeg_available: bool) -> str | None:
             candidates = glob.glob(f"{escaped_temp_prefix}.*")
@@ -4884,7 +4296,7 @@ class TwitTUIForm(toga.App):
                                         self.update_progress(total_bytes, total_bytes)
                                     return True
                             except Exception:
-                                pass
+                                _logger.debug("Ignored exception in %s", 'TwitTUIForm.download_episode_file', exc_info=True)
                         else:
                             print(f"Skipping download: '{dest_path}' already exists with matching size ({local_size} bytes).")
                             if progress_callback:
@@ -4923,7 +4335,7 @@ class TwitTUIForm(toga.App):
                     try:
                         os.remove(temp_path)
                     except Exception:
-                        pass
+                        _logger.debug("Ignored exception in %s", 'TwitTUIForm.download_episode_file', exc_info=True)
                 if progress_callback is None:
                     self.reset_progress()
                 return False
@@ -4934,7 +4346,7 @@ class TwitTUIForm(toga.App):
                     try:
                         os.remove(temp_path)
                     except Exception:
-                        pass
+                        _logger.debug("Ignored exception in %s", 'TwitTUIForm.download_episode_file', exc_info=True)
                 if progress_callback is None:
                     self.reset_progress()
                 return False
@@ -4954,7 +4366,7 @@ class TwitTUIForm(toga.App):
                 try:
                     os.remove(temp_path)
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'TwitTUIForm.download_episode_file', exc_info=True)
             if progress_callback is None:
                 self.reset_progress()
             return False
@@ -5027,7 +4439,7 @@ class TwitTUIForm(toga.App):
         def _show():
             try:
                 if hasattr(self, 'main_window') and self.main_window:
-                    self.main_window.info_dialog(title, message)
+                    self._present_window_dialog(self.main_window, "info", title, message)
             except Exception as e:
                 print(f"Error displaying download complete dialog: {e}")
 
@@ -5850,7 +5262,7 @@ class TwitTUIForm(toga.App):
                         try:
                             modal_win.close()
                         except Exception:
-                            pass
+                            _logger.debug("Ignored exception in %s", 'TwitTUIForm.prompt_resolution_choice._make_handler._on_click', exc_info=True)
                     return _on_click
                 btn = toga.Button(lbl, on_press=_make_handler(opt), style=Pack(margin=(3, 0)), tooltip=f'Stream with resolution: {lbl}')
                 options_box.add(btn)
@@ -5862,7 +5274,7 @@ class TwitTUIForm(toga.App):
                 try:
                     modal_win.close()
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'TwitTUIForm.prompt_resolution_choice._on_cancel', exc_info=True)
 
             cancel_btn = toga.Button('Cancel', on_press=_on_cancel, style=Pack(margin=(10, 0)), tooltip='Cancel stream resolution selection')
             box.add(cancel_btn)
@@ -5899,7 +5311,7 @@ class TwitTUIForm(toga.App):
             else:
                 label.text = 'Episodes:'
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TwitTUIForm._update_episodes_selection_label', exc_info=True)
 
     def on_episode_select(self, widget=None, **kwargs) -> None:
         self._update_episodes_selection_label()
@@ -5995,30 +5407,32 @@ class TwitTUIForm(toga.App):
             try:
                 self._metadata_window.close()
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm.on_cancel_press', exc_info=True)
             self._metadata_window = None
         if getattr(self, '_is_downloading', False):
             print("Cancelling active download...")
             self._cancel_download = True
             self.reset_progress()
         else:
+            self._cleanup_resources_for_exit()
             self.show_splash_screen("Closing TwitTUI. Please wait...", title="TWiT.tv TUI")
             self.exit()
 
     def on_close_press(self, widget) -> None:
         self._cancel_hover_timer()
+        self._cleanup_resources_for_exit()
         if getattr(self, '_metadata_window', None) is not None:
             try:
                 self._metadata_window.close()
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm.on_close_press', exc_info=True)
             self._metadata_window = None
         if self._preferences_window is not None:
             try:
                 self._preferences_window.on_close = None
                 self._preferences_window.close()
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm.on_close_press', exc_info=True)
             self._preferences_window = None
         self.show_splash_screen("Closing TwitTUI. Please wait...", title="TWiT.tv TUI")
         if getattr(self, 'api_status_label', None):
@@ -6030,7 +5444,7 @@ class TwitTUIForm(toga.App):
                     builtins.print("  TwitTUI: Exiting, please wait...", flush=True)
                     builtins.print("======================================================================\n", flush=True)
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm.on_close_press', exc_info=True)
 
         def _do_exit():
             try:
@@ -6067,25 +5481,8 @@ class TwitTUIForm(toga.App):
     def show_api_test_dialog(self, success: bool, message: str) -> None:
         """Display a modal dialog indicating whether the TWiT API credentials test passed or failed."""
         title = "TWiT API Test: Passed" if success else "TWiT API Test: Failed"
-
-        def _show():
-            try:
-                host_win = self._active_dialog_window()
-                if host_win:
-                    if success:
-                        host_win.info_dialog(title, message)
-                    else:
-                        host_win.error_dialog(title, message)
-            except Exception as e:
-                print(f"Error displaying API test dialog: {e}")
-
-        if hasattr(self, 'loop') and self.loop and self.loop.is_running():
-            try:
-                self.loop.call_soon_threadsafe(_show)
-            except Exception:
-                _show()
-        else:
-            _show()
+        kind = "info" if success else "error"
+        self._show_dialog_threadsafe(kind, title, message)
 
     def test_api_credentials(self, app_id: str, app_key: str) -> tuple[bool, str]:
         """Validate TWiT API Application ID and Key against TWiT REST API."""
@@ -6103,11 +5500,17 @@ class TwitTUIForm(toga.App):
         }
 
         try:
-            resp = api_rate_limiter.get('https://twit.tv/api/v1.0/shows?range=1000000', headers=headers, timeout=10)
+            resp = api_rate_limiter.get('https://twit.tv/api/v1.0/shows?page=1&range=1', headers=headers, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
-                show_count = len(data.get('shows', [])) if isinstance(data, dict) and 'shows' in data else 0
-                return True, f"Passed: TWiT API credentials verified successfully!\nRetrieved {show_count} shows from the TWiT API."
+                show_count = 0
+                if isinstance(data, dict):
+                    raw_count = data.get('count')
+                    if raw_count is not None and str(raw_count).isdigit():
+                        show_count = int(raw_count)
+                    elif isinstance(data.get('shows'), list):
+                        show_count = len(data['shows'])
+                return True, f"Passed: TWiT API credentials verified successfully!\nVerified access to {show_count} shows on the TWiT API."
             elif resp.status_code in (401, 403):
                 return False, f"Failed: TWiT API authentication rejected (HTTP {resp.status_code}).\nPlease check that your Application ID and Key are correct."
             else:
@@ -6131,22 +5534,7 @@ class TwitTUIForm(toga.App):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _episode_cache_key(self, ep):
-        if not isinstance(ep, dict):
-            return None
-        ep_id = ep.get('id')
-        if ep_id is not None and str(ep_id).strip():
-            return ('id', str(ep_id).strip())
-        clean_path = ep.get('cleanPath') or ep.get('link')
-        if clean_path:
-            return ('path', str(clean_path).strip().lower())
-        guid = ep.get('guid')
-        if guid:
-            return ('guid', str(guid).strip())
-        num = str(ep.get('number', '')).strip()
-        title = str(ep.get('title', '')).strip().lower()
-        if num or title:
-            return ('num_title', num, title)
-        return None
+        return episode_cache_key(ep)
 
     def _parse_api_episodes(self, raw_episodes):
         episodes = []
@@ -6635,38 +6023,9 @@ class TwitTUIForm(toga.App):
             show_clean = selected_show.lower().strip()
             slug_candidates.add(re.sub(r'[^a-z0-9]+', '-', show_clean).strip('-'))
             slug_candidates.add(re.sub(r'[^a-z0-9]+', '', show_clean))
-            # Known abbreviations and aliases
-            abbrevs = {
-                'this week in tech': ['twit', 'this-week-in-tech'],
-                'security now': ['sn', 'security-now'],
-                'macbreak weekly': ['mbw', 'macbreak-weekly'],
-                'windows weekly': ['ww', 'windows-weekly'],
-                'tech news weekly': ['tnw', 'tech-news-weekly'],
-                'hands-on tech': ['hot', 'hands-on-tech'],
-                'hands-on ai': ['hoa', 'hands-on-ai'],
-                'hands-on mac': ['hom', 'hands-on-mac'],
-                'hands-on windows': ['how', 'hands-on-windows'],
-                'this week in space': ['twis', 'this-week-in-space'],
-                'untitled linux show': ['uls', 'untitled-linux-show'],
-                'ios today': ['iost', 'ios-today'],
-                'intelligent machines': ['im', 'intelligent-machines'],
-                'ask the tech guys': ['attg', 'ask-the-tech-guys', 'ask-the-tech-guy'],
-                'ask the tech guy': ['attg', 'ask-the-tech-guys', 'ask-the-tech-guy'],
-                'the tech guy': ['ttg', 'the-tech-guy'],
-                'home theater geeks': ['htg', 'home-theater-geeks'],
-                'all about android': ['aaa', 'all-about-android'],
-                'twit+ news': ['twit-news', 'twit-plus-news', 'twit_news'],
-                'twit news': ['twit-news'],
-                'twit+ clips': ['twit-clips'],
-                'twit+ club shows': ['twit-club-shows'],
-                'ai inside': ['ai-inside'],
-                'total leo': ['total-leo'],
-                'total mikah': ['total-mikah'],
-                'total jason': ['total-jason'],
-                'total ant': ['total-ant']
-            }
-            if show_clean in abbrevs:
-                slug_candidates.update(abbrevs[show_clean])
+            # Known abbreviations and aliases (derived from unified SHOW_REGISTRY)
+            if show_clean in SHOW_SEARCH_SLUGS:
+                slug_candidates.update(SHOW_SEARCH_SLUGS[show_clean])
 
         def show_matches_cleanpath(cp: str, body: str = '') -> bool:
             if is_all_shows:
@@ -6695,7 +6054,7 @@ class TwitTUIForm(toga.App):
                     if r_title:
                         rss_items_map[r_title] = r_item
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm.search_episodes', exc_info=True)
 
         # Tier 1: TWiT REST API Search Endpoint
         try:
@@ -6879,7 +6238,7 @@ class TwitTUIForm(toga.App):
                 try:
                     native.set_policy(1, 1)  # 1 corresponds to PolicyType.AUTOMATIC in GTK3/4
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'TwitTUIForm._enable_table_horizontal_scroll', exc_info=True)
 
         # Cocoa / macOS backend
         if hasattr(impl, 'native') and hasattr(impl.native, 'setHasHorizontalScroller_'):
@@ -6888,7 +6247,7 @@ class TwitTUIForm(toga.App):
                 if hasattr(impl.native, 'setAutohidesScrollers_'):
                     impl.native.setAutohidesScrollers_(True)
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm._enable_table_horizontal_scroll', exc_info=True)
 
     def _refresh_gtk_episodes_layout(self) -> bool:
         """Refresh main window layout so episodes_list fills available vertical height."""
@@ -6906,7 +6265,7 @@ class TwitTUIForm(toga.App):
                 if container is not None and hasattr(container, 'make_dirty'):
                     container.make_dirty(getattr(self.episodes_list, '_impl', None))
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TwitTUIForm._refresh_gtk_episodes_layout', exc_info=True)
         return False
 
     def _on_gtk_window_state_event(self, widget, event=None) -> bool:
@@ -6926,9 +6285,9 @@ class TwitTUIForm(toga.App):
                     from toga_gtk.libs import GLib
                     GLib.idle_add(self._refresh_gtk_episodes_layout)
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'TwitTUIForm._on_gtk_window_state_event', exc_info=True)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TwitTUIForm._on_gtk_window_state_event', exc_info=True)
         return False
 
     def _configure_gtk_episodes_layout(self) -> None:
@@ -6944,7 +6303,7 @@ class TwitTUIForm(toga.App):
             self.episodes_list._MIN_HEIGHT = 200
             table_impl.rehint()
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TwitTUIForm._configure_gtk_episodes_layout', exc_info=True)
 
         native_scroller = getattr(table_impl, 'native', None)
         if native_scroller is not None:
@@ -6954,7 +6313,7 @@ class TwitTUIForm(toga.App):
                     try:
                         method(True)
                     except Exception:
-                        pass
+                        _logger.debug("Ignored exception in %s", 'TwitTUIForm._configure_gtk_episodes_layout', exc_info=True)
 
         win = getattr(self, 'main_window', None)
         win_impl = getattr(win, '_impl', None) if win else None
@@ -6969,7 +6328,7 @@ class TwitTUIForm(toga.App):
                     try:
                         method(True)
                     except Exception:
-                        pass
+                        _logger.debug("Ignored exception in %s", 'TwitTUIForm._configure_gtk_episodes_layout', exc_info=True)
 
         native_win = getattr(win_impl, 'native', None)
         if native_win is not None and hasattr(native_win, 'connect') and not getattr(self, '_gtk_maximize_handler_connected', False):
@@ -6981,13 +6340,13 @@ class TwitTUIForm(toga.App):
                     native_win.connect('notify::maximized', self._on_gtk_window_state_event)
                 self._gtk_maximize_handler_connected = True
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm._configure_gtk_episodes_layout', exc_info=True)
 
         if getattr(win, 'content', None) is not None:
             try:
                 win.content.refresh()
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm._configure_gtk_episodes_layout', exc_info=True)
 
     @staticmethod
     def clean_html_text(text: str) -> str:
@@ -7033,27 +6392,9 @@ class TwitTUIForm(toga.App):
         if s_clean.startswith('the '):
             show_variants.append(s_clean[4:].replace(' ', '-'))
 
-        short_map = {
-            'this week in tech': ['twit', 'week-tech', 'this-week-in-tech'],
-            'this week in space': ['week-space', 'twis', 'this-week-in-space'],
-            'this week in google': ['week-google', 'twig', 'this-week-in-google'],
-            'this week in enterprise tech': ['week-enterprise-tech', 'twiet'],
-            'tech news weekly': ['tech-news-weekly', 'tnw'],
-            'security now': ['security-now', 'sn'],
-            'macbreak weekly': ['macbreak-weekly', 'mbw'],
-            'windows weekly': ['windows-weekly', 'ww'],
-            'untitled linux show': ['untitled-linux-show', 'uls'],
-            'ios today': ['ios-today', 'iost'],
-            'ask the tech guys': ['ask-tech-guys', 'tech-guy', 'atg'],
-            'floss weekly': ['floss-weekly', 'floss'],
-            'know how': ['know-how', 'kh'],
-            'hands-on mac': ['hands-on-mac', 'hom'],
-            'hands-on windows': ['hands-on-windows', 'how'],
-            'hands-on tech': ['hands-on-tech', 'hot']
-        }
-        for k, v in short_map.items():
+        for k, v in TRANSCRIPT_SLUG_MAP.items():
             if k in s_clean:
-                show_variants = v + show_variants
+                show_variants = list(v) + show_variants
 
         seen = set()
         unique_variants = []
@@ -7070,7 +6411,7 @@ class TwitTUIForm(toga.App):
             candidates.append(f"https://twit.tv/posts/transcripts/{var}-episode-{ep_clean}")
         return candidates
 
-    def resolve_transcript_url(self, target, show_name: str = '') -> str:
+    def resolve_transcript_url(self, target, show_name: str = '', *, allow_guess: bool = False) -> str:
         """Resolve or extract the transcript URL for an episode target."""
         if not target:
             return ''
@@ -7157,11 +6498,11 @@ class TwitTUIForm(toga.App):
                             t_url = f"https://twit.tv/{t_url.lstrip('/')}"
                         return t_url
 
-        # 3. Canonical candidate transcript URL on twit.tv
-        if show_str and ep_num:
+        # 3. Optional canonical candidate transcript URL (only when explicitly requested,
+        # avoiding unverified 404 URLs on older/non-transcribed shows)
+        if allow_guess and show_str and ep_num:
             candidates = self.generate_transcript_slug_candidates(show_str, str(ep_num).strip())
             if candidates:
-                ep_data['transcript_url'] = candidates[0]
                 return candidates[0]
 
         return ''
@@ -7196,9 +6537,6 @@ class TwitTUIForm(toga.App):
             m_link = re.search(r'/episodes/(\d+)', str(ep_data.get('link') or ep_data.get('cleanPath')))
             if m_link:
                 ep_num = m_link.group(1)
-
-        # Collect episode title
-        ep_title = getattr(target, 'title', '') or ep_data.get('title') or ep_data.get('label') or ''
 
         # Collect date
         ep_date = getattr(target, 'date', '') or ep_data.get('date') or ep_data.get('airingDate') or ep_data.get('publishDate') or ep_data.get('pubDate') or ''
@@ -7412,7 +6750,7 @@ class TwitTUIForm(toga.App):
                     if hasattr(lbl_impl, 'rehint'):
                         lbl_impl.rehint()
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'TwitTUIForm._configure_metadata_link_rows', exc_info=True)
 
                 lbl_native = getattr(lbl_impl, 'native', None)
                 if lbl_native is not None:
@@ -7428,7 +6766,7 @@ class TwitTUIForm(toga.App):
                             if isinstance(w_min, (int, float)) and isinstance(w_nat, (int, float)):
                                 measured_widths.append(int(max(w_min, w_nat)))
                     except Exception:
-                        pass
+                        _logger.debug("Ignored exception in %s", 'TwitTUIForm._configure_metadata_link_rows', exc_info=True)
 
                 intrinsic = getattr(lbl, 'intrinsic', None)
                 intrinsic_w = getattr(intrinsic, 'width', None) if intrinsic is not None else None
@@ -7451,7 +6789,7 @@ class TwitTUIForm(toga.App):
                     if hasattr(btn_impl, 'rehint'):
                         btn_impl.rehint()
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'TwitTUIForm._configure_metadata_link_rows', exc_info=True)
 
         if measured_widths:
             aligned_width = max(measured_widths) + 8
@@ -7462,7 +6800,7 @@ class TwitTUIForm(toga.App):
             try:
                 content_box.refresh()
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm._configure_metadata_link_rows', exc_info=True)
 
     def show_episode_metadata_dialog(self, target) -> None:
         """Display a popup dialog/window with all metadata for the specified episode, featuring clickable Web and Media URLs."""
@@ -7489,7 +6827,7 @@ class TwitTUIForm(toga.App):
                 if getattr(self, '_metadata_window', None) is not None:
                     self._metadata_window.close()
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm._show_episode_metadata._close_meta_window', exc_info=True)
             _on_closed()
 
         def _show():
@@ -7502,7 +6840,7 @@ class TwitTUIForm(toga.App):
                     try:
                         self._metadata_window.close()
                     except Exception:
-                        pass
+                        _logger.debug("Ignored exception in %s", 'TwitTUIForm._show_episode_metadata._show', exc_info=True)
                     self._metadata_window = None
 
                 # Check if running under Textual TUI backend
@@ -7513,7 +6851,7 @@ class TwitTUIForm(toga.App):
                 )
                 if is_textual:
                     if hasattr(self, 'main_window') and self.main_window:
-                        self.main_window.info_dialog(title, message, on_result=_on_closed)
+                        self._present_window_dialog(self.main_window, "info", title, message, on_result=_on_closed)
                     return
 
                 # Build rich custom dialog window with clickable URLs
@@ -7665,7 +7003,7 @@ class TwitTUIForm(toga.App):
                                         buf.place_cursor(iter_pos)
                                         textview.scroll_to_iter(iter_pos, 0.1, True, 0.0, 0.2)
                                 except Exception:
-                                    pass
+                                    _logger.debug("Ignored exception in %s", 'TwitTUIForm._show_episode_metadata._show._scroll_desc_to_match', exc_info=True)
                                 return False
 
                             scroll_desc_callback = _scroll_desc_to_match
@@ -7692,7 +7030,7 @@ class TwitTUIForm(toga.App):
                 print(f"Error displaying custom episode metadata window ({e}), falling back to info_dialog.")
                 try:
                     if hasattr(self, 'main_window') and self.main_window:
-                        self.main_window.info_dialog(title, message, on_result=_on_closed)
+                        self._present_window_dialog(self.main_window, "info", title, message, on_result=_on_closed)
                 except Exception as inner_e:
                     print(f"Error displaying fallback info_dialog: {inner_e}")
                     _on_closed()
@@ -7711,7 +7049,7 @@ class TwitTUIForm(toga.App):
             try:
                 self._hover_timer.cancel()
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm._cancel_hover_timer_locked', exc_info=True)
             self._hover_timer = None
 
     def _cancel_hover_timer(self) -> None:
@@ -7775,7 +7113,7 @@ class TwitTUIForm(toga.App):
                             self._hover_timer.start()
                     return False
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TwitTUIForm._on_table_motion_notify', exc_info=True)
 
         self._cancel_hover_timer()
         return False
@@ -7828,7 +7166,7 @@ class TwitTUIForm(toga.App):
                     native_table.connect('leave-notify-event', self._on_table_leave_notify)
                     self._table_hover_connected = True
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'TwitTUIForm._setup_table_hover_events', exc_info=True)
 
     def update_episodes_display(self) -> None:
         """Format and display current episodes based on selected sort order."""
@@ -8026,7 +7364,7 @@ class TwitTUIForm(toga.App):
                                 'episodes', show_id_key, worker._episodes_cache[show_id_key]
                             )
                         except Exception:
-                            pass
+                            _logger.debug("Ignored exception in %s", 'TwitTUIForm.load_episodes_for_selected_show.fetch_all', exc_info=True)
                 return episodes, page if batch else max(1, page - 1)
 
             def done(result):

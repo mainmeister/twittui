@@ -6,14 +6,15 @@ TwitTUI is a dual-interface media browser, streaming client, and batch-download 
 1. **GTK 3 Desktop GUI (`toga-gtk`)**: A graphical desktop application featuring GTK windowing, native header bars, mouse hover dwell detection, and clipboard integration.
 2. **Textual Terminal User Interface (`toga-textual`)**: An interactive terminal user interface (TUI) rendered in standard virtual terminals with keyboard-driven multi-selection, custom modal screens, and an integrated directory picker.
 
-The codebase encompasses approximately 18,600 lines of Python code, complete API specifications (`twittv.apib`, `openapi.json`), modern RSS transformation stylesheets (`feed-style.css`, `feed-style.xsl`), Cairo-based vector/raster icon asset pipelines, PyInstaller compilation routines, and an Ubuntu Core 24 strict-confinement Snap packaging configuration.
+The codebase encompasses the modular `twittui/` core package (`logging_config.py`, `shows.py`, `config.py`, `rate_limiter.py`, `media.py`, `viewer.py`, `cache.py`), the Toga UI controller (`twittui_form.py`) and Textual backend extensions (`toga_textual_backend.py`), complete API specifications (`twittv.apib`, `openapi.json`), RSS transformation stylesheets (`feed-style.css`, `feed-style.xsl`), Cairo-based vector/raster icon asset pipelines, PyInstaller compilation routines, GitHub Actions CI, and an Ubuntu Core 24 strict-confinement Snap packaging configuration.
 
 ```
 +----------------------------------------------------------------------------------------------------+
 |                                             TwitTUI                                                |
 +----------------------------------------------------------------------------------------------------+
 |                                         main.py (Bootstrap)                                        |
-|   - CLI Switch Parser (--gtk, --textual, --install, --clean)                                       |
+|   - CLI Switch Parser (--gtk, --textual, --install, --clean, --log-file, --log-level)              |
+|   - Structured File Logging (twittui.logging_config; silent NullHandler default for TUI safety)    |
 |   - Host Environment Sanitizer (GTK_MODULES, UBUNTU_MENUPROXY, QT_STYLE_OVERRIDE)                 |
 |   - PyGObject / Gdk Introspection Namespace Locker (GTK 3.0 / 4.0 Version Binding)                 |
 |   - Stderr Warning Filter & Graphical Display Detector ($DISPLAY / $WAYLAND_DISPLAY)                |
@@ -27,23 +28,22 @@ The codebase encompasses approximately 18,600 lines of Python code, complete API
 | - GtkTextView Auto-Scroll to Search Match Iter   | | - ContextVar App Wrapping (_ensure_active_app)|
 | - Gdk Pointer Motion / Leave 3s Dwell Tracking   | | - Custom TogaDataTable & Multi-Select Gutter  |
 | - Native Modal Windows & Gtk.HeaderBar Binding   | | - Textual Modal Screens (Splash, RateLimit)   |
-| - GdkPixbuf Multi-Resolution Application Icons   | | - DirectoryTree SelectFolderDialog Screen     |
+| - AppArmor NON_UNIQUE D-Bus Sandbox Patch        | | - DirectoryTree SelectFolderDialog Screen     |
 +--------------------------------------------------+ +-----------------------------------------------+
                          |                                                 |
                          +------------------------+------------------------+
                                                   |
                                                   v
 +----------------------------------------------------------------------------------------------------+
-|                                    twittui_form.py (Core Logic)                                    |
-|   - TwitTUIForm(toga.App) Lifecycle & Travertino Flexbox Layout Engine                             |
-|   - Process-Wide Sliding-Window Rate Limiter (ApiRateLimiter: 5 req / rolling min)                |
-|   - Detached Network Workers (_network_snapshot, asyncio.to_thread)                                |
-|   - Resilient Multi-Tier Ingestion (REST API -> Public RSS -> Club RSS -> Web Scraping)           |
-|   - Persistent SQLite Caching (twittui_cache.db & Lazy-Loaded _LazySQLiteEpisodesCache)            |
-|   - Media Resolution Engine (HD, Large, Small, Audio-Only, YouTube)                                |
-|   - Subprocess Stream Launcher (Tokenized args: %f, {url})                                         |
-|   - Background Chunked Batch Downloader (Deduplication via Size/ETag/MD5, .part staging)          |
-|   - In-App Document Viewer & Embedded Ephemeral HTTP Server (_LocalHTMLServer)                     |
+|                         twittui_form.py + twittui/ Modular Core Package                            |
+|   - twittui/shows.py: Single-source SHOW_REGISTRY (RSS, Memberful, Search & Transcript slugs)      |
+|   - twittui/rate_limiter.py: Sliding-Window ApiRateLimiter (5 req / rolling min, threading.Lock)   |
+|   - twittui/cache.py: Normalized SQLite (WAL, twittui_episodes, 24h TTL, SHA-256 keys, 0o600)      |
+|   - twittui/config.py: .env resolution & owner-only 0o600 persistence (write_restricted_file)      |
+|   - twittui/media.py: Safe XML (defusedxml), redirect resolution, shell=False stream launcher      |
+|   - twittui/viewer.py: Allowlist HTMLParser / nh3 / bleach sanitizer & _LocalHTMLServer            |
+|   - twittui_form.py: TwitTUIForm(toga.App) UI, detached workers, bounded-concurrency scraping,     |
+|                      chunked/yt-dlp batch downloader, and metadata hover preview                   |
 +-------------------------------------------------+--------------------------------------------------+
                                                   |
                          +------------------------+------------------------+
@@ -53,8 +53,8 @@ The codebase encompasses approximately 18,600 lines of Python code, complete API
 |         tiered_search.py (Search Engine)         | |       double_metaphone.py (Phonetic Engine)   |
 | - Tier 1: Exact Substring Matching (Score: 100)  | | - Pure Python Lawrence Philips Algorithm     |
 | - Tier 2: Ranked Fuzzy & fzf Subsequence Score   | | - Primary & Alternate 4-Character Keys        |
-| - Tier 3: Phonetic Double Metaphone Correlation  | | - Silent Consonants, Italian/Germanic/Romance |
-| - Weighted Field Priority (Title > People > Desc)| |   Sound-Shift Rules                          |
+| - Tier 3: Phonetic Double Metaphone Correlation  | | - Silent Consonants, TH/TCH/SCH, Ç/Ñ,        |
+| - Unified Field Extraction & Threshold (68.0)    | |   Italian/Germanic/Romance Sound-Shift Rules  |
 | - Keyword-in-Context (KWIC) Snippet Generation   | |                                               |
 +--------------------------------------------------+ +-----------------------------------------------+
 ```
@@ -71,6 +71,7 @@ The application entry point is `main.py`. Because BeeWare Toga relies on dynamic
 - `--textual` / `--tui` / `-b textual`: Forces the terminal user interface backend (`toga_textual`).
 - `-i` / `--install`: Delegates execution directly to `installer.py` to compile and install a standalone binary.
 - `-c` / `--clean`: Delegates execution to `installer.py` to purge build artifacts (`build/`, `dist/`, `.spec`).
+- `--log-file <path>` / `--log-level <level>`: Enables structured diagnostic file logging (owner-only `0o600` permissions; also configurable via `TWITTUI_LOG_FILE` / `TWITTUI_LOG_LEVEL`) without polluting TUI stdout.
 
 When no command-line switch is provided, `resolve_toga_backend()` inspects installed packages via `importlib.util.find_spec()`:
 1. **Interactive TTY Selection**: If both `toga_gtk` and `toga_textual` are installed, and standard input is connected to an interactive terminal (`sys.stdin.isatty()`), TwitTUI presents an interactive prompt asking the user to choose [1] GTK or [2] Textual. The default choice adapts dynamically: GTK is preferred if a graphical display environment variable (`$DISPLAY` or `$WAYLAND_DISPLAY`) is present; otherwise, Textual is preferred.
@@ -112,10 +113,10 @@ Textual depends on an internal `active_app` `ContextVar` to resolve the current 
 | `TogaDataTable` / `TextualTable` | `DataTable` / `Widget` | Advanced table widget supporting single and multiple row selection. Intercepts `Space`, `Shift+Up/Down`, `Ctrl+A`, `Escape`, and `u` to toggle selections. Adds a visual checkbox column (`☐` / `☑`), highlights selected rows across their entire width, updates a live selection count header, and tracks mouse pointer hover events with a 3-second dwell timer. |
 | `TogaSelect` / `TextualSelection` | `Select` / `Widget` | Custom selection adapter wrapping Textual's native `Select`. Maps Toga item schemas, handles change events, and supports formatted display strings with air dates. |
 | `SplashScreen` | `ModalScreen` | Centered modal screen displaying a Textual `LoadingIndicator` and dynamic status label. Displayed during application boot and dismissed once show catalogs and episode archives are loaded. |
-| `RateLimitScreen` | `ModalScreen` | Modal countdown dialog triggered when API quota limits are approached or exceeded. Displays a visual countdown and blocks UI input until the rate-limiter timer elapses. |
-| `TextualSelectFolderScreen` | `ModalScreen` | Terminal directory browser featuring `_FoldersOnlyDirectoryTree`. Allows interactive navigation, directory creation, path breadcrumb tracking, and folder confirmation without leaving the TUI. |
+| `RateLimitScreen` | `ModalScreen` | Centered modal wait dialog triggered during API rate-limiting or catalog refresh. Displays a status label (`Waiting for the TWiT API. Please wait.`) and a Textual `LoadingIndicator` spinner until the in-flight request settles. |
+| `TextualSelectFolderScreen` | `ModalScreen` | Terminal directory browser combining a direct path `Input`, an `Up` parent-directory button, `_FoldersOnlyDirectoryTree`, and `Select Folder` / `Cancel` confirmation controls without leaving the TUI. |
 | `TextualDialogScreen` / `ChoiceDialog` | `ModalScreen` | Modal dialog abstractions implementing Toga's `info_dialog`, `error_dialog`, `confirm_dialog`, `question_dialog`, and format selection dialogs (`ChoiceDialog`). Resolves asynchronous `asyncio.Future` promises upon button dismissal. |
-| `TextualWebView` | `Widget` | Markdown and HTML text renderer for terminal environments. Strips markup and renders formatted plain text with scrollable containers when running without a graphical browser. |
+| `TextualWebView` | `Widget` | Scrollable terminal document viewer (`VerticalScroll` + `Static(..., markup=False)`) that converts HTML to readable text and safely implements `set_user_agent`, `set_url`, and `set_content` without crashing or misinterpreting Rich markup brackets. |
 | `Secondary Window Lifecycle` | `TogaWindow` | Patches `toga_textual.window.Window` to support multi-window management (e.g., Preferences and Metadata dialogs). Mounts custom `TitleBar` widgets with close buttons (`✕`), binds `Escape` to close secondary windows without terminating the app, and restores focus to parent windows upon dismissal. |
 
 ### 3.3 Command Palette & Keyboard Bindings
@@ -123,9 +124,9 @@ Textual depends on an internal `active_app` `ContextVar` to resolve the current 
 
 ---
 
-## 4. Application Controller & UI Architecture (`twittui_form.py`)
+## 4. Application Controller & Modular Core (`twittui_form.py`, `twittui/`)
 
-`twittui_form.py` (7,691 lines) contains the primary application class, `TwitTUIForm`, which subclasses `toga.App`.
+`twittui_form.py` contains the primary application class, `TwitTUIForm(toga.App)`, backed by cohesive core submodules under `twittui/` (`logging_config.py`, `shows.py`, `config.py`, `rate_limiter.py`, `media.py`, `viewer.py`, and `cache.py`). All public symbols remain re-exported from `twittui_form.py` for full backward compatibility.
 
 ### 4.1 Widget Hierarchy & Layout Tree
 The UI is constructed inside `startup()` using a responsive flexbox layout defined via `travertino` / `toga.style.Pack`.
@@ -178,24 +179,24 @@ Standard Toga widgets do not uniformly expose tooltip properties across all nati
 - **Textual Implementation**: Maps tooltips to Textual widget instances via `native.tooltip = tooltip_text`.
 - `set_widget_tooltip()` and `get_widget_tooltip()` provide programmatic access across all interactive controls (buttons, inputs, radios, checkboxes, and table headers).
 
-### 4.3 Icon Pipeline & Window Branding
+### 4.3 Icon Pipeline & Sandbox Window Lifecycle
 `resolve_app_icon()` determines the application icon path by inspecting:
 1. `sys._MEIPASS/resources/twittui` (when bundled into a PyInstaller standalone executable).
-2. `<project_root>/resources/twittui` (when executing directly from source).
-3. System icon theme paths.
+2. `$SNAP/resources/twittui` (when executing inside a Snap package).
+3. `<project_root>/resources/twittui` and the current working directory.
 
-`patch_toga_icons()` hooks Toga's icon loader to automatically resolve `.png`, `.ico`, and `.svg` files, while `patch_toga_gtk_app()` binds the window icon directly to `Gtk.Window.set_default_icon_from_file()`.
+`patch_toga_icons()` hardens `toga.icons.CachedIcon` and `toga_gtk.icons.Icon` against recursive lookup failures by falling back to generated blank `GdkPixbuf` surfaces when loaders fail, while `patch_toga_gtk_app()` temporarily sets `interface._app_id = None` during GTK app instantiation and applies `Gio.ApplicationFlags.NON_UNIQUE` to prevent AppArmor D-Bus name ownership denials in strict sandboxes.
 
-### 4.4 Documentation & RSS Viewer with Ephemeral HTTP Server
+### 4.4 Documentation & RSS Viewer with Ephemeral HTTP Server (`twittui/viewer.py`)
 TwitTUI embeds an offline documentation viewer accessible via the application menu (**Help -> View README Documentation** or **View API Specification**):
 1. **Markdown to HTML Pipeline (`render_markdown_to_html`)**: Parses Markdown text, applies ID anchors to all headers (`_ensure_heading_ids`), and injects custom CSS styling matching TWiT's visual branding.
-2. **HTML Sanitization (`sanitize_html`)**: Uses `html.parser.HTMLParser` to sanitize rendered markup. It removes dangerous tags (`<script>`, `<iframe>`, `<object>`, `<embed>`, `<form>`, `<input>`), strips active inline attributes (`onclick`, `onload`, `onerror`), and verifies URI schemes to permit only `http://`, `https://`, and internal anchor links (`#`).
+2. **HTML Sanitization (`sanitize_html` / `sanitize_html_content`)**: Pre-strips nested dangerous container tags (`<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<svg>`, `<math>`, `<form>`, etc.), delegates to `bleach` or `nh3` when installed, and otherwise applies a strict pure-Python allowlist `html.parser.HTMLParser` (`_AllowlistHTMLSanitizer`) that drops unknown tags/event attributes and decodes HTML entities and control characters before allowing only `http://`, `https://`, `mailto:`, and relative/anchor URIs.
 3. **Local Ephemeral HTTP Server (`_LocalHTMLServer`, `_LocalHTMLHandler`)**:
-   - To bypass modern browser local file restrictions (`file://` CORS and cross-origin anchor blocks), `TwitTUIForm` launches a lightweight, local HTTP server bound strictly to `127.0.0.1` on an ephemeral OS-assigned port.
-   - Generates a cryptographically random, 32-character hexadecimal token (`generate_local_server_token()`).
-   - Serves requested documentation and styled RSS feeds only when the exact session token is supplied in the request query string (`?token=<token>`), returning HTTP 403 Forbidden otherwise.
-   - Automatically shuts down when the application terminates.
-4. **Hybrid Resilient Viewer**: In GTK desktop mode, documentation opens inside an integrated `toga.WebView` window. If the web view component fails to initialize or is running in Textual mode, it falls back to launching the user's default desktop browser via `webbrowser.open()`.
+   - To bypass modern browser local file restrictions (`file://` CORS and cross-origin anchor blocks), `TwitTUIForm` launches a lightweight local HTTP server bound strictly to `127.0.0.1` on an ephemeral OS-assigned port.
+   - Generates a cryptographically random URL-safe session token via `secrets.token_urlsafe(24)` (`generate_local_server_token()`).
+   - Serves requested documentation and styled RSS feeds only when the exact session token is supplied as the **first URL path segment** (`/<token>/<page>`), verified with `secrets.compare_digest()`, returning HTTP 403 Forbidden otherwise.
+   - Shuts down cleanly on application exit via `_cleanup_resources_for_exit()` (`server.shutdown()` and `server.server_close()` on a bounded helper thread).
+4. **Hybrid Resilient Viewer**: In GTK desktop mode, documentation opens inside an integrated `toga.WebView` window. If the web view component fails to initialize or is running in Textual mode, it falls back to launching the user's default desktop browser quietly without corrupting TUI stdio.
 
 ---
 
@@ -253,7 +254,7 @@ To prevent quota exhaustion across multiple threads, TwitTUI implements a proces
                           └────────────────────────┘
 ```
 
-1. **Sliding Deque**: Maintains a `collections.deque` of request start timestamps protected by a re-entrant `threading.Lock`.
+1. **Sliding Deque (`twittui/rate_limiter.py`)**: Maintains a `collections.deque` of monotonic request start timestamps protected by a non-reentrant `threading.Lock()`.
 2. **Spacing Constraint**: Enforces a minimum interval of 1.0 second between consecutive request starts.
 3. **Rolling Quota**: If 5 timestamps exist within the last 60 seconds, the next call sleeps for `60.0 - (now - timestamps[0])` seconds.
 4. **Automated Retry**: If the API returns HTTP 500 containing `"usage limits are exceeded"` or HTTP 403 containing `"request blocked"`, the limiter sleeps for 10.0 seconds and retries the request once before propagating errors.
@@ -276,34 +277,35 @@ TwitTUI uses a resilient data ingestion pipeline designed to provide full browsi
 |                                    Show Catalog Ingestion                                          |
 |                                                                                                    |
 |  1. Check in-memory self._shows_cache                                                              |
-|  2. Check SQLite twittui_cache (category='shows', key='app_id:app_key')                            |
+|  2. Check SQLite twittui_cache (category='shows', key=SHA-256(app_id + '\0' + app_key))            |
 |  3. Execute GET /shows?page=1&range=1000 via ApiRateLimiter                                        |
 |  4. Extract Start Dates from API 'created' timestamp                                               |
-|  5. Scrape End Dates from public web archives: /episodes?filter[shows]={id} (Conserves API quota)  |
-|  6. Fallback: Load 26 built-in DEFAULT_SHOWS if API credentials are missing or network fails       |
+|  5. Scrape End Dates concurrently (max 4 in-flight, 24h TTL) from /episodes?filter[shows]={id}     |
+|  6. Fallback: Load 26 built-in DEFAULT_SHOWS from twittui/shows.py if API fails/credentials absent |
 +----------------------------------------------------------------------------------------------------+
                                                   │
                                                   ▼
 +----------------------------------------------------------------------------------------------------+
 |                                      Episode Ingestion                                             |
 |                                                                                                    |
-|  1. Check _LazySQLiteEpisodesCache (SQLite category='episodes', key=show_id)                      |
+|  1. Check _LazySQLiteEpisodesCache (normalized SQLite table twittui_episodes, lazy migration)      |
 |  2. Execute GET /episodes?filter[shows]={id}&page={page}&range=50 via ApiRateLimiter               |
-|  3. Deduplicate and merge newly fetched episodes into SQLite persistent store                      |
-|  4. Fallback 1: Public Show RSS feed at feeds.twit.tv/{show_slug}_{video_hd|audio}.xml             |
-|  5. Fallback 2: Club TWiT Memberful subscriber RSS feed at twit.memberfulcontent.com/rss/{feed_id} |
+|  3. Deduplicate and merge newly fetched episodes into normalized twittui_episodes rows             |
+|  4. Fallback 1: Public Show RSS feed derived from SHOW_REGISTRY (feeds.twit.tv/{slug}_*.xml)       |
+|  5. Fallback 2: Club TWiT Memberful subscriber RSS feed (twit.memberfulcontent.com/rss/{feed_id})  |
 |  6. Fallback 3: Triangulation public web archive scraping                                          |
 +----------------------------------------------------------------------------------------------------+
 ```
 
-### 6.1 Show Catalog Ingestion & Date Bound Resolution
-1. **Catalog Pagination**: Queries `https://twit.tv/api/v1.0/shows?page=1&range=1000` in a single request. If next links exist, it traverses them sequentially.
-2. **Date Extraction Strategy**:
+### 6.1 Show Catalog Ingestion, Unified Show Registry & Date Bound Resolution
+1. **Single-Source Show Registry (`twittui/shows.py`)**: `SHOW_REGISTRY` maps canonical show names to frozen `ShowEntry` dataclasses defining public RSS filenames, Memberful feed IDs, search path slug aliases, and transcript slug candidates. `KNOWN_SHOW_FEEDS`, `MEMBERFUL_SHOW_FEEDS`, `SHOW_SEARCH_SLUGS`, and `TRANSCRIPT_SLUG_MAP` are all derived from `SHOW_REGISTRY`.
+2. **Catalog Pagination**: Queries `https://twit.tv/api/v1.0/shows?page=1&range=1000` in a single request and traverses validated `https://twit.tv/api/v1.0/shows` next links.
+3. **Date Extraction Strategy**:
    - **Show Start Dates**: Extracted directly from the show object's `created` timestamp in the API payload.
-   - **Show End Dates (`fetch_show_date_bounds`)**: To avoid consuming the strict 5 call/minute API limit, TwitTUI scrapes end dates from the public web archive: `https://twit.tv/episodes?filter[shows]={show_id}&page=1`. It extracts the maximum page number via regex (`class="page-number-input".*max="(\d+)"`), reads the newest date from page 1, and reads the oldest date from the last page.
-   - **Status Label Formatting**: Formats show selector entries with fixed-width tags:
-     - `[Active YYYY-MM-DD - YYYY-MM-DD] Show Title`
-     - `[Ended  YYYY-MM-DD - YYYY-MM-DD] Show Title`
+   - **Show End Dates (`fetch_show_date_bounds` / `_refresh_show_dates`)**: To avoid consuming the 5 call/minute API limit, TwitTUI scrapes end dates from `https://twit.tv/episodes?filter[shows]={show_id}&page=1` using bounded concurrency (up to 4 in-flight worker jobs) and caches results in SQLite with a **24-hour TTL** (`SHOW_DATE_BOUNDS_TTL_SECONDS = 86400`).
+   - **Status Label Formatting**: Formats show selector entries with fixed-width columns:
+     - `YYYY-MM-DD - YYYY-MM-DD  Active   Show Title`
+     - `YYYY-MM-DD - YYYY-MM-DD  Ended    Show Title`
 
 ### 6.2 Episode Ingestion & Cache Reconciliation
 1. **Iterative Block Pagination**: Episodes are retrieved via `GET /episodes?filter[shows]={show_id}&page={page}&range=50`.
@@ -313,10 +315,12 @@ TwitTUI uses a resilient data ingestion pipeline designed to provide full browsi
    - If public RSS fails, it checks Club TWiT Memberful subscriber feeds via `fetch_club_twit_rss_items()`.
    - For legacy productions like *Triangulation*, it scrapes episode lists from HTML archives (`fetch_triangulation_archive`).
 
-### 6.3 Persistent SQLite Caching (`twittui_cache.db`)
-Persistent data is stored in an SQLite 3 database located at `~/.cache/twittui/twittui_cache.db` (or `$SNAP_USER_DATA/.cache/twittui/twittui_cache.db` under Snap confinement).
+### 6.3 Persistent SQLite Caching (`twittui/cache.py`, `twittui_cache.db`)
+Persistent data is stored in a WAL-mode SQLite 3 database with owner-only permissions (`0o600` on the DB and `-wal`/`-shm` sidecars; `0o700` on the parent directory) located at `~/.cache/twittui/twittui_cache.db` (or `$SNAP_USER_DATA/twittui_cache.db` under Snap confinement).
 
 ```sql
+PRAGMA journal_mode = WAL;
+
 CREATE TABLE IF NOT EXISTS twittui_cache (
     category TEXT NOT NULL,
     cache_key TEXT NOT NULL,
@@ -326,23 +330,35 @@ CREATE TABLE IF NOT EXISTS twittui_cache (
     PRIMARY KEY (category, cache_key)
 );
 CREATE INDEX IF NOT EXISTS idx_twittui_cache_category ON twittui_cache(category);
+
+CREATE TABLE IF NOT EXISTS twittui_episodes (
+    show_id TEXT NOT NULL,
+    episode_key TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    airing_date TEXT,
+    data_json TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (show_id, episode_key)
+);
+CREATE INDEX IF NOT EXISTS idx_twittui_episodes_show_pos ON twittui_episodes(show_id, position);
+CREATE INDEX IF NOT EXISTS idx_twittui_episodes_show_date ON twittui_episodes(show_id, airing_date);
 ```
 
-#### Categories Stored:
-- `shows`: Aggregated show catalogs keyed by `app_id:app_key`.
-- `show_date_bounds`: Start and end date bounds keyed by `show_id`.
-- `episodes`: Complete episode archives keyed by `show_id`.
+#### Categories & Tables Stored:
+- `twittui_episodes`: Normalized per-episode rows keyed by `(show_id, episode_key)` and ordered by `position`. Legacy monolithic `twittui_cache` episode blobs are migrated lazily on first read.
+- `shows`: Aggregated show catalogs keyed by SHA-256 hash (`_shows_cache_key_hash(app_id, app_key)`) so API credentials are never stored in plaintext (legacy `app_id:app_key` rows are auto-migrated with `PRAGMA secure_delete = ON`).
+- `show_date_bounds`: Start and end date bounds keyed by `show_id`, enforced with a **24-hour TTL** (`SHOW_DATE_BOUNDS_TTL_SECONDS = 86400`); expired rows are purged on startup.
 - `episode_detail`: Detailed single-episode payloads keyed by `episode_id`.
 - `media_webpage`: Scraped media URLs keyed by `clean_path|||audio_flag`.
 - `triangulation_archive`: Triangulation archive pages keyed by `page_num|||sort_flag`.
 - `api_search`: Full-text API search responses keyed by query string.
+- Clearing the full cache deletes all rows from both tables and runs `VACUUM` + `PRAGMA wal_checkpoint(TRUNCATE)` to reclaim disk space.
 
 #### Transparent On-Demand Cache Loading (`_LazySQLiteEpisodesCache`):
 Because historical episode archives for long-running shows (like *This Week in Tech* or *Security Now*) contain thousands of records, loading every show's episode archive into RAM at startup would degrade performance.
-- `_LazySQLiteEpisodesCache` subclasses Python's standard `dict`.
-- At startup, it queries only `SELECT cache_key FROM twittui_cache WHERE category = 'episodes'`, populating an in-memory set of available keys (`_unloaded_keys`).
-- When a show's episodes are accessed via `__getitem__`, `get()`, or `in`, it intercepts the call, executes `SELECT data_json FROM twittui_cache WHERE category = 'episodes' AND cache_key = ?`, parses the JSON payload into memory, and removes the key from `_unloaded_keys`.
-- This ensures zero deserialization overhead for unviewed shows while preserving standard dictionary semantics.
+- `_LazySQLiteEpisodesCache` subclasses Python's `dict` and implements full mapping semantics (`__contains__`, `__getitem__`, `get`, `setdefault`, `pop`, `update`, `__iter__`, `keys`, `values`, `items`, `|`, `|=`, `copy`, `clear`).
+- At startup, it queries only `SELECT DISTINCT show_id FROM twittui_episodes` (plus any unmigrated legacy `cache_key`s), populating `_unloaded_keys` with zero `json.loads()` calls.
+- When a show's episodes are accessed on demand, `load_normalized_episodes()` fetches only that show's rows ordered by `position` (lazily migrating any legacy blob row) and caches the decoded list in memory.
 
 ---
 
@@ -380,29 +396,29 @@ To eliminate the frustration of misspelled queries, partial abbreviations, and g
 | Tier 3: Pure Python Double Metaphone Phonetic Correlation                         |
 | - Lawrence Philips Double Metaphone Algorithm (double_metaphone.py)               |
 | - Generates Primary and Alternate 4-character phonetic keys                       |
-| - Matches sound-alikes: 'ballacer' -> 'Ballecer' (PLSR == PLSR -> Score: 95.0)    |
-| - Matches 'algorhtm' -> 'algorithms' (ALKR == ALKR -> Score: 95.0)                |
+| - Primary phonetic match: Score 80.0; Secondary phonetic match: Score 72.0        |
+| - Matches sound-alikes: 'ballacer' -> 'Ballecer' (PLSR == PLSR)                   |
+| - Matches 'algorhtm' -> 'algorithms' (ALKR == ALKR)                               |
 +-----------------------------------------------------------------------------------+
                                         │
                                         ▼
                   ┌──────────────────────────────────────────┐
-                  │ Apply Domain-Specific Field Multipliers: │
-                  │ Title: 1.3x                              │
-                  │ Hosts/Guests: 1.25x                      │
-                  │ Topics/Tags: 1.2x                        │
-                  │ Episode Number: 1.1x                     │
-                  │ Description/Notes: 1.0x                  │
+                  │ Enforce per-word minimum threshold:      │
+                  │ - 68.0 for tokens >= 4 characters        │
+                  │ - 80.0 for short tokens (< 4 characters) │
+                  │ Average matched word scores (capped 99.0)│
                   └──────────────────────────────────────────┘
                                         │
                                         ▼
                   ┌──────────────────────────────────────────┐
-                  │ Filter results below threshold (65.0)    │
-                  │ Sort descending by weighted match score  │
+                  │ Sort descending by match score (100.0 -> │
+                  │ 60.0); find_match_context breaks ties by │
+                  │ Description (3) > Hosts (2) > Title (1)  │
                   └──────────────────────────────────────────┘
 ```
 
 ### 7.1 Tier 1: Exact Substring Matching
-Evaluates all whitespace-delimited query tokens against candidate episode fields (`Title`, `Hosts / Guests`, `Topics`, `Description / Show Notes`, `Episode Number`). If every query word is present as a case-insensitive substring within the target metadata, it assigns an exact match score of `100.0`.
+`extract_searchable_text()` derives its searchable corpus directly from `get_episode_fields()` (HTML-stripped `Title`, `Hosts / Guests`, `Topics`, `Description / Show Notes`, `Episode Number`, `Length`, and `Size`) so filtering and match-context inspection always evaluate the exact same fields. If every query word is present as a case-insensitive substring within the target metadata, `compute_match_score()` assigns an exact match score of `100.0`.
 
 ### 7.2 Tier 2: Ranked Fuzzy & `fzf` Subsequence Scoring
 When exact matching fails:
@@ -412,21 +428,21 @@ When exact matching fails:
 2. **`fuzzy_ratio(s1, s2)` / `levenshtein_distance(s1, s2)`**: Computes minimum character edits (insertions, deletions, substitutions):
    $$\text{ratio} = \frac{(|s_1| + |s_2|) - d_{\text{Lev}}(s_1, s_2)}{|s_1| + |s_2|} \times 100$$
 3. Uses `rapidfuzz.fuzz.ratio` and `partial_ratio` when the C-accelerated library is available, falling back to pure Python Levenshtein implementations seamlessly.
-4. Normalizes Tier 2 scores into the range `60.0`–`99.0`, ranking them just below exact matches.
+4. Normalizes Tier 2 & Tier 3 scores into the range `60.0`–`99.0`, ranking them strictly below exact (`100.0`) matches, with a default `min_word_threshold` of `68.0` (`80.0` for tokens shorter than 4 characters).
 
 ### 7.3 Tier 3: Pure Python Double Metaphone Phonetic Engine (`double_metaphone.py`)
-`double_metaphone.py` (648 lines) is a pure Python implementation of Lawrence Philips' **Double Metaphone** algorithm (published in 2000). It converts strings into primary and secondary 4-character phonetic encoding codes:
-- Handles silent initial consonants (`GN`, `KN`, `PN`, `WR`, `PS`).
-- Contextual `C` rules (soft `/S/` before `E`/`I`/`Y`, hard `/K/`, Germanic `CH` as `/K/`, Italian `CCIA`).
+`double_metaphone.py` is a pure Python implementation of Lawrence Philips' **Double Metaphone** algorithm. It converts strings into primary and secondary 4-character phonetic encoding codes:
+- Handles silent initial consonants (`GN`, `KN`, `PN`, `WR`, `PS`) and Unicode Latin characters (`Ç`, `Ñ`).
+- Contextual `C`, `T`/`TH`/`TCH`, and `S`/`SCH` rules (soft `/S/` before `E`/`I`/`Y`, hard `/K/`, Germanic `CH`/`SCH`, Italian `CCIA`, English `TH`/`TCH`).
 - Spanish and Romance sound shifts (`LL` to `/L/` or silent vowel glides).
 - Vowel dropping and consonant classification.
 
 #### Phonetic Equivalence Examples:
-- Query `ballacer` generates `(PLSR, PLSR)`. Candidate token `Ballecer` generates `(PLSR, PLSR)`. Since their primary keys match, it awards a phonetic score of `95.0`.
-- Query `algorhtm` generates `(ALKR, ALKR)`. Candidate token `algorithms` generates `(ALKR, ALKR)`, resulting in a `95.0` match.
+- Query `ballacer` generates `("PLSR", "PLSR")`. Candidate token `Ballecer` generates `("PLSR", "PLSR")`. Primary phonetic equivalence scores `80.0` (secondary equivalence scores `72.0`), combined cleanly with any stronger Tier 2 fuzzy similarity when displaying match context.
+- Query `algorhtm` generates `("ALKR", "ALKR")`. Candidate token `algorithms` generates `("ALKR", "ALKR")`, matching phonetically even with missing vowels.
 
 ### 7.4 Search Match Inspection & KWIC Snippets
-When an episode matches a query, `find_match_context()` builds a `MatchContext` object capturing provenance:
+When an episode matches a query, `find_match_context()` requires every query word to match at least one episode field and builds a `MatchContext` object capturing provenance (breaking equal-score ties by field priority: `Description / Show Notes` (3) > `Hosts / Guests` (2) > `Title` (1)):
 - `field_name`: The matched field (`Description / Show Notes`, `Title`, `Hosts / Guests`).
 - `matched_token`: The exact token found in the metadata (e.g., `Ballecer`).
 - `query_token`: The user's query token (e.g., `ballacer`).
@@ -539,66 +555,84 @@ TwitTUI centralizes configuration inside `.env` files and manages live state upd
 | `TWITFUZZYSEARCH` | `1` | Enables Tier 2 ranked fuzzy / subsequence search matching (`1`). |
 | `TWITPHONETICSEARCH` | `1` | Enables Tier 3 Double Metaphone phonetic sound-alike search (`1`). |
 | `twitapiratelimit` | `5` | API sliding window request limit per rolling minute. |
+| `TWITTUI_LOG_FILE` | *None* | Optional diagnostic log file path (created with `0o600` permissions; overridden by `--log-file`). |
+| `TWITTUI_LOG_LEVEL` | `DEBUG` | Diagnostic log verbosity when file logging is active (overridden by `--log-level`). |
 
-### 11.2 Environment Resolution & Persistence
-1. **Loading (`load_twittui_dotenv`)**: In standard execution, it resolves `.env` in the current working directory, falling back to the module directory. Under Snap confinement, it isolates settings inside `$SNAP_USER_DATA/.env`. It calls `load_dotenv(..., override=True)` so disk settings take precedence over inherited environment variables.
-2. **Saving (`save_env_setting`)**: Serializes modified preferences back to `.env` using atomic file replacements, preserving existing comments and ordering.
+### 11.2 Environment Resolution & Persistence (`twittui/config.py`)
+1. **Loading (`load_twittui_dotenv`)**: Under Snap confinement, resolves `$SNAP_USER_DATA/.env` (or `$SNAP_USER_COMMON/.env`) first; otherwise resolves `.env` via `find_dotenv(usecwd=True)` and the project root directory. Calls `load_dotenv(..., override=True)` so disk settings take precedence over inherited environment variables.
+2. **Saving (`save_env_setting` & `_schedule_env_save`)**: Interactive preference edits are debounced (`0.35s`) on the UI loop and flushed immediately on window close or exit (`_flush_pending_env_saves()`). Settings are updated via `python-dotenv`'s `set_key` (locking permissions to `0o600`), with a `write_restricted_file()` fallback that opens with `O_WRONLY | O_CREAT | O_TRUNC` and enforces `0o600` via `os.fchmod()`.
 
 ---
 
-## 12. Packaging & Sandboxing Infrastructure
+## 12. Packaging, CI & Sandboxing Infrastructure
 
-### 12.1 Standalone Binary Packaging Engine (`installer.py`)
+### 12.1 Unified Python Packaging (`pyproject.toml`, `setup.py`, `requirements.txt`)
+Packaging metadata is synchronized across `pyproject.toml`, `setup.py`, and `requirements.txt`:
+- Distributes both the `twittui` package (`packages=["twittui"]`) and top-level compatibility modules (`py_modules`).
+- Conditions `toga-gtk` and `PyGObject`/`pycairo` on `sys_platform == "linux"` so macOS, Windows, and headless Linux environments install cleanly.
+- Declares `yt-dlp` and structured `[project.optional-dependencies]` / `extras_require` groups (`gtk`, `textual`, `youtube`, `security` [`defusedxml`, `nh3`], `fast-search` [`rapidfuzz`], `xml` [`lxml`], `dev` [`PyYAML`, `ruff`, `mypy`]).
+
+### 12.2 Standalone Binary Packaging Engine (`installer.py`)
 `installer.py` compiles standalone, self-contained binaries using PyInstaller:
-1. **Shared Library Verification (`check_python_shared_library`)**: Verifies that the Python interpreter was compiled with shared library support (`--enable-shared` / `libpython3.X.so`). PyInstaller on Linux cannot bundle statically linked Python binaries.
-2. **Asset Bundling**: Packages icons (`resources/`), stylesheets (`feed-style.css`, `feed-style.xsl`), documentation (`README.md`), and API specifications (`twittv.apib`).
-3. **Hidden Import Collection**: Collects dynamic imports including `tiered_search`, `double_metaphone`, `toga_gtk`, `toga_textual`, `textual`, and GObject overrides.
-4. **PATH Installation (`install_twittui`)**: Locates writable user binary directories (`~/.local/bin`, `~/bin`, `/usr/local/bin`), copies the binary via `shutil.copy2`, and sets executable permissions (`0o755`).
-5. **Hygiene Engine (`clean_build_artifacts`)**: Cleans up build directories (`build/`, `dist/`) and `.spec` files, with an option to uninstall PyInstaller (`--uninstall-pyinstaller`).
+1. **Shared Library Verification (`check_python_shared_library`)**: Verifies that the Python interpreter was compiled with shared library support (`--enable-shared` / `libpython3.X.so`).
+2. **Asset & Package Bundling**: Packages icons (`resources/`), stylesheets (`feed-style.css`, `feed-style.xsl`), documentation (`README.md`), API specifications (`twittv.apib`), and collects `twittui`, `toga`, `toga_textual`, `textual`, `dotenv`, `requests`, plus optional `toga_gtk`, `gi`, and `yt_dlp` probed from the target interpreter (`--strip` is opt-in on POSIX to avoid corrupting native wheels).
+3. **PATH Installation (`install_twittui`)**: Locates writable user binary directories (`~/.local/bin`, `~/bin`, `/usr/local/bin`) while excluding virtualenvs, relative `.`, `/tmp`, and language-toolchain paths; copies the binary via `shutil.copy2` and applies umask-respecting executable permissions.
+4. **Hygiene Engine (`clean_build_artifacts`)**: Cleans up `build/`, `dist/`, and `.spec` files, with an option to uninstall PyInstaller (`--uninstall-pyinstaller`).
 
-### 12.2 Ubuntu Core 24 Snap Packaging (`snap/`)
-TwitTUI includes production Snap packaging configurations supporting cross-distribution deployment on Ubuntu, Debian, Fedora, Arch, and openSUSE:
-- **`snap/snapcraft.yaml`**: Built on Ubuntu Core 24 (`core24`) with strict confinement (`confinement: strict`). Declares desktop plugs (`desktop`, `desktop-legacy`, `wayland`, `x11`, `opengl`, `audio-playback`, `network`, `home`, `removable-media`).
+### 12.3 Ubuntu Core 24 Snap Packaging (`snap/`)
+TwitTUI includes production Snap packaging configurations supporting cross-distribution deployment:
+- **`snap/snapcraft.yaml`**: Built on Ubuntu Core 24 (`core24`) with strict confinement (`confinement: strict`). Installs the Python package cleanly into site-packages via `pip install .`, stages `shared-mime-info` (running `update-mime-database`), `mpv`, `ffmpeg`, and `.env.example` (never copying developer `.env` or test files). Declares desktop plugs (`desktop`, `desktop-legacy`, `wayland`, `x11`, `opengl`, `audio-playback`, `network`, `network-bind`, `home`, `removable-media`).
 - **Dual Snap Entry Points**:
   - `twittui`: Launches GTK graphical desktop UI (`bin/twittui-launcher --gtk`).
   - `twittui.tui`: Launches Textual terminal interface (`bin/twittui-launcher --textual`).
 - **Runtime Sandbox Launcher (`snap/local/launcher.sh`)**:
   - Sanitizes incompatible host theme variables (`GTK_MODULES`, `UBUNTU_MENUPROXY`).
-  - Sets up library paths (`LD_LIBRARY_PATH`), GObject typelibs (`GI_TYPELIB_PATH`), and schema directories (`GSETTINGS_SCHEMA_DIR`).
-  - Automatically queries and builds the GDK Pixbuf loaders cache (`gdk-pixbuf-query-loaders > $SNAP_USER_DATA/.loaders.cache`) to ensure image and icon rendering functions across all desktop environments.
+  - Configures library paths (`LD_LIBRARY_PATH`), GObject typelibs (`GI_TYPELIB_PATH`), and schema directories (`GSETTINGS_SCHEMA_DIR`).
+  - Seeds `$SNAP_USER_DATA/.env` from `.env.example` on first run and generates the GDK Pixbuf loaders cache (`gdk-pixbuf-query-loaders > $SNAP_USER_DATA/.loaders.cache`).
+
+### 12.4 Continuous Integration (`.github/workflows/ci.yml`)
+GitHub Actions runs on pushes and pull requests across Python 3.11 and 3.12 on `ubuntu-latest`:
+- Installs GTK 3 / PyGObject / `shared-mime-info` / `xvfb` and optional extras (`security`, `fast-search`, `dev` including `PyYAML`).
+- Runs `python -m py_compile *.py twittui/*.py`.
+- Executes the complete `unittest` suite under `xvfb-run -a` with `SNAP_USER_DATA` and `TWITTUI_CACHE_DB` isolated to `${{ runner.temp }}`.
 
 ---
 
 ## 13. Quality Assurance & Automated Test Suite
 
-TwitTUI maintains an automated test suite comprising 263 unit and integration tests across 20 test modules.
+TwitTUI maintains an automated test suite comprising **300 unit and integration tests across 25 test modules**, running cleanly on both headless terminals and graphical sessions without hanging on interactive TTYs or mutating `.env`.
 
 ```
 test_*.py Test Coverage Matrix:
-├── test_api_rate_limiter.py       # Sliding window rate limiting, 5 req/min cap, 403/500 retry logic
-├── test_backend_factory.py        # Backend detection, CLI switches (--gtk, --textual), fallback recovery
-├── test_caching.py                # SQLite cache initialization, TTL expiration, LazyEpisodesCache proxy
-├── test_episode_activation.py     # Row selection, double-click streaming activation, keyboard events
-├── test_episode_search.py         # Multi-tier search (Exact, Fuzzy, Double Metaphone), sorting stability
-├── test_gtk_maximize_layout.py    # GTK window state events, table resizing, flexbox layout stability
-├── test_hover_popup.py            # 3-second hover dwell timers, metadata dialog, KWIC snippet auto-scroll
-├── test_install.py                # PyInstaller packaging, shared library validation, artifact cleanup
-├── test_open_destination.py       # Cross-platform directory creation and file manager launching
-├── test_preferences.py            # In-app settings dialog, search toggles, .env serialization
-├── test_resolutions.py            # Multi-resolution format parsing, sorting, batch resolution modals
-├── test_security.py               # Markdown and HTML sanitization, dangerous URI scheme filtering
-├── test_show_catalog.py           # Catalog pagination, date scraping, rate-limit wait modal sync
-├── test_show_folders.py           # Show folder directory creation, filename sanitization
-├── test_snap.py                   # Snapcraft recipe, desktop entry validity, sandbox launcher script
-├── test_splash_screen.py          # Terminal splash banner, Textual modal splash, GTK splash window
-├── test_tooltips.py               # Tooltip injection across GTK and Textual widgets
-├── test_tui_multiselect.py        # Textual table multi-selection, space toggle, checkbox gutter
-├── test_tui_streaming_and_stdout.py# Stream launching, stdout redirection, Textual context safety
-└── test_youtube_download.py       # YouTube format extraction and yt-dlp download handling
+├── test_api_rate_limiter.py          # Sliding window rate limiting, 5 req/min cap, 403/500 retry logic
+├── test_architecture_suggestions.py  # twittui/ package, SHOW_REGISTRY, normalized WAL cache & 24h TTL, bounded concurrency, logging, CI
+├── test_backend_factory.py           # Backend detection, CLI switches (--gtk, --textual), fallback recovery
+├── test_caching.py                   # Persistent SQLite caching, incremental episode merge, gap recovery, clear cache
+├── test_critical_fixes.py            # Credential hashing, HTML/XSLT XSS hardening, lazy cache completeness, worker error cleanup, WebView/Divider
+├── test_double_metaphone.py          # Double Metaphone phonetic rules (TH/TCH/SCH, Ç/Ñ, silent consonants)
+├── test_episode_activation.py        # Row selection, double-click streaming activation, keyboard events
+├── test_episode_search.py            # Multi-tier search (Exact, Fuzzy, Double Metaphone), sorting stability
+├── test_gtk_maximize_layout.py       # GTK window state events, table resizing, flexbox layout stability
+├── test_hover_popup.py               # 3-second hover dwell timers, metadata dialog, KWIC snippet auto-scroll
+├── test_install.py                   # PyInstaller packaging, shared library validation, PATH filtering, cleanup
+├── test_low_fixes.py                 # Debounced .env writes, _LocalHTMLServer exit cleanup, Toga 0.5 dialogs, POSIX stdio isolation
+├── test_medium_fixes.py              # GTK auto-scroll, glob escaping, length/size separation, row targeting, Snap MIME/YAML fallback
+├── test_open_destination.py          # Cross-platform directory creation and file manager launching
+├── test_preferences.py               # In-app settings dialog, search toggles, .env serialization
+├── test_resolutions.py               # Multi-resolution format parsing, sorting, batch resolution modals
+├── test_security.py                  # Stream argument safety, 0o600 files, local server token auth, HTML/XML sanitization
+├── test_show_catalog.py              # Catalog pagination, date scraping, rate-limit wait modal sync
+├── test_show_folders.py              # Show folder directory creation, filename sanitization
+├── test_snap.py                      # Snapcraft recipe, desktop entry validity, sandbox launcher script
+├── test_splash_screen.py             # Terminal splash banner, Textual modal splash, GTK splash window
+├── test_tooltips.py                  # Tooltip injection across GTK and Textual widgets
+├── test_tui_multiselect.py           # Textual table multi-selection, space toggle, checkbox gutter
+├── test_tui_streaming_and_stdout.py  # Stream launching, stdout redirection, lazy cache performance, Textual context safety
+└── test_youtube_download.py          # YouTube format extraction and yt-dlp download handling
 ```
 
-The test suite runs with Python's standard `unittest` runner:
+The test suite runs directly with Python's standard `unittest` runner:
 ```bash
-GDK_BACKEND=x11 DISPLAY=:0 WAYLAND_DISPLAY="" python -m unittest discover
+python -m unittest discover -s . -p "test_*.py" -v
 ```
-All 263 tests execute in under 30 seconds, confirming regression-free operation across the entire codebase.
+All 300 tests execute reliably without interactive TTY prompts or developer `.env` modifications, confirming regression-free operation across the entire codebase.

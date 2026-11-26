@@ -11,12 +11,64 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "toga>=0.4.0",
-    "toga-gtk>=0.4.0",
+    "toga-gtk>=0.4.0; sys_platform == 'linux'",
     "toga-textual>=0.4.0",
     "textual>=0.40.0",
     "requests>=2.28.0",
     "python-dotenv>=1.0.0",
+    "yt-dlp>=2023.1.1",
+]
+
+[project.optional-dependencies]
+gtk = [
+    "toga-gtk>=0.4.0",
+    "PyGObject>=3.42.0",
+    "pycairo>=1.20.0",
+]
+textual = [
+    "toga-textual>=0.4.0",
+    "textual>=0.40.0",
+]
+youtube = [
+    "yt-dlp>=2023.1.1",
+]
+security = [
+    "defusedxml>=0.7.1",
+    "nh3>=0.2.14",
+]
+fast-search = [
+    "rapidfuzz>=3.0.0",
+]
+xml = [
+    "lxml>=4.9.0",
+]
+dev = [
+    "PyYAML>=6.0",
+    "ruff>=0.4.0",
+    "mypy>=1.8.0",
 ]
 
 [project.scripts]
 twittui = "main:main"
+
+[tool.setuptools]
+packages = ["twittui"]
+py-modules = [
+    "main",
+    "installer",
+    "twittui_form",
+    "toga_textual_backend",
+    "generate_icon",
+    "tiered_search",
+    "double_metaphone",
+]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"*" = [
+    "feed-style.css",
+    "feed-style.xsl",
+    "twittv.apib",
+    "README.md",
+    "resources/*",
+]

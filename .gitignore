@@ -2,10 +2,11 @@
 .env
 *.env
 
-# Python bytecode and virtual environment
+# Python bytecode, packaging metadata, and virtual environments
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
 .venv/
 env/
 venv/
@@ -14,13 +15,15 @@ venv/
 .idea/
 .vscode/
 
-# Application temporary/partial downloads
+# Logs and temporary/partial downloads
+*.log
 *.part
 *.download
 
 # Build and distribution artifacts
 dist/
 build/
+*.spec
 
 # Snapcraft build artifacts
 parts/

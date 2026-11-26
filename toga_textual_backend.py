@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager, redirect_stdout
 import io
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,8 @@ import toga
 import toga.dialogs
 import toga.platform
 from toga_textual.widgets.base import Widget
+
+_logger = logging.getLogger("twittui.textual_backend")
 
 
 @contextmanager
@@ -116,7 +119,7 @@ class RateLimitScreen(_AppContextScreenMixin, ModalScreen):
                 if isinstance(stack, list) and self in stack and stack[-1] is not self:
                     stack.remove(self)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'RateLimitScreen._try_dismiss', exc_info=True)
 
     def close_wait(self) -> None:
         self._close_requested = True
@@ -183,7 +186,7 @@ class SplashScreen(_AppContextScreenMixin, ModalScreen):
             if msg_label:
                 msg_label.update(message)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'SplashScreen.update_message', exc_info=True)
 
     def _try_dismiss(self) -> None:
         if not self._close_requested:
@@ -199,7 +202,7 @@ class SplashScreen(_AppContextScreenMixin, ModalScreen):
                 if isinstance(stack, list) and self in stack and stack[-1] is not self:
                     stack.remove(self)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'SplashScreen._try_dismiss', exc_info=True)
 
     def close_splash(self) -> None:
         self._close_requested = True
@@ -229,7 +232,7 @@ def _resolve_dialog_future(future: Any, value: Any) -> None:
         elif hasattr(future, "set_result"):
             future.set_result(value)
     except Exception:
-        pass
+        _logger.debug("Ignored exception in %s", '_resolve_dialog_future', exc_info=True)
 
 
 class TextualDialogScreen(_AppContextScreenMixin, ModalScreen):
@@ -298,14 +301,14 @@ class TextualDialogScreen(_AppContextScreenMixin, ModalScreen):
             if buttons:
                 buttons[0].focus()
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualDialogScreen.on_mount', exc_info=True)
 
     def _finish(self, value: Any) -> None:
         _resolve_dialog_future(self.future, value)
         try:
             self.dismiss(value)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualDialogScreen._finish', exc_info=True)
 
     def action_cancel_dialog(self) -> None:
         self._finish(self.default_result)
@@ -342,7 +345,7 @@ class BaseTextualDialog:
                     native.push_screen(screen)
                 return
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'BaseTextualDialog.show', exc_info=True)
         _resolve_dialog_future(future, self.default_result)
 
 
@@ -421,14 +424,14 @@ class TextualChoiceDialogScreen(_AppContextScreenMixin, ModalScreen):
             else:
                 self.query_one("#btn_choice_cancel", Button).focus()
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualChoiceDialogScreen.on_mount', exc_info=True)
 
     def _finish(self, result: Any) -> None:
         _resolve_dialog_future(self.future, result)
         try:
             self.dismiss(result)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualChoiceDialogScreen._finish', exc_info=True)
 
     def action_cancel(self) -> None:
         self._finish(None)
@@ -446,7 +449,7 @@ class TextualChoiceDialogScreen(_AppContextScreenMixin, ModalScreen):
                 self._finish(selected)
                 return
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TextualChoiceDialogScreen.on_button_pressed', exc_info=True)
 
         self._finish(None)
 
@@ -479,7 +482,7 @@ class ChoiceDialog(toga.dialogs.Dialog):
                     native.push_screen(screen)
                 return
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'ChoiceDialog.show', exc_info=True)
         _resolve_dialog_future(future, self.default_result)
 
 
@@ -513,7 +516,7 @@ class _FoldersOnlyDirectoryTree(DirectoryTree):
                 if p.is_dir() and not p.name.startswith("."):
                     filtered.append(p)
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", '_FoldersOnlyDirectoryTree.filter_paths', exc_info=True)
         return sorted(filtered, key=lambda item: item.name.lower())
 
 
@@ -626,7 +629,7 @@ class TextualSelectFolderScreen(_AppContextScreenMixin, ModalScreen):
         try:
             self.query_one("#folder_tree", _FoldersOnlyDirectoryTree).focus()
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualSelectFolderScreen.on_mount', exc_info=True)
 
     def _finish(self, selected: Path | None) -> None:
         if selected is None:
@@ -639,7 +642,7 @@ class TextualSelectFolderScreen(_AppContextScreenMixin, ModalScreen):
         try:
             self.dismiss(result)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualSelectFolderScreen._finish', exc_info=True)
 
     def _navigate_to(self, target_dir: Path) -> None:
         try:
@@ -650,7 +653,7 @@ class TextualSelectFolderScreen(_AppContextScreenMixin, ModalScreen):
                 tree = self.query_one("#folder_tree", _FoldersOnlyDirectoryTree)
                 tree.path = resolved
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualSelectFolderScreen._navigate_to', exc_info=True)
 
     def on_directory_tree_directory_selected(self, event: DirectoryTree.DirectorySelected) -> None:
         try:
@@ -658,7 +661,7 @@ class TextualSelectFolderScreen(_AppContextScreenMixin, ModalScreen):
             self.current_dir = selected_path
             self.query_one("#folder_path_input", TextualInputWidget).value = str(selected_path)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualSelectFolderScreen.on_directory_tree_directory_selected', exc_info=True)
 
     def on_input_submitted(self, event: TextualInputWidget.Submitted) -> None:
         if event.input.id == "folder_path_input":
@@ -713,7 +716,7 @@ class SelectFolderDialog:
                     native.push_screen(screen)
                 return
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'SelectFolderDialog.show', exc_info=True)
         res = Path(self.initial_directory or os.getcwd())
         _resolve_dialog_future(future, [res] if self.multiple_select else res)
 
@@ -806,7 +809,7 @@ class TextualSelection(Widget):
                 self.native.value = Select.BLANK
                 self._selected_index = None
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualSelection._sync_options_to_native', exc_info=True)
         finally:
             self._suppress_change = False
 
@@ -853,7 +856,7 @@ class TextualSelection(Widget):
             else:
                 self.native.value = Select.BLANK
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualSelection.select_item', exc_info=True)
         finally:
             self._suppress_change = False
 
@@ -958,7 +961,7 @@ class TogaDataTable(DataTable):
                         self.refresh_row(idx)
             self.refresh_bindings()
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TogaDataTable._refresh_marked_visuals', exc_info=True)
 
     def _notify_selection_changed(self) -> None:
         if self.interface.on_select:
@@ -1147,14 +1150,14 @@ class TogaDataTable(DataTable):
                 if hasattr(self.interface, 'on_hover_row') and callable(self.interface.on_hover_row):
                     self.interface.on_hover_row(row_idx)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TogaDataTable.on_mouse_move', exc_info=True)
 
     def on_leave(self, event: Any) -> None:
         try:
             if hasattr(self.interface, 'on_hover_leave') and callable(self.interface.on_hover_leave):
                 self.interface.on_hover_leave()
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TogaDataTable.on_leave', exc_info=True)
 
 
 class TextualTable(Widget):
@@ -1208,7 +1211,7 @@ class TextualTable(Widget):
                 self._row_keys.append(rk)
             self.native.refresh_bindings()
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualTable._sync_data_to_native', exc_info=True)
 
     def change_source(self, source: Any) -> None:
         self._rows = list(source) if source else []
@@ -1263,7 +1266,7 @@ class TextualTable(Widget):
                 self.native.refresh_bindings()
                 return
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TextualTable.source_insert', exc_info=True)
         self._sync_data_to_native()
 
     def source_remove(self, index: int, item: Any) -> None:
@@ -1319,7 +1322,7 @@ class TextualTable(Widget):
                     self.native.update_cell(rk, col_key, val_str)
                 return
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TextualTable.source_change', exc_info=True)
         self._sync_data_to_native()
 
     def get_selection(self) -> list[int] | int | None:
@@ -1339,7 +1342,7 @@ class TextualTable(Widget):
             try:
                 self.native.move_cursor(row=row_index)
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TextualTable.scroll_to_row', exc_info=True)
 
     def insert_column(self, index: int, column: Any) -> None:
         self._sync_data_to_native()
@@ -1364,7 +1367,7 @@ class TogaProgressBar(TextualProgressBar):
         try:
             self.update(total=self.impl._max, progress=self.impl._value)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TogaProgressBar.on_mount', exc_info=True)
 
 
 class TextualProgressBarImpl(Widget):
@@ -1393,7 +1396,7 @@ class TextualProgressBarImpl(Widget):
         try:
             self.native.update(progress=value)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualProgressBarImpl.set_value', exc_info=True)
 
     def get_max(self) -> float | None:
         return self._max
@@ -1403,7 +1406,7 @@ class TextualProgressBarImpl(Widget):
         try:
             self.native.update(total=value)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualProgressBarImpl.set_max', exc_info=True)
 
     def rehint(self) -> None:
         self.interface.intrinsic.width = at_least(20)
@@ -1450,12 +1453,12 @@ class TextualWebView(Widget):
             display_text = text if text else "WebView (Documentation / Web Content)"
             self.native_static.update(display_text)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualWebView.set_content', exc_info=True)
         try:
             if hasattr(self, "interface") and getattr(self.interface, "on_webview_load", None):
                 self.interface.on_webview_load()
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualWebView.set_content', exc_info=True)
 
     def set_url(self, url: str | None, future: asyncio.Future | None = None) -> None:
         self._url = url or None
@@ -1463,18 +1466,18 @@ class TextualWebView(Widget):
             label = f"Web Content: {self._url}" if self._url else "WebView (Documentation / Web Content)"
             self.native_static.update(label)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualWebView.set_url', exc_info=True)
         if future is not None and not future.done():
             try:
                 future.set_result(None)
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TextualWebView.set_url', exc_info=True)
         if self._url:
             try:
                 if hasattr(self, "interface") and getattr(self.interface, "on_webview_load", None):
                     self.interface.on_webview_load()
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TextualWebView.set_url', exc_info=True)
 
     def get_url(self) -> str | None:
         return self._url
@@ -1662,7 +1665,7 @@ class TextualSwitch(Widget):
         try:
             self.native_label.styles.padding = (1, 0, 0, 1)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualSwitch.create', exc_info=True)
         self.native = Horizontal(self.native_switch, self.native_label)
 
     def get_text(self) -> str:
@@ -1674,7 +1677,7 @@ class TextualSwitch(Widget):
         try:
             self.refresh()
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualSwitch.set_text', exc_info=True)
 
     def get_value(self) -> bool:
         return bool(getattr(self.native_switch, 'value', self._initial_value))
@@ -1694,7 +1697,7 @@ class TextualSwitch(Widget):
                 if hasattr(self, 'interface') and getattr(self.interface, 'on_change', None) is not None:
                     self.interface.on_change()
             except Exception:
-                pass
+                _logger.debug("Ignored exception in %s", 'TextualSwitch.set_value', exc_info=True)
 
     def set_enabled(self, value: bool) -> None:
         super().set_enabled(value)
@@ -1706,7 +1709,7 @@ class TextualSwitch(Widget):
             if hasattr(self.native_switch, 'app') and hasattr(self.native_switch.app, 'set_focus'):
                 self.native_switch.app.set_focus(self.native_switch)
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'TextualSwitch.focus', exc_info=True)
 
     def rehint(self) -> None:
         text_len = len(self.get_text())
@@ -1771,7 +1774,7 @@ def patch_toga_textual() -> None:
                     self._bindings.bind("f2", "open_preferences", "Preferences", show=True, priority=True)
                     self._bindings.bind("ctrl+o", "open_preferences", "Preferences", show=False, priority=True)
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'patch_toga_textual._patched_toga_app_init', exc_info=True)
 
             toga_textual.app.TogaApp.__init__ = _patched_toga_app_init
 
@@ -1781,7 +1784,7 @@ def patch_toga_textual() -> None:
                     if callable(action):
                         action()
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'patch_toga_textual._invoke_toga_command', exc_info=True)
 
             def _get_system_commands_with_toga(self: Any, screen: Screen) -> Any:
                 try:
@@ -1801,7 +1804,7 @@ def patch_toga_textual() -> None:
                                     lambda c=cmd, a=toga_app: _invoke_toga_command(a, c),
                                 )
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'patch_toga_textual._get_system_commands_with_toga', exc_info=True)
                 yield from orig_get_system_commands(self, screen)
 
             def _action_open_preferences(self: Any) -> None:
@@ -1940,12 +1943,23 @@ def patch_toga_textual() -> None:
 
             orig_main_loop = toga_textual.app.App.main_loop
 
+            class _DiscardingTextIO:
+                """Discard stdout writes cleanly without unbounded memory accumulation."""
+
+                def write(self, s: str) -> int:
+                    return len(s) if s else 0
+
+                def flush(self) -> None:
+                    pass
+
+                def isatty(self) -> bool:
+                    return False
+
             def safe_main_loop(self: Any) -> None:
                 if getattr(self, "headless", False):
                     orig_main_loop(self)
                     return
-                sink = io.StringIO()
-                with redirect_stdout(sink):
+                with redirect_stdout(_DiscardingTextIO()):
                     orig_main_loop(self)
 
             toga_textual.app.App.main_loop = safe_main_loop
@@ -1986,14 +2000,14 @@ def patch_toga_textual() -> None:
                             candidate.focus()
                             break
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'patch_toga_textual._focus_first_content_control', exc_info=True)
 
             def _refresh_and_focus_window(screen_obj: Any, focus_content: bool = False) -> None:
                 try:
                     if screen_obj.interface.content is not None:
                         screen_obj.interface.content.refresh()
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'patch_toga_textual._refresh_and_focus_window', exc_info=True)
                 if focus_content:
                     _focus_first_content_control(screen_obj)
 
@@ -2006,7 +2020,7 @@ def patch_toga_textual() -> None:
                     try:
                         self._bindings.bind("escape", "close_secondary_window", "Close", show=False, priority=True)
                     except Exception:
-                        pass
+                        _logger.debug("Ignored exception in %s", 'patch_toga_textual._toga_window_on_mount', exc_info=True)
                     if not hasattr(self, "titlebar") or self.titlebar is None:
                         self.titlebar = TitleBarCls(self.impl.get_title())
                     else:
@@ -2087,7 +2101,7 @@ def patch_toga_textual() -> None:
                         if self.native not in installed.values():
                             app_native.install_screen(self.native, name=self.interface.id)
                     except Exception:
-                        pass
+                        _logger.debug("Ignored exception in %s", 'patch_toga_textual._patched_win_show', exc_info=True)
                     stack = getattr(app_native, "_screen_stack", None)
                     if not isinstance(stack, list) or self.native not in stack:
                         previous_current = getattr(app_impl, "_current_window", None)
@@ -2098,12 +2112,12 @@ def patch_toga_textual() -> None:
                             try:
                                 previous_current.interface.on_lose_focus()
                             except Exception:
-                                pass
+                                _logger.debug("Ignored exception in %s", 'patch_toga_textual._patched_win_show', exc_info=True)
                         try:
                             self.interface.on_gain_focus()
                             self.interface.on_show()
                         except Exception:
-                            pass
+                            _logger.debug("Ignored exception in %s", 'patch_toga_textual._patched_win_show', exc_info=True)
 
             def _patched_win_hide(self: Any) -> None:
                 self._is_visible = False
@@ -2126,7 +2140,7 @@ def patch_toga_textual() -> None:
                             if len(stack) > 1 and stack[-1] is self.native:
                                 app_native.pop_screen()
                         except Exception:
-                            pass
+                            _logger.debug("Ignored exception in %s", 'patch_toga_textual._patched_win_hide', exc_info=True)
                     main_win = getattr(app, "main_window", None)
                     main_impl = getattr(main_win, "_impl", None) if main_win is not None else None
                     if app_impl is not None and getattr(app_impl, "_current_window", None) is self:
@@ -2137,12 +2151,12 @@ def patch_toga_textual() -> None:
                         self.interface.on_lose_focus()
                         self.interface.on_hide()
                     except Exception:
-                        pass
+                        _logger.debug("Ignored exception in %s", 'patch_toga_textual._patched_win_hide', exc_info=True)
                     if main_win is not None:
                         try:
                             main_win.on_gain_focus()
                         except Exception:
-                            pass
+                            _logger.debug("Ignored exception in %s", 'patch_toga_textual._patched_win_hide', exc_info=True)
 
             def _patched_win_close(self: Any) -> None:
                 self._is_visible = False
@@ -2158,7 +2172,7 @@ def patch_toga_textual() -> None:
                     if getattr(self.native, "is_active", False):
                         self.native.dismiss(None)
                 except Exception:
-                    pass
+                    _logger.debug("Ignored exception in %s", 'patch_toga_textual._patched_win_close', exc_info=True)
 
             def _patched_textual_close(self: Any) -> None:
                 app = getattr(self.interface, "app", None)
@@ -2202,7 +2216,7 @@ def patch_toga_textual() -> None:
                     try:
                         app.native.install_screen(self.native, name=self.interface.id)
                     except Exception:
-                        pass
+                        _logger.debug("Ignored exception in %s", 'patch_toga_textual.safe_set_app', exc_info=True)
 
             toga_textual.window.Window.set_app = safe_set_app
             toga_textual.window.Window._twittui_set_app_patched = True
@@ -2219,7 +2233,7 @@ def patch_toga_textual() -> None:
                         try:
                             child._impl.install(parent=self)
                         except Exception:
-                            pass
+                            _logger.debug("Ignored exception in %s", 'patch_toga_textual.safe_mount', exc_info=True)
 
             toga_textual.widgets.base.Widget._mount = safe_mount
             toga_textual.widgets.base.Widget._twittui_mount_patched = True
@@ -2267,6 +2281,6 @@ def patch_toga_textual() -> None:
                 for dialog_name in ['InfoDialog', 'ErrorDialog', 'QuestionDialog', 'ConfirmDialog', 'SelectFolderDialog', 'OpenFileDialog', 'SaveFileDialog', 'ChoiceDialog', 'SelectResolutionDialog']:
                     setattr(f, dialog_name, getattr(DialogsFactory, dialog_name))
         except Exception:
-            pass
+            _logger.debug("Ignored exception in %s", 'patch_toga_textual', exc_info=True)
     except Exception as e:
-        pass
+        _logger.debug("Ignored exception in %s", 'patch_toga_textual', exc_info=True)

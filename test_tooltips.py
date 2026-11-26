@@ -262,10 +262,10 @@ class TestMainFormUITooltips(unittest.TestCase):
         """Verify Help menu Visit Homepage handler invokes browser with the project homepage URL."""
         with patch("webbrowser.open") as mock_open:
             self.form.visit_homepage()
-            mock_open.assert_called_once_with("https://github.com/mainmeister/twittui.git")
+            mock_open.assert_called_once_with("https://github.com/mainmeister/twittui")
         with patch("webbrowser.open") as mock_open:
             self.form.on_open_homepage()
-            mock_open.assert_called_once_with("https://github.com/mainmeister/twittui.git")
+            mock_open.assert_called_once_with("https://github.com/mainmeister/twittui")
 
 
 class TestModalAndDialogTooltips(unittest.TestCase):

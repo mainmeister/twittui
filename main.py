@@ -3,6 +3,10 @@ import importlib.util
 import os
 import sys
 
+from twittui.logging_config import configure_logging, get_logger
+
+_logger = get_logger("cli")
+
 _GTK_MODULE_ENV_VARS = (
     "GTK_MODULES",
     "GTK_PATH",
@@ -42,8 +46,8 @@ def sanitize_gtk_module_env() -> None:
         if hasattr(libc, "unsetenv"):
             for var in _GTK_MODULE_ENV_VARS:
                 libc.unsetenv(var.encode("ascii"))
-    except Exception:
-        pass
+    except (OSError, AttributeError):
+        _logger.debug("Unable to unset GTK environment variables via libc", exc_info=True)
 
 
 def configure_gtk_environment() -> None:
@@ -82,8 +86,8 @@ def configure_gtk_environment() -> None:
             pass
         from gi.repository import Gtk
         Gtk.init_check()
-    except (ImportError, Exception):
-        pass
+    except (ImportError, ValueError, RuntimeError, OSError):
+        _logger.debug("GTK environment pre-initialization unavailable", exc_info=True)
 
 def is_graphical_display_available() -> bool:
     """Check if an active graphical display (X11 or Wayland) is available."""
@@ -166,6 +170,20 @@ def parse_backend_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Path to Python interpreter to use for PyInstaller compilation (e.g. /usr/bin/python3)"
     )
     parser.add_argument(
+        '--log-file',
+        dest='log_file',
+        type=str,
+        default=None,
+        help="Write structured diagnostic logs to this file (also configurable via TWITTUI_LOG_FILE)"
+    )
+    parser.add_argument(
+        '--log-level',
+        dest='log_level',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        default=None,
+        help="Diagnostic log verbosity when --log-file or TWITTUI_LOG_FILE is set"
+    )
+    parser.add_argument(
         'extra_args',
         nargs='*',
         help=argparse.SUPPRESS
@@ -176,6 +194,14 @@ def parse_backend_args(argv: list[str] | None = None) -> argparse.Namespace:
 def resolve_toga_backend(argv: list[str] | None = None, prompt_interactive: bool = True) -> str:
     """Resolve and configure the Toga backend based on CLI arguments, environment, or user prompt."""
     args = parse_backend_args(argv)
+
+    log_file_arg = getattr(args, 'log_file', None)
+    log_level_arg = getattr(args, 'log_level', None)
+    if log_file_arg:
+        os.environ['TWITTUI_LOG_FILE'] = log_file_arg
+    if log_level_arg:
+        os.environ['TWITTUI_LOG_LEVEL'] = log_level_arg
+    configure_logging(log_file=log_file_arg, level=log_level_arg)
 
     if getattr(args, 'clean', False) and not getattr(args, 'install', False):
         from installer import clean_build_artifacts
@@ -255,8 +281,11 @@ def resolve_toga_backend(argv: list[str] | None = None, prompt_interactive: bool
                             break
                         else:
                             print("Invalid choice. Please enter 1 for GTK or 2 for Textual.")
-                except (EOFError, KeyboardInterrupt):
+                except EOFError:
                     chosen_backend = 'toga_gtk' if has_display else 'toga_textual'
+                except KeyboardInterrupt:
+                    print("\nAborted by user.", file=sys.stderr)
+                    sys.exit(130)
             else:
                 chosen_backend = 'toga_gtk' if has_display else 'toga_textual'
         elif has_gtk:
@@ -298,55 +327,81 @@ def show_terminal_splash(message: str = "Loading TwitTUI, please wait...") -> No
                 "======================================================================\n"
             )
             print(splash, flush=True)
-    except Exception:
+    except (OSError, ValueError):
+        _logger.debug("Unable to render terminal splash banner", exc_info=True)
+
+class _NullTextIO:
+    """Zero-allocation discarding text stream (avoids unbounded io.StringIO growth)."""
+
+    def write(self, s: str) -> int:
+        return len(s) if s else 0
+
+    def flush(self) -> None:
         pass
+
+    def isatty(self) -> bool:
+        return False
+
+
+def _configure_textual_warnings() -> None:
+    """Suppress expected Textual/Toga deprecation and unimplemented warnings in TUI mode."""
+    import warnings
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*\[toga_textual\] Not implemented:.*",
+    )
+    warnings.filterwarnings("ignore", category=ResourceWarning)
+
 
 def main(argv: list[str] | None = None) -> None:
     """TwitTUI application entry point."""
-    show_terminal_splash("Loading TwitTUI, please wait...")
+    # Resolve CLI flags (--help, --clean, --install, backend) BEFORE printing splash banner.
     backend = resolve_toga_backend(argv)
+    show_terminal_splash("Loading TwitTUI, please wait...")
 
     if backend == 'toga_textual':
-        import warnings
-        warnings.filterwarnings(
-            "ignore",
-            message=r".*\[toga_textual\] Not implemented:.*",
-        )
-        warnings.filterwarnings("ignore", category=ResourceWarning)
+        _configure_textual_warnings()
 
     from contextlib import ExitStack, redirect_stdout
-    import io
-    from twittui_form import load_twittui_dotenv, patch_toga_icons, patch_toga_gtk_app, main as create_app
+    from twittui_form import load_twittui_dotenv, main as create_app
     load_twittui_dotenv()
-    if backend == 'toga_gtk':
-        patch_toga_icons(include_gtk=True)
-        patch_toga_gtk_app()
-    else:
-        patch_toga_icons(include_gtk=False)
+
+    gtk_fallback_triggers = (
+        "Cannot identify an active display",
+        "DISPLAY",
+        "recognize the image file format",
+        "gdk-pixbuf-error-quark",
+        "Unable to load icon",
+        "maximum recursion depth",
+        "Failed to register",
+        "AccessDenied",
+        "AppArmor",
+    )
 
     try:
         with ExitStack() as stack:
             if backend == 'toga_textual':
-                stack.enter_context(redirect_stdout(io.StringIO()))
+                stack.enter_context(redirect_stdout(_NullTextIO()))
             app = create_app()
             app.main_loop()
-    except (RuntimeError, Exception) as e:
+    except Exception as e:
         err_msg = str(e)
-        if ("Cannot identify an active display" in err_msg or "DISPLAY" in err_msg or "Couldn’t recognize the image file format" in err_msg or "gdk-pixbuf-error-quark" in err_msg or "Unable to load icon" in err_msg or "maximum recursion depth" in err_msg or "Failed to register" in err_msg or "AccessDenied" in err_msg or "AppArmor" in err_msg) and backend != "toga_textual":
+        if any(trigger in err_msg for trigger in gtk_fallback_triggers) and backend != "toga_textual":
             backends = get_installed_toga_backends()
             if backends.get("textual"):
                 print(f"\n[!] GTK desktop backend failed: {e}", file=sys.stderr)
                 print("[*] Automatically falling back to Textual (Terminal User Interface) backend...\n", file=sys.stderr)
                 import toga.platform
                 os.environ["TOGA_BACKEND"] = "toga_textual"
+                _configure_textual_warnings()
                 try:
                     toga.platform.get_backend.cache_clear()
                     toga.platform.get_factory.cache_clear()
-                except Exception:
-                    pass
+                except AttributeError:
+                    _logger.debug("Toga backend cache_clear unavailable during fallback", exc_info=True)
                 from toga_textual_backend import patch_toga_textual
                 patch_toga_textual()
-                with redirect_stdout(io.StringIO()):
+                with redirect_stdout(_NullTextIO()):
                     app = create_app()
                     app.main_loop()
                 return

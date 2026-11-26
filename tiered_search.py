@@ -7,6 +7,7 @@ Matching Pipeline:
 """
 
 import html
+import logging
 import re
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any, Tuple, Optional
@@ -17,6 +18,8 @@ except ImportError:
     rf_fuzz = None
 
 from double_metaphone import double_metaphone, get_phonetic_keys
+
+_logger = logging.getLogger("twittui.search")
 
 
 @dataclass
@@ -66,8 +69,8 @@ def fuzzy_ratio(s1: str, s2: str) -> float:
     if rf_fuzz is not None:
         try:
             return float(rf_fuzz.ratio(s1_low, s2_low))
-        except Exception:
-            pass
+        except (TypeError, ValueError, RuntimeError):
+            _logger.debug("rapidfuzz.ratio fallback triggered", exc_info=True)
     dist = levenshtein_distance(s1_low, s2_low)
     total_len = len(s1_low) + len(s2_low)
     return max(0.0, ((total_len - dist) / total_len) * 100.0)
@@ -136,8 +139,8 @@ def format_duration_str(val: Any) -> str:
                 if h > 0:
                     return f"{h:02d}:{m:02d}:{s:02d}"
                 return f"{m:02d}:{s:02d}"
-            except Exception:
-                pass
+            except (ValueError, TypeError):
+                _logger.debug("Invalid structured duration dict: %r", val)
         return ''
     s = str(val).strip()
     if not s:
@@ -309,8 +312,8 @@ def compute_match_score(
                     pr = float(rf_fuzz.partial_ratio(qw, t_clean))
                     if pr > best_w_score:
                         best_w_score = max(best_w_score, pr)
-                except Exception:
-                    pass
+                except (TypeError, ValueError, RuntimeError):
+                    _logger.debug("rapidfuzz.partial_ratio fallback triggered", exc_info=True)
 
         # Tier 3: Phonetic (Double Metaphone) fallback for this query token
         if phonetic_enabled and best_w_score < 75.0:

@@ -5,11 +5,14 @@ building a standalone non-debug binary, and installing it into a directory on th
 user's local executable search PATH.
 """
 
+import logging
 import os
 import platform
 import shutil
 import subprocess
 import sys
+
+_logger = logging.getLogger("twittui.installer")
 
 
 def format_shared_library_error(python_executable: str | None = None) -> str:
@@ -68,8 +71,8 @@ def is_pyinstaller_installed(python_executable: str | None = None) -> bool:
         res = subprocess.run([py_exec, "-m", "PyInstaller", "--version"], capture_output=True, text=True)
         if res.returncode == 0:
             return True
-    except Exception:
-        pass
+    except (OSError, subprocess.SubprocessError):
+        _logger.debug("PyInstaller subprocess probe failed for %s", py_exec, exc_info=True)
     if python_executable is None or python_executable == sys.executable:
         try:
             import PyInstaller  # type: ignore # noqa: F401
@@ -138,14 +141,15 @@ def find_local_executable_path(target_dir: str | None = None) -> str:
         return expanded
 
     is_windows = platform.system() == "Windows"
-    path_dirs = [os.path.abspath(p.strip()) for p in os.environ.get("PATH", "").split(os.pathsep) if p.strip()]
+    raw_path_entries = [p.strip() for p in os.environ.get("PATH", "").split(os.pathsep) if p.strip()]
+    path_dirs = [os.path.abspath(p) for p in raw_path_entries if os.path.isabs(p)]
 
     if is_windows:
         # Preferred directories on Windows
         candidates = [
-            os.path.join(sys.prefix, "Scripts"),
-            os.path.expandvars(r"%USERPROFILE%\AppData\Local\Microsoft\WindowsApps"),
             os.path.expandvars(r"%LOCALAPPDATA%\Programs\twittui\bin"),
+            os.path.expandvars(r"%USERPROFILE%\AppData\Local\Microsoft\WindowsApps"),
+            os.path.join(sys.prefix, "Scripts"),
         ]
     else:
         # Preferred user binary directories on Unix/Linux/macOS
@@ -154,9 +158,6 @@ def find_local_executable_path(target_dir: str | None = None) -> str:
             os.path.expanduser("~/bin"),
             "/usr/local/bin",
         ]
-        if hasattr(sys, "real_prefix") or (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix):
-            # Running inside a virtualenv
-            candidates.append(os.path.join(sys.prefix, "bin"))
 
     # First check if any preferred candidate is in PATH
     for cand in candidates:
@@ -169,12 +170,30 @@ def find_local_executable_path(target_dir: str | None = None) -> str:
                 os.makedirs(cand_norm, exist_ok=True)
                 return cand_norm
 
-    # Check any directory currently in PATH that is writable by the user
-    for p in path_dirs:
+    # Build exclusion set for ephemeral virtualenvs and language-specific toolchain directories
+    excluded_prefixes: list[str] = []
+    venv_env = os.environ.get("VIRTUAL_ENV")
+    if venv_env:
+        excluded_prefixes.append(os.path.abspath(venv_env))
+    if hasattr(sys, "real_prefix") or (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix):
+        excluded_prefixes.append(os.path.abspath(sys.prefix))
+
+    toolchain_markers = ("/.venv/", "/venv/", "/.cargo/", "/.nvm/", "/.pyenv/", "/node_modules/")
+
+    # Check any absolute directory currently in PATH that is writable by the user
+    for raw_p in raw_path_entries:
+        if raw_p in (".", "./") or not os.path.isabs(raw_p):
+            continue
+        p = os.path.abspath(raw_p)
+        if p in ("/tmp", "/var/tmp", "/"):
+            continue
+        if any(p == pref or p.startswith(pref + os.sep) for pref in excluded_prefixes):
+            continue
+        norm_check = p.replace("\\", "/").rstrip("/") + "/"
+        if any(marker in norm_check for marker in toolchain_markers):
+            continue
         if os.path.isdir(p) and os.access(p, os.W_OK):
-            # Avoid placing directly in root temp or root system directories
-            if p not in ("/tmp", "/var/tmp", "/"):
-                return p
+            return p
 
     # Fallback to standard candidate (creating it)
     fallback = candidates[0]
@@ -182,10 +201,52 @@ def find_local_executable_path(target_dir: str | None = None) -> str:
     return fallback
 
 
+def _probe_packages_in_interpreter(packages: tuple[str, ...], py_exec: str) -> set[str]:
+    """Check which optional packages are importable in the target Python interpreter."""
+    import importlib.util
+    import json
+
+    same_interp = (
+        not py_exec
+        or os.path.abspath(py_exec) == os.path.abspath(sys.executable)
+    )
+    resolved_exec = py_exec if os.path.isfile(py_exec) else (shutil.which(py_exec) if py_exec else None)
+
+    if not same_interp and resolved_exec:
+        try:
+            code = (
+                "import importlib.util, json, sys; "
+                "pkgs = sys.argv[1:]; "
+                "print(json.dumps([p for p in pkgs if importlib.util.find_spec(p) is not None]))"
+            )
+            res = subprocess.run(
+                [resolved_exec, "-c", code, *packages],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                found = json.loads(res.stdout.strip())
+                if isinstance(found, list):
+                    return {str(p) for p in found}
+        except (OSError, subprocess.SubprocessError, ValueError):
+            _logger.debug("Target interpreter package probe failed for %s", resolved_exec, exc_info=True)
+
+    available: set[str] = set()
+    for pkg in packages:
+        try:
+            if importlib.util.find_spec(pkg) is not None:
+                available.add(pkg)
+        except (ImportError, ValueError, AttributeError):
+            _logger.debug("Could not probe package %s", pkg, exc_info=True)
+    return available
+
+
 def build_executable(
     project_root: str | None = None,
     output_dir: str | None = None,
     python_executable: str | None = None,
+    strip_binary: bool = False,
 ) -> str:
     """Run PyInstaller to create a non-debug standalone executable of TwitTUI."""
     root = project_root or os.path.dirname(os.path.abspath(__file__))
@@ -211,8 +272,9 @@ def build_executable(
         f"--specpath={root}",
     ]
 
-    # Non-debug: ensure --debug is not included. Use --strip on POSIX if available.
-    if platform.system() != "Windows" and shutil.which("strip"):
+    # Non-debug: ensure --debug is not included. Keep --strip opt-in on POSIX so binary
+    # wheels and PyGObject shared libraries are not corrupted by default.
+    if strip_binary and platform.system() != "Windows" and shutil.which("strip"):
         cmd.append("--strip")
 
     # Add data assets if present in the project directory
@@ -246,23 +308,21 @@ def build_executable(
             cmd.append(f"--icon={ic}")
             break
 
-    # Collect packages and hidden imports needed by Toga / Textual / GTK backends
-    packages_to_collect = ["toga", "toga_textual", "textual", "dotenv", "requests"]
-    for extra_pkg in ("toga_gtk", "gi"):
-        try:
-            import importlib.util
-            if importlib.util.find_spec(extra_pkg) is not None:
-                packages_to_collect.append(extra_pkg)
-        except Exception:
-            pass
+    # Collect packages and hidden imports needed by TwitTUI / Toga / Textual / GTK / yt-dlp in target interpreter
+    packages_to_collect = ["twittui", "toga", "toga_textual", "textual", "dotenv", "requests"]
+    optional_available = _probe_packages_in_interpreter(("toga_gtk", "gi", "yt_dlp"), py_exec)
+    for extra_pkg in ("toga_gtk", "gi", "yt_dlp"):
+        if extra_pkg in optional_available:
+            packages_to_collect.append(extra_pkg)
     for pkg in packages_to_collect:
         cmd.append(f"--collect-all={pkg}")
 
     cmd.append("--hidden-import=toga_textual_backend")
     cmd.append("--hidden-import=tiered_search")
     cmd.append("--hidden-import=double_metaphone")
-    cmd.append("--hidden-import=gi.overrides.Gtk")
-    cmd.append("--hidden-import=gi.overrides.Pango")
+    if "gi" in optional_available and platform.system() != "Windows":
+        cmd.append("--hidden-import=gi.overrides.Gtk")
+        cmd.append("--hidden-import=gi.overrides.Pango")
     cmd.append(main_script)
 
     # Verify Python shared library availability before building
@@ -390,6 +450,7 @@ def install_twittui(
     project_root: str | None = None,
     python_executable: str | None = None,
     clean_build_artifacts: bool = True,
+    strip_binary: bool = False,
 ) -> str:
     """Run full installation pipeline: install PyInstaller, build non-debug binary, and copy to local PATH."""
     root = project_root or os.path.dirname(os.path.abspath(__file__))
@@ -398,10 +459,13 @@ def install_twittui(
     ensure_pyinstaller_installed(python_executable=python_executable)
 
     # 2. Build non-debug executable
-    built_exe = build_executable(
-        project_root=root,
-        python_executable=python_executable,
-    )
+    build_kwargs: dict[str, object] = {
+        "project_root": root,
+        "python_executable": python_executable,
+    }
+    if strip_binary:
+        build_kwargs["strip_binary"] = True
+    built_exe = build_executable(**build_kwargs)
 
     # 3. Determine local executable search PATH directory
     install_dir = find_local_executable_path(target_dir=target_dir)
@@ -411,11 +475,13 @@ def install_twittui(
     print(f"Installing executable to local PATH destination: '{destination_path}'...")
     shutil.copy2(built_exe, destination_path)
 
-    # Make executable on Unix-like operating systems
+    # Make executable on Unix-like operating systems while respecting the active process umask
     if platform.system() != "Windows":
         try:
-            current_mode = os.stat(destination_path).st_mode
-            os.chmod(destination_path, current_mode | 0o755)
+            current_umask = os.umask(0o022)
+            os.umask(current_umask)
+            desired_mode = (0o755 & ~current_umask) | 0o700
+            os.chmod(destination_path, desired_mode)
         except Exception as e:
             print(f"Warning: Could not set executable permissions on '{destination_path}': {e}")
 
@@ -489,6 +555,11 @@ if __name__ == "__main__":
         default=None,
         help="Path to Python interpreter to use for PyInstaller compilation (e.g. /usr/bin/python3)",
     )
+    parser.add_argument(
+        "--strip",
+        action="store_true",
+        help="Strip binary symbols with PyInstaller --strip on POSIX (opt-in)",
+    )
 
     args = parser.parse_args()
 
@@ -503,6 +574,7 @@ if __name__ == "__main__":
             target_dir=args.install_dir,
             python_executable=args.python_executable,
             clean_build_artifacts=not args.no_clean,
+            strip_binary=getattr(args, "strip", False),
         )
         if args.uninstall_pyinstaller:
             clean_build_artifacts(
