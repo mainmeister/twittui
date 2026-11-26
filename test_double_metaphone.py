@@ -55,6 +55,37 @@ class TestDoubleMetaphone(unittest.TestCase):
         self.assertEqual(double_metaphone("AGNOSTIC"), ("AKNS", "ANST"))
         self.assertEqual(double_metaphone("TAGLIARO"), ("TKLR", "TLR"))
         self.assertEqual(double_metaphone("LEWITZ"), ("LTS", "LFX"))
+        self.assertEqual(double_metaphone("POGGIO"), ("PJ", "PK"))
+        # Hard double-G in English (-UGGI/-IGGI) must NOT be treated as Italian AGGI/OGGI
+        self.assertEqual(double_metaphone("MUGGING"), ("MKNK", "MKNK"))
+        self.assertEqual(double_metaphone("DIGGING"), ("TKNK", "TKNK"))
+
+    def test_canonical_philips_edge_vectors(self) -> None:
+        # CHAE -> ('K', 'X')
+        self.assertEqual(double_metaphone("MICHAEL"), ("MKL", "MXL"))
+        # Spanish silent LL must not prematurely truncate secondary code via empty-string append
+        self.assertEqual(double_metaphone("CABALLEROS"), ("KPLR", "KPRS"))
+        self.assertEqual(double_metaphone("TORTILLA"), ("TRTL", "TRT"))
+        # J Slavo-Germanic guard: BAJA -> ('PJ', 'PH'), WOJAK -> ('AJK', 'FJK')
+        self.assertEqual(double_metaphone("BAJA"), ("PJ", "PH"))
+        self.assertEqual(double_metaphone("WOJAK"), ("AJK", "FJK"))
+        # R French -IER guard respects is_slavo_germanic
+        self.assertEqual(double_metaphone("KROGIER"), ("KRJR", "KRJR"))
+        # S SIO/SIA/SIAN respects is_slavo_germanic
+        self.assertEqual(double_metaphone("ASIA"), ("AS", "AX"))
+        self.assertEqual(double_metaphone("KASIA"), ("KS", "KS"))
+        # T TION/TIA/TCH vs non-canonical TIEN
+        self.assertEqual(double_metaphone("NATION"), ("NXN", "NXN"))
+        self.assertEqual(double_metaphone("TIEN"), ("TN", "TN"))
+        # Initial W + WITZ/WICZ falls through to emit ('ATS', 'FFX')
+        self.assertEqual(double_metaphone("WITZ"), ("ATS", "FFX"))
+        # Z rule uses is_slavo_germanic (not inverted VAN/VON check)
+        self.assertEqual(double_metaphone("AMAZING"), ("AMSN", "AMSN"))
+        self.assertEqual(double_metaphone("LAZY"), ("LS", "LS"))
+        self.assertEqual(double_metaphone("PIZZA"), ("PS", "PTS"))
+        self.assertEqual(double_metaphone("KAZAKH"), ("KSK", "KTSK"))
+        # Space-delimited C rule ('MAC CAFFREY')
+        self.assertEqual(double_metaphone("MAC CAFFREY"), ("MKFR", "MKFR"))
 
     def test_twit_host_name_phonetic_matching(self) -> None:
         # Ensure existing TWiT phonetic search pairs remain equivalent

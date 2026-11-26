@@ -99,7 +99,7 @@ def double_metaphone(string: str) -> Tuple[str, str]:
             if string_at(current, 2, "CH"):
                 if current > 0 and string_at(current, 4, "CHAE"):
                     primary.append('K')
-                    secondary.append('K')
+                    secondary.append('X')
                     current += 2
                     continue
 
@@ -292,8 +292,7 @@ def double_metaphone(string: str) -> Tuple[str, str]:
                 continue
 
             if string_at(current + 1, 1, "E", "I", "Y") or \
-                    string_at(current - 1, 4, "AGGI", "OGGI") or \
-                    string_at(current, 3, "GGI"):
+                    string_at(current - 1, 4, "AGGI", "OGGI"):
                 if string_at(0, 4, "VAN ", "VON ") or string_at(0, 3, "SCH") or \
                         string_at(current + 1, 2, "ET"):
                     primary.append('K')
@@ -305,7 +304,10 @@ def double_metaphone(string: str) -> Tuple[str, str]:
                     else:
                         primary.append('J')
                         secondary.append('K')
-                current += 2
+                if substr(current + 1, 1) == 'G':
+                    current += 2
+                else:
+                    current += 1
                 continue
 
             if substr(current + 1, 1) == 'G':
@@ -340,14 +342,13 @@ def double_metaphone(string: str) -> Tuple[str, str]:
                 primary.append('J')
                 secondary.append('A')
             else:
-                if is_vowel(current - 1) and not string_at(0, 4, "SAN ") and \
+                if is_vowel(current - 1) and not is_slavo_germanic and \
                         (substr(current + 1, 1) == 'A' or substr(current + 1, 1) == 'O'):
                     primary.append('J')
                     secondary.append('H')
                 else:
                     if current == length - 1:
                         primary.append('J')
-                        secondary.append('')
                     else:
                         if not string_at(current + 1, 1, "L", "T", "K", "S", "N", "M", "B", "Z") and \
                                 not string_at(current - 1, 1, "S", "K", "L"):
@@ -374,7 +375,6 @@ def double_metaphone(string: str) -> Tuple[str, str]:
                         ((string_at(length - 2, 2, "AS", "OS") or string_at(length - 1, 1, "A", "O")) and
                          string_at(current - 1, 4, "ALLE")):
                     primary.append('L')
-                    secondary.append('')
                     current += 2
                     continue
                 current += 2
@@ -435,7 +435,7 @@ def double_metaphone(string: str) -> Tuple[str, str]:
             continue
 
         elif ch == 'R':
-            if current == length - 1 and not string_at(0, 4, "VAN ", "VON ") and \
+            if current == length - 1 and not is_slavo_germanic and \
                     string_at(current - 2, 2, "IE") and not string_at(current - 4, 2, "ME", "MA"):
                 secondary.append('R')
             else:
@@ -466,8 +466,12 @@ def double_metaphone(string: str) -> Tuple[str, str]:
                 current += 2
                 continue
             if string_at(current, 3, "SIO", "SIA") or string_at(current, 4, "SIAN"):
-                primary.append('S')
-                secondary.append('X')
+                if not is_slavo_germanic:
+                    primary.append('S')
+                    secondary.append('X')
+                else:
+                    primary.append('S')
+                    secondary.append('S')
                 current += 3
                 continue
             if (current == 0 and string_at(current + 1, 1, "M", "N", "L", "W")) or \
@@ -524,7 +528,7 @@ def double_metaphone(string: str) -> Tuple[str, str]:
             continue
 
         elif ch == 'T':
-            if string_at(current, 4, "TION", "TIEN") or string_at(current, 3, "TIA", "TCH"):
+            if string_at(current, 4, "TION") or string_at(current, 3, "TIA", "TCH"):
                 primary.append('X')
                 secondary.append('X')
                 current += 3
@@ -569,8 +573,6 @@ def double_metaphone(string: str) -> Tuple[str, str]:
                 else:
                     primary.append('A')
                     secondary.append('A')
-                current += 1
-                continue
             if (current == length - 1 and is_vowel(current - 1)) or \
                     string_at(current - 1, 5, "EWSKI", "EWSKY", "OWSKI", "OWSKY") or \
                     string_at(0, 3, "SCH"):
@@ -605,7 +607,7 @@ def double_metaphone(string: str) -> Tuple[str, str]:
                 current += 2
                 continue
             elif string_at(current + 1, 2, "ZO", "ZI", "ZA") or \
-                    (not string_at(0, 4, "VAN ", "VON ") and current > 0 and substr(current - 1, 1) != 'T'):
+                    (is_slavo_germanic and current > 0 and substr(current - 1, 1) != 'T'):
                 primary.append('S')
                 secondary.append('T')
                 secondary.append('S')

@@ -210,7 +210,15 @@ TwitTUI is an ambitious dual-backend (GTK 3 + Textual TUI) TWiT.tv podcast brows
 - **Recommended Fix**:
   Correct the slice lengths and rule emissions against Lawrence Philips' canonical specification (preserving `Ç`/`Ñ` before ASCII normalization), and add a dedicated `test_double_metaphone.py` covering standard test vectors.
 - **Applied Fix & Verification**:
-  Fixed `Ç`/`Ñ`/space preservation, `TH`/`TCH`, `GGI`, `SCH`, `GN`, `GLI`, `DG`, and `WICZ`/`WITZ` rules in `double_metaphone.py` and added 7 dedicated vector tests in `test_double_metaphone.py`.
+  1. **Character Preservation & Padding (`double_metaphone.py:16-38, 72-76, 408-412`)**: Preserved `'Ç'`, `'Ñ'`, and collapsed single spaces prior to encoding, and backed `substr()` with `padded = s + "      "` so `Ç`/`Ñ` branches and all boundary/space-matching rules (`"VAN "`, `"VON "`, `"SAN "`, `" C"`, `"IER "`, `"JOSE "`, trailing `" "`) are live and reachable.
+  2. **Canonical Slice Lengths, Emissions & `is_slavo_germanic` Guards (`double_metaphone.py`)**:
+     - `C` (`lines 100-104`): `CHAE` emits `('K', 'X')` (`MICHAEL` → `('MKL', 'MXL')`).
+     - `D` (`lines 194-205`): `DG` (non-`I/E/Y`) emits `('TK', 'TK')` (`EDGAR` → `('ATKR', 'ATKR')`).
+     - `G` (`lines 258-276, 294-311`): Fixed `GN` (`SIGN` → `('SN', 'SKN')`, `COGNAC` → `('KNK', 'KKNK')`, `AGNOSTIC` → `('AKNS', 'ANST')`, tautology removed), `GLI` (`TAGLIARO` → `('TKLR', 'TLR')`), and Italian `AGGI`/`OGGI` (`BAGGIO` → `('PJ', 'PK')`, `AGGI` → `('AJ', 'AK')`, `POGGIO` → `('PJ', 'PK')`) while keeping English hard `-UGGI`/`-IGGI` (`MUGGING` → `('MKNK', 'MKNK')`, `DIGGING` → `('TKNK', 'TKNK')`).
+     - `J` & `L` (`lines 345-352, 374-379`): Fixed `J` vowel-context rule to check `not is_slavo_germanic` (replacing dead `not string_at(0, 4, "SAN ")`: `BAJA` → `('PJ', 'PH')`, `WOJAK` → `('AJK', 'FJK')`), and removed empty `secondary.append('')` calls that polluted `len(secondary)` and prematurely terminated the 4-character loop (`CABALLEROS` → `('KPLR', 'KPRS')`).
+     - `R` & `S` (`lines 438-440, 468-476, 487-496`): Gated French final `-IER` and `SIO`/`SIA`/`SIAN` on `not is_slavo_germanic` (`ROGIER` → `('RJ', 'RJR')`, `KROGIER` → `('KRJR', 'KRJR')`, `ASIA` → `('AS', 'AX')`, `KASIA` → `('KS', 'KS')`), and fixed `SCH` secondary (`SCHOOL` → `('SKL', 'SKL')`, `SCHOONER` → `('SKNR', 'SKNR')`, `SCHENKER` → `('XNKR', 'SKNK')`).
+     - `T`, `W`, & `Z` (`lines 531-545, 569-586, 609-613`): Split `TION`/`TIA`/`TCH` (`('X', 'X')`, `current += 3`, removing non-canonical `"TIEN"`) from `TH`/`TTH` (`('0', 'T')`, `current += 2`), fixed `WICZ`/`WITZ` emissions (`('TS', 'FX')`) and initial `W` fallthrough (`WITZ` → `('ATS', 'FFX')`, `LEWITZ` → `('LTS', 'LFX')`), and fixed `Z` to check `is_slavo_germanic` instead of inverted `not string_at(0, 4, "VAN ", "VON ")` (`AMAZING` → `('AMSN', 'AMSN')`, `LAZY` → `('LS', 'LS')`, `PIZZA` → `('PS', 'PTS')`, `KAZAKH` → `('KSK', 'KTSK')`).
+  3. **Verification**: Added 8 dedicated canonical vector test methods in `test_double_metaphone.py` (all passing; AST check confirmed 0 `string_at` slice-length mismatches).
 
 ---
 
@@ -542,10 +550,10 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 | Executive Summary Section | Items | Status | Regression Test Suite |
 | :--- | :---: | :---: | :--- |
 | **1. Critical / High** | 7 (#1–#7) | Complete | `test_critical_fixes.py` (7 tests) |
-| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (7 tests), `test_medium_fixes.py` (11 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
+| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (11 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
 | **3. Low / Edge Cases** | 3 (#21–#23) | Complete | `test_low_fixes.py` (4 tests) |
 | **4. Architectural & Quality Suggestions** | 7 (#1–#7) | Complete | `test_architecture_suggestions.py` (10 tests) |
-| **Total Test Suite** | **30 items** | **302 / 302 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
+| **Total Test Suite** | **30 items** | **303 / 303 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
 
 ---
 
@@ -585,7 +593,8 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
    - Updated `_show_episode_metadata()` (`twittui_form.py:7126-7183`) so `_scroll_desc_to_match()` targets `desc_input._impl.native_textview` via `GLib.idle_add` after `win.show()`, guards against stale callbacks after window close/replacement, clamps `char_offset` safely to the buffer length, invokes `scroll_to_iter()`, and falls back to `scroll_to_mark(buf.get_insert(), ...)` when GTK 3 defers scrolling prior to wrapped line-height validation.
    - Aligned `TwitTUIForm.extract_episode_metadata_fields()` (`twittui_form.py:6752-6763`) description field precedence (`description` → `summary` → `body` → `show_notes` → `notes` → `teaser` → `snippet`) with `tiered_search.get_episode_fields()` (`tiered_search.py:437-443`), and updated `_clean_html_for_search()` (`tiered_search.py:189-201`) to collapse `\n{3,}` unconditionally so plain-text and HTML `MatchContext.char_offset` values match `desc_input.value` identically. Verified under real GTK 3 (`xvfb-run`) and by `test_medium_fixes.py:47-201` (`test_8`, `test_8b`, `test_8c`).
 9. **Double Metaphone Phonetic Rules & Dead Code (`double_metaphone.py`) (#9)**:
-   - Preserved `Ç` and `Ñ` and word-boundary spaces prior to encoding, removed unused `padded`, fixed `TH`/`TCH` (`3`-char vs `2`-char slice bug), `GGI`, `SCH` secondary (`SK` vs `KK`), `GN`, `GLI`, `DG`, and `WICZ`/`WITZ` rules against Lawrence Philips' specification, and added dedicated vectors in `test_double_metaphone.py`.
+   - Preserved `'Ç'`, `'Ñ'`, and collapsed word-boundary spaces prior to encoding (`double_metaphone.py:16-38, 72-76, 408-412`), wired `padded` into `substr()` so all boundary/space-matching rules are reachable, and audited every `string_at()` slice length via AST.
+   - Aligned every rule against Lawrence Philips' canonical specification: `CHAE` (`('K', 'X')`), `DG` (`('TK', 'TK')`), `GN` / `GLI`, Italian `AGGI`/`OGGI` (without corrupting English `-UGGI`/`-IGGI`), `J` & `L` (proper `not is_slavo_germanic` guard and removal of empty `secondary.append('')` that truncated secondary codes like `CABALLEROS`), `R` `-IER` & `S` `SIO`/`SIA`/`SIAN` `is_slavo_germanic` guards, `SCH` secondary (`SK`), `TION`/`TIA`/`TCH` vs `TH`/`TTH` (removing non-canonical `"TIEN"`), initial `W` fallthrough & `WICZ`/`WITZ` (`('TS', 'FX')`), and `Z` `is_slavo_germanic` guard (`AMAZING`/`LAZY`/`PIZZA`/`KAZAKH`), verified by 8 canonical vector tests in `test_double_metaphone.py`.
 10. **Tiered Search Field Omissions, Score Inversion & Partial-Query False Positives (`tiered_search.py`) (#10)**:
     - Derived `extract_searchable_text()` directly from `get_episode_fields()` so hosts, guests, topics, tags, teaser, and snippet are always searchable alongside title and description.
     - Aligned Tier 2 (Fuzzy) and Tier 3 (Phonetic) precedence, scores (`80.0` primary / `72.0` secondary), and short-word thresholds (`80.0` for `< 4`-char tokens; `68.0` default) between `compute_match_score()` and `find_match_context()`.
