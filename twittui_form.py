@@ -4615,6 +4615,96 @@ class TwitTUIForm(toga.App):
         title = "Downloads Complete"
         self._show_dialog_threadsafe("info", title, message, prefer_main=True)
 
+    @staticmethod
+    def _parse_expected_byte_size(val: Any) -> int | None:
+        """Parse a positive byte-size value (> 1000 bytes), rejecting booleans and duration strings."""
+        if val is None or isinstance(val, bool):
+            return None
+        if isinstance(val, int):
+            return val if val > 1000 else None
+        s = str(val).strip().replace(',', '')
+        if s.isdigit():
+            num = int(s)
+            return num if num > 1000 else None
+        return None
+
+    def _extract_expected_byte_size(
+        self,
+        target: Any,
+        media_url: str = '',
+        matched_resolution: dict | None = None,
+    ) -> int | None:
+        """Extract expected byte size for a target download without confusing top-level duration ('length')."""
+        if isinstance(matched_resolution, dict):
+            res_size = self._parse_expected_byte_size(matched_resolution.get('size'))
+            if res_size is not None:
+                return res_size
+
+        selected_size = self._parse_expected_byte_size(getattr(target, 'selected_media_size', None))
+        if selected_size is not None:
+            return selected_size
+
+        ep_source = None
+        if hasattr(target, 'episode_data') and isinstance(target.episode_data, dict):
+            ep_source = target.episode_data
+        elif isinstance(target, dict):
+            ep_source = target
+        if not isinstance(ep_source, dict):
+            return None
+
+        url_norm = str(media_url or '').strip()
+
+        # 1. Prefer the exact format sub-dictionary matching the chosen media_url
+        if url_norm:
+            for fmt_key in ('video_hd', 'video_large', 'video_small', 'video_audio', 'audio'):
+                fmt_val = ep_source.get(fmt_key)
+                if isinstance(fmt_val, dict):
+                    fmt_url = next(
+                        (
+                            str(fmt_val[u_key]).strip()
+                            for u_key in ('mediaUrl', 'media_url', 'downloadUrl', 'streamUrl', 'url', 'href')
+                            if fmt_val.get(u_key)
+                        ),
+                        '',
+                    )
+                    if fmt_url and fmt_url == url_norm:
+                        for s_key in ('file_size', 'fileSize', 'size', 'bytes', 'content_length'):
+                            parsed = self._parse_expected_byte_size(fmt_val.get(s_key))
+                            if parsed is not None:
+                                return parsed
+                        # Matched this specific format without a known byte size; do not borrow
+                        # another format's top-level size (e.g. HD video size for an MP3 download).
+                        return None
+
+        # 2. Explicit top-level byte-size keys (deliberately excluding top-level 'length', which is duration)
+        for k in ('file_size', 'fileSize', 'enclosure_length', 'size', 'bytes', 'content_length'):
+            parsed = self._parse_expected_byte_size(ep_source.get(k))
+            if parsed is not None:
+                return parsed
+
+        # 3. Explicit RSS enclosure sub-dictionaries (where 'length' is defined by RSS 2.0 as byte count)
+        enc_obj = ep_source.get('enclosure')
+        if isinstance(enc_obj, dict):
+            for k in ('length', 'size', 'bytes'):
+                parsed = self._parse_expected_byte_size(enc_obj.get(k))
+                if parsed is not None:
+                    return parsed
+
+        enc_list = ep_source.get('enclosures')
+        if isinstance(enc_list, list):
+            ordered_encs = [e for e in enc_list if isinstance(e, dict)]
+            if url_norm:
+                ordered_encs.sort(
+                    key=lambda e: str(e.get('url') or e.get('href') or '').strip() != url_norm
+                )
+            for e in ordered_encs:
+                for k in ('length', 'size', 'bytes'):
+                    parsed = self._parse_expected_byte_size(e.get(k))
+                    if parsed is not None:
+                        return parsed
+
+        return None
+
     def download_episodes_batch(
         self,
         targets: list,
@@ -4663,12 +4753,16 @@ class TwitTUIForm(toga.App):
                 target_title = getattr(target, 'title', str(target))
                 target_num = getattr(target, 'episode', '')
 
+                matched_res_dict = None
                 if hasattr(target, 'selected_media_url') and target.selected_media_url:
                     media_url = target.selected_media_url
                 elif preferred_resolution:
                     cand_res = worker.get_available_resolutions(target, audio_only=audio_only)
-                    matching = next((r['url'] for r in cand_res if r.get('id') == preferred_resolution or r.get('type') == preferred_resolution), None)
-                    media_url = matching or worker.resolve_target_media_url(target, audio_only=audio_only)
+                    matched_res_dict = next(
+                        (r for r in cand_res if r.get('id') == preferred_resolution or r.get('type') == preferred_resolution),
+                        None,
+                    )
+                    media_url = (matched_res_dict['url'] if matched_res_dict else None) or worker.resolve_target_media_url(target, audio_only=audio_only)
                 else:
                     media_url = worker.resolve_target_media_url(target, audio_only=audio_only)
 
@@ -4691,24 +4785,9 @@ class TwitTUIForm(toga.App):
 
                 # Attempt to extract known expected enclosure byte size (excluding top-level 'length',
                 # which holds episode duration rather than file size).
-                expected_size = None
-                ep_source = None
-                if hasattr(target, 'episode_data') and isinstance(target.episode_data, dict):
-                    ep_source = target.episode_data
-                elif isinstance(target, dict):
-                    ep_source = target
-                if isinstance(ep_source, dict):
-                    for k in ('file_size', 'fileSize', 'enclosure_length', 'size', 'bytes', 'content_length'):
-                        v = ep_source.get(k)
-                        if v and str(v).isdigit() and int(v) > 1000:
-                            expected_size = int(v)
-                            break
-                    if expected_size is None:
-                        enc_obj = ep_source.get('enclosure')
-                        if isinstance(enc_obj, dict):
-                            v = enc_obj.get('length') or enc_obj.get('size')
-                            if v and str(v).isdigit() and int(v) > 1000:
-                                expected_size = int(v)
+                expected_size = self._extract_expected_byte_size(
+                    target, media_url=media_url, matched_resolution=matched_res_dict
+                )
 
                 sanitized_log_url = re.sub(r'([?&]auth=)[^&]+', r'\1[REDACTED]', media_url)
                 print(f"[{idx_0 + 1}/{total_targets}] Downloading '{target_title}' -> {dest_filepath} from {sanitized_log_url}")

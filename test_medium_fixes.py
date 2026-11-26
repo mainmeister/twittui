@@ -730,6 +730,78 @@ class TestMediumFixes(unittest.TestCase):
 
         self.assertEqual(captured_expected, [None])
 
+    def test_14b_batch_download_reads_enclosure_length_and_per_format_size(self) -> None:
+        """RSS enclosure.length is read as bytes, per-format size matches chosen media_url, and top-level duration is ignored."""
+        form = TwitTUIForm("TestApp", "org.twit.test", cache_db_path=":memory:")
+        captured_expected = []
+
+        def fake_dl(url, dest_path, block_size, progress_callback=None, expected_size=None):
+            captured_expected.append((url, expected_size))
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            form.download_episode_file = fake_dl
+            form.show_download_complete_dialog = MagicMock()
+            targets = [
+                # 1. RSS enclosure sub-dict 'length' IS byte size even when top-level 'length' is duration (3600s)
+                SimpleNamespace(
+                    title="RSS Episode",
+                    episode="43",
+                    selected_media_url="https://cdn.twit.tv/ep43.mp4",
+                    episode_data={
+                        "title": "RSS Episode",
+                        "number": "43",
+                        "length": "3600",
+                        "enclosure": {"url": "https://cdn.twit.tv/ep43.mp4", "length": " 524,288,000 "},
+                    },
+                ),
+                # 2. Multi-format episode downloading audio picks video_audio.size (55 MB), NOT top-level HD size (900 MB)
+                SimpleNamespace(
+                    title="Multi Format Audio",
+                    episode="44",
+                    selected_media_url="https://cdn.twit.tv/ep44.mp3",
+                    episode_data={
+                        "title": "Multi Format Audio",
+                        "number": "44",
+                        "length": "5400",
+                        "size": 900_000_000,
+                        "video_hd": {"mediaUrl": "https://cdn.twit.tv/ep44_hd.mp4", "size": 900_000_000},
+                        "video_audio": {"mediaUrl": "https://cdn.twit.tv/ep44.mp3", "size": 55_000_000},
+                    },
+                ),
+                # 3. Matched format without size returns None instead of borrowing another format's top-level size
+                SimpleNamespace(
+                    title="Audio Without Size",
+                    episode="45",
+                    selected_media_url="https://cdn.twit.tv/ep45.mp3",
+                    episode_data={
+                        "title": "Audio Without Size",
+                        "number": "45",
+                        "length": "5400",
+                        "size": 900_000_000,
+                        "video_hd": {"mediaUrl": "https://cdn.twit.tv/ep45_hd.mp4", "size": 900_000_000},
+                        "video_audio": {"mediaUrl": "https://cdn.twit.tv/ep45.mp3"},
+                    },
+                ),
+            ]
+            snap = {
+                "base_dest_dir": tmp_dir,
+                "block_size": 8192,
+                "show_folders": False,
+                "audio_only": False,
+                "worker": form._network_snapshot(),
+            }
+            form.download_episodes_batch(targets, download_snapshot=snap)
+
+        self.assertEqual(
+            captured_expected,
+            [
+                ("https://cdn.twit.tv/ep43.mp4", 524_288_000),
+                ("https://cdn.twit.tv/ep44.mp3", 55_000_000),
+                ("https://cdn.twit.tv/ep45.mp3", None),
+            ],
+        )
+
     # ------------------------------------------------------------------
     # Bug 15: write_restricted_file never double-closes FD on write error
     # ------------------------------------------------------------------

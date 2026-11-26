@@ -307,7 +307,9 @@ TwitTUI is an ambitious dual-backend (GTK 3 + Textual TUI) TWiT.tv podcast brows
 - **Recommended Fix**:
   Remove `'length'` from top-level size key extraction (only interpret `'length'` as bytes inside RSS enclosure sub-dictionaries).
 - **Applied Fix & Verification**:
-  Removed top-level `'length'` from byte-size key extraction in `download_episodes_batch()` (`twittui_form.py`). Verified by `test_medium_fixes.py:test_14_batch_download_ignores_duration_length_as_expected_size`.
+  1. **Dedicated Byte-Size Extraction Excluding Top-Level `length` (`twittui_form.py:4618-4706, 4756-4790`)**: Extracted `_parse_expected_byte_size()` and `_extract_expected_byte_size(target, media_url=..., matched_resolution=...)` and wired them into `download_episodes_batch()`. Top-level `'length'` (duration) is completely excluded from byte-size extraction, while `'length'` is still honored strictly inside explicit RSS 2.0 `enclosure` / `enclosures` sub-dictionaries (stripping whitespace/commas and rejecting booleans or values `<= 1000`).
+  2. **Per-Format Size Alignment**: Prioritized the matched resolution's `'size'` or the format sub-dictionary (`video_hd`, `video_large`, `video_small`, `video_audio`, `audio`) whose URL matches the chosen `media_url` — preventing an HD video's top-level `size` from being passed as `expected_size` when downloading an audio-only `.mp3` format (which would otherwise force redundant re-downloads in `is_existing_file_identical()`).
+  3. **Verification**: Verified by `test_medium_fixes.py:705-804` (`test_14_batch_download_ignores_duration_length_as_expected_size` and `test_14b_batch_download_reads_enclosure_length_and_per_format_size`).
 
 ---
 
@@ -561,10 +563,10 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 | Executive Summary Section | Items | Status | Regression Test Suite |
 | :--- | :---: | :---: | :--- |
 | **1. Critical / High** | 7 (#1–#7) | Complete | `test_critical_fixes.py` (7 tests) |
-| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (15 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
+| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (16 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
 | **3. Low / Edge Cases** | 3 (#21–#23) | Complete | `test_low_fixes.py` (4 tests) |
 | **4. Architectural & Quality Suggestions** | 7 (#1–#7) | Complete | `test_architecture_suggestions.py` (10 tests) |
-| **Total Test Suite** | **30 items** | **307 / 307 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
+| **Total Test Suite** | **30 items** | **308 / 308 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
 
 ---
 
@@ -621,7 +623,7 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
     - Aligned output file extensions to the actual downloaded audio (`.m4a`/`.webm`/`.opus`) or video (`.webm`/`.mkv`) container when `ffmpeg` is absent (`twittui_form.py:4230-4244`) and checked aligned sibling containers during pre-download skip detection (`twittui_form.py:4128-4150`).
     - Validated `is_valid_media_file(found_file)` *before* atomic `os.replace()` promotion (`twittui_form.py:4225-4244, 4321-4333, 4389-4400, 4532`) so corrupt/HTML outputs never overwrite existing valid files or return false positives, verified by `test_medium_fixes.py:573-701` (`test_13`, `test_13b`).
 14. **Duration (`length`) Confused with Byte Size (`expected_size`) (#14)**:
-    - Removed top-level `'length'` from byte-size key extraction in `download_episodes_batch()`, reading `'length'` as bytes only inside explicit RSS enclosure sub-dictionaries.
+    - Extracted `_parse_expected_byte_size()` and `_extract_expected_byte_size()` (`twittui_form.py:4618-4706, 4756-4790`) for `download_episodes_batch()`, removing top-level `'length'` (duration) from byte-size lookup, reading `'length'` as bytes strictly inside explicit RSS `enclosure`/`enclosures` sub-dictionaries, and matching per-format byte sizes against the selected `media_url` so an HD video's top-level `size` never triggers redundant audio re-downloads, verified by `test_medium_fixes.py:705-804` (`test_14`, `test_14b`).
 15. **File Descriptor Double-Close & TOCTOU Permissions in `write_restricted_file()` (#15)**:
     - Tracked `fd_owned` so `os.close(fd)` is never called after `os.fdopen()` assumes ownership, and tightened file permissions directly on the open descriptor via `os.fchmod(fd, 0o600)`.
 16. **TUI Row Activation Streaming Wrong Episode Under Multi-Select (#16)**:
