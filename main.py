@@ -22,11 +22,11 @@ class StderrRedirector:
     def __init__(self, original_stderr) -> None:
         self.original_stderr = original_stderr
 
-    def write(self, message) -> None:
+    def write(self, message: str) -> int:
         # Filter out the specific xapp-gtk3-module warning
         if "Failed to load module" in message and "xapp-gtk3-module" in message:
-            return
-        self.original_stderr.write(message)
+            return len(message)
+        return self.original_stderr.write(message)
 
     def flush(self) -> None:
         self.original_stderr.flush()
@@ -170,6 +170,12 @@ def parse_backend_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Path to Python interpreter to use for PyInstaller compilation (e.g. /usr/bin/python3)"
     )
     parser.add_argument(
+        '--strip',
+        dest='strip',
+        action='store_true',
+        help="Strip binary symbols with PyInstaller --strip on POSIX during --install (opt-in)"
+    )
+    parser.add_argument(
         '--log-file',
         dest='log_file',
         type=str,
@@ -213,11 +219,14 @@ def resolve_toga_backend(argv: list[str] | None = None, prompt_interactive: bool
 
     if args.install:
         from installer import clean_build_artifacts, install_twittui
-        install_twittui(
-            target_dir=args.install_dir,
-            python_executable=getattr(args, 'python_executable', None),
-            clean_build_artifacts=not getattr(args, 'no_clean', False),
-        )
+        install_kwargs: dict[str, object] = {
+            "target_dir": args.install_dir,
+            "python_executable": getattr(args, 'python_executable', None),
+            "clean_build_artifacts": not getattr(args, 'no_clean', False),
+        }
+        if getattr(args, 'strip', False):
+            install_kwargs["strip_binary"] = True
+        install_twittui(**install_kwargs)
         if getattr(args, 'uninstall_pyinstaller', False):
             clean_build_artifacts(
                 remove_dist=False,
@@ -333,13 +342,27 @@ def show_terminal_splash(message: str = "Loading TwitTUI, please wait...") -> No
 class _NullTextIO:
     """Zero-allocation discarding text stream (avoids unbounded io.StringIO growth)."""
 
+    encoding: str = "utf-8"
+    errors: str = "replace"
+    closed: bool = False
+
     def write(self, s: str) -> int:
         return len(s) if s else 0
+
+    def writelines(self, lines) -> None:
+        for _ in lines:
+            pass
 
     def flush(self) -> None:
         pass
 
     def isatty(self) -> bool:
+        return False
+
+    def writable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
         return False
 
 
@@ -378,6 +401,7 @@ def main(argv: list[str] | None = None) -> None:
         "AppArmor",
     )
 
+    app = None
     try:
         with ExitStack() as stack:
             if backend == 'toga_textual':
@@ -391,7 +415,17 @@ def main(argv: list[str] | None = None) -> None:
             if backends.get("textual"):
                 print(f"\n[!] GTK desktop backend failed: {e}", file=sys.stderr)
                 print("[*] Automatically falling back to Textual (Terminal User Interface) backend...\n", file=sys.stderr)
+                import toga
                 import toga.platform
+                if app is not None:
+                    stale_loop = getattr(getattr(app, "_impl", None), "loop", None)
+                    if stale_loop is not None and not stale_loop.is_running() and not stale_loop.is_closed():
+                        try:
+                            stale_loop.close()
+                        except Exception:
+                            _logger.debug("Unable to close stale GTK loop during fallback", exc_info=True)
+                if getattr(toga.App, "app", None) is not None:
+                    toga.App.app = None
                 os.environ["TOGA_BACKEND"] = "toga_textual"
                 _configure_textual_warnings()
                 try:

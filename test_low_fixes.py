@@ -71,6 +71,69 @@ class TestLowAndEdgeCaseFixes(unittest.TestCase):
         self.assertFalse(sink.isatty())
         sink.flush()
 
+    def test_21b_cli_fallback_resets_stale_app_curly_apostrophe_and_stream_contract(self) -> None:
+        """Verify curly-apostrophe fallback resets stale GTK app/loop, splash skips --clean/--install, and stream contracts hold."""
+        # Curly apostrophe (U+2019) triggers fallback, closes stale GTK loop, and resets toga.App.app before Textual create_app
+        stale_loop = MagicMock()
+        stale_loop.is_running.return_value = False
+        stale_loop.is_closed.return_value = False
+        fake_gtk_app = MagicMock(_impl=SimpleNamespace(loop=stale_loop))
+        fake_gtk_app.main_loop.side_effect = RuntimeError("Couldn\u2019t recognize the image file format")
+
+        app_singleton_seen_by_fallback: list[object] = []
+        fake_tui_app = MagicMock()
+
+        def _create_app_side_effect():
+            if not app_singleton_seen_by_fallback:
+                toga.App.app = fake_gtk_app
+                app_singleton_seen_by_fallback.append("gtk_created")
+                return fake_gtk_app
+            app_singleton_seen_by_fallback.append(toga.App.app)
+            return fake_tui_app
+
+        with patch.object(twittui_main, "resolve_toga_backend", return_value="toga_gtk"), \
+             patch.object(twittui_main, "show_terminal_splash"), \
+             patch.object(twittui_main, "get_installed_toga_backends", return_value={"gtk": True, "textual": True}), \
+             patch.object(twittui_main, "_configure_textual_warnings") as mock_warn_cfg, \
+             patch("twittui_form.load_twittui_dotenv"), \
+             patch("twittui_form.main", side_effect=_create_app_side_effect):
+            twittui_main.main([])
+
+        stale_loop.close.assert_called_once()
+        self.assertEqual(app_singleton_seen_by_fallback, ["gtk_created", None])
+        mock_warn_cfg.assert_called_once()
+        fake_tui_app.main_loop.assert_called_once()
+
+        # --clean and --install never emit loading or closing splash banners
+        with patch.object(twittui_main, "show_terminal_splash") as mock_splash, \
+             patch("installer.clean_build_artifacts"), \
+             patch("installer.install_twittui"):
+            with self.assertRaises(SystemExit) as cm_clean:
+                twittui_main.main(["--clean"])
+            self.assertEqual(cm_clean.exception.code, 0)
+            with self.assertRaises(SystemExit) as cm_install:
+                twittui_main.main(["--install"])
+            self.assertEqual(cm_install.exception.code, 0)
+            mock_splash.assert_not_called()
+
+        # _NullTextIO supports standard text stream attributes/methods without buffering
+        sink = twittui_main._NullTextIO()
+        self.assertEqual(sink.encoding, "utf-8")
+        self.assertEqual(sink.errors, "replace")
+        self.assertFalse(sink.closed)
+        self.assertTrue(sink.writable())
+        self.assertFalse(sink.readable())
+        sink.writelines(["line 1\n", "line 2\n"])
+
+        # StderrRedirector returns character counts cleanly
+        buf = MagicMock()
+        buf.write.return_value = 5
+        redir = twittui_main.StderrRedirector(buf)
+        self.assertEqual(redir.write("hello"), 5)
+        suppressed = "Gtk-Message: Failed to load module \"xapp-gtk3-module\"\n"
+        self.assertEqual(redir.write(suppressed), len(suppressed))
+        buf.write.assert_called_once_with("hello")
+
     # ------------------------------------------------------------------
     # Bug 22: PyInstaller cross-interpreter probe, gi/yt_dlp, umask, PATH, strip
     # ------------------------------------------------------------------
@@ -141,6 +204,80 @@ class TestLowAndEdgeCaseFixes(unittest.TestCase):
                     self.assertEqual(mode, 0o700)
                 finally:
                     os.umask(old_umask)
+
+    def test_22b_installer_macos_gi_gate_main_strip_conda_path_and_atomic_install(self) -> None:
+        """Verify Darwin/Windows gate gi overrides, cross-probe never leaks host pkgs, CONDA_PREFIX excluded, and main --strip works."""
+        # 1. On macOS (Darwin), gi.overrides hidden imports are NOT passed even if gi is present
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dist_dir = os.path.join(tmp_dir, "dist")
+            os.makedirs(dist_dir, exist_ok=True)
+            fake_exe = os.path.join(dist_dir, "twittui")
+            with open(fake_exe, "w") as f:
+                f.write("bin")
+
+            with patch("platform.system", return_value="Darwin"), \
+                 patch("installer.check_python_shared_library", return_value=(True, "")), \
+                 patch("installer._probe_packages_in_interpreter", return_value={"gi", "yt_dlp", "nh3"}), \
+                 patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")) as mock_run:
+                installer.build_executable(project_root=tmp_dir, output_dir=dist_dir, python_executable="python_mac")
+                cmd = mock_run.call_args[0][0]
+                self.assertIn("--collect-all=yt_dlp", cmd)
+                self.assertIn("--collect-all=nh3", cmd)
+                self.assertNotIn("--hidden-import=gi.overrides.Gtk", cmd)
+                self.assertNotIn("--hidden-import=gi.overrides.Pango", cmd)
+
+        # 2. Failed cross-interpreter subprocess probe returns empty set instead of falling back to host packages
+        with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="", stderr="error")), \
+             patch("os.path.isfile", return_value=True), \
+             patch("importlib.util.find_spec", side_effect=AssertionError("Must not probe host interpreter on cross-probe failure")):
+            found = installer._probe_packages_in_interpreter(("toga_gtk", "gi"), "/usr/bin/python3.99")
+            self.assertEqual(found, set())
+
+        # 3. find_local_executable_path excludes CONDA_PREFIX, .rustup, and .pyenv
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            conda_bin = os.path.join(tmp_dir, "miniconda", "bin")
+            pyenv_bin = os.path.join(tmp_dir, ".pyenv", "shims")
+            good_bin = os.path.join(tmp_dir, "custom_bin")
+            for d in (conda_bin, pyenv_bin, good_bin):
+                os.makedirs(d, exist_ok=True)
+            env_path = os.pathsep.join([conda_bin, pyenv_bin, good_bin])
+            with patch.dict(os.environ, {"PATH": env_path, "CONDA_PREFIX": os.path.join(tmp_dir, "miniconda")}):
+                self.assertEqual(installer.find_local_executable_path(), os.path.abspath(good_bin))
+
+        # 4. main.py forwards --strip to install_twittui(..., strip_binary=True)
+        with patch("installer.install_twittui") as mock_install, \
+             patch("sys.exit", side_effect=SystemExit(0)):
+            with self.assertRaises(SystemExit):
+                twittui_main.resolve_toga_backend(["--install", "--strip", "--install-dir", "/tmp/bin22"])
+            mock_install.assert_called_once_with(
+                target_dir="/tmp/bin22",
+                python_executable=None,
+                clean_build_artifacts=True,
+                strip_binary=True,
+            )
+
+        # 5. install_twittui stages and atomically replaces existing binary without leaving temp files
+        with tempfile.TemporaryDirectory() as project_dir, tempfile.TemporaryDirectory() as target_dir:
+            dist_dir = os.path.join(project_dir, "dist")
+            os.makedirs(dist_dir, exist_ok=True)
+            exe_name = installer.get_default_executable_name()
+            fake_exe = os.path.join(dist_dir, exe_name)
+            with open(fake_exe, "w") as f:
+                f.write("#!/bin/sh\necho v2\n")
+            existing = os.path.join(target_dir, exe_name)
+            with open(existing, "w") as f:
+                f.write("#!/bin/sh\necho v1\n")
+
+            with patch("installer.ensure_pyinstaller_installed", return_value=True), \
+                 patch("installer.build_executable", return_value=fake_exe):
+                installed = installer.install_twittui(
+                    target_dir=target_dir,
+                    project_root=project_dir,
+                    clean_build_artifacts=False,
+                )
+            with open(installed, "r") as f:
+                self.assertIn("echo v2", f.read())
+            self.assertEqual(os.listdir(target_dir), [exe_name])
 
     # ------------------------------------------------------------------
     # Bug 23a: Input validation, callable rate_limit, debouncing, custom Club TWiT feed ID

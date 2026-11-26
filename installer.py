@@ -11,6 +11,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 
 _logger = logging.getLogger("twittui.installer")
 
@@ -172,13 +173,26 @@ def find_local_executable_path(target_dir: str | None = None) -> str:
 
     # Build exclusion set for ephemeral virtualenvs and language-specific toolchain directories
     excluded_prefixes: list[str] = []
-    venv_env = os.environ.get("VIRTUAL_ENV")
-    if venv_env:
-        excluded_prefixes.append(os.path.abspath(venv_env))
+    for env_key in ("VIRTUAL_ENV", "CONDA_PREFIX"):
+        env_val = os.environ.get(env_key)
+        if env_val:
+            excluded_prefixes.append(os.path.abspath(env_val))
     if hasattr(sys, "real_prefix") or (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix):
         excluded_prefixes.append(os.path.abspath(sys.prefix))
 
-    toolchain_markers = ("/.venv/", "/venv/", "/.cargo/", "/.nvm/", "/.pyenv/", "/node_modules/")
+    toolchain_markers = (
+        "/.venv/",
+        "/venv/",
+        "/.conda/",
+        "/.cargo/",
+        "/.rustup/",
+        "/.nvm/",
+        "/.pyenv/",
+        "/.rbenv/",
+        "/.asdf/",
+        "/.poetry/",
+        "/node_modules/",
+    )
 
     # Check any absolute directory currently in PATH that is writable by the user
     for raw_p in raw_path_entries:
@@ -229,8 +243,10 @@ def _probe_packages_in_interpreter(packages: tuple[str, ...], py_exec: str) -> s
                 found = json.loads(res.stdout.strip())
                 if isinstance(found, list):
                     return {str(p) for p in found}
+            return set()
         except (OSError, subprocess.SubprocessError, ValueError):
             _logger.debug("Target interpreter package probe failed for %s", resolved_exec, exc_info=True)
+            return set()
 
     available: set[str] = set()
     for pkg in packages:
@@ -254,7 +270,6 @@ def build_executable(
     main_script = os.path.join(root, "main.py")
     dist_dir = output_dir or os.path.join(root, "dist")
     build_dir = os.path.join(root, "build")
-    spec_file = os.path.join(root, "twittui.spec")
 
     exe_name = get_default_executable_name()
     target_exe = os.path.join(dist_dir, exe_name if platform.system() != "Windows" else "twittui.exe")
@@ -310,8 +325,9 @@ def build_executable(
 
     # Collect packages and hidden imports needed by TwitTUI / Toga / Textual / GTK / yt-dlp in target interpreter
     packages_to_collect = ["twittui", "toga", "toga_textual", "textual", "dotenv", "requests"]
-    optional_available = _probe_packages_in_interpreter(("toga_gtk", "gi", "yt_dlp"), py_exec)
-    for extra_pkg in ("toga_gtk", "gi", "yt_dlp"):
+    optional_pkgs = ("toga_gtk", "gi", "yt_dlp", "defusedxml", "nh3")
+    optional_available = _probe_packages_in_interpreter(optional_pkgs, py_exec)
+    for extra_pkg in optional_pkgs:
         if extra_pkg in optional_available:
             packages_to_collect.append(extra_pkg)
     for pkg in packages_to_collect:
@@ -320,7 +336,7 @@ def build_executable(
     cmd.append("--hidden-import=toga_textual_backend")
     cmd.append("--hidden-import=tiered_search")
     cmd.append("--hidden-import=double_metaphone")
-    if "gi" in optional_available and platform.system() != "Windows":
+    if "gi" in optional_available and platform.system() not in ("Windows", "Darwin"):
         cmd.append("--hidden-import=gi.overrides.Gtk")
         cmd.append("--hidden-import=gi.overrides.Pango")
     cmd.append(main_script)
@@ -473,17 +489,39 @@ def install_twittui(
     destination_path = os.path.join(install_dir, exe_name)
 
     print(f"Installing executable to local PATH destination: '{destination_path}'...")
-    shutil.copy2(built_exe, destination_path)
-
-    # Make executable on Unix-like operating systems while respecting the active process umask
-    if platform.system() != "Windows":
-        try:
-            current_umask = os.umask(0o022)
-            os.umask(current_umask)
-            desired_mode = (0o755 & ~current_umask) | 0o700
-            os.chmod(destination_path, desired_mode)
-        except Exception as e:
-            print(f"Warning: Could not set executable permissions on '{destination_path}': {e}")
+    # Create an exclusive staging file in the target directory, then atomically replace
+    # (prevents collisions, ETXTBSY when upgrading a running binary, and brief mode widening).
+    staged_fd, staged_path = tempfile.mkstemp(prefix=f".{exe_name}.tmp.", dir=install_dir)
+    fd_owned = True
+    promoted = False
+    try:
+        staged_file = os.fdopen(staged_fd, "wb")
+        fd_owned = False
+        with staged_file:
+            with open(built_exe, "rb") as source:
+                shutil.copyfileobj(source, staged_file)
+            if platform.system() != "Windows":
+                current_umask = os.umask(0o022)
+                try:
+                    desired_mode = (0o755 & ~current_umask) | 0o700
+                finally:
+                    os.umask(current_umask)
+                os.fchmod(staged_file.fileno(), desired_mode)
+        os.replace(staged_path, destination_path)
+        promoted = True
+    finally:
+        if fd_owned:
+            try:
+                os.close(staged_fd)
+            except OSError:
+                _logger.debug("Could not close staged executable descriptor %s", staged_fd, exc_info=True)
+        if not promoted:
+            try:
+                os.remove(staged_path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                _logger.debug("Could not remove staged executable %s", staged_path, exc_info=True)
 
     # Verify if install_dir is in PATH
     path_dirs = [os.path.abspath(p.strip()) for p in os.environ.get("PATH", "").split(os.pathsep) if p.strip()]

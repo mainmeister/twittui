@@ -199,6 +199,61 @@ class TestInstallOption(unittest.TestCase):
                     st = os.stat(installed_path)
                     self.assertTrue(bool(st.st_mode & stat.S_IXUSR))
 
+    def test_install_twittui_preserves_preexisting_staging_path(self) -> None:
+        """Verify a staging-name collision cannot overwrite or consume an existing file."""
+        with tempfile.TemporaryDirectory() as project_dir, tempfile.TemporaryDirectory() as install_target_dir:
+            dist_dir = os.path.join(project_dir, "dist")
+            os.makedirs(dist_dir, exist_ok=True)
+            exe_name = get_default_executable_name()
+            fake_exe = os.path.join(dist_dir, exe_name)
+            with open(fake_exe, "w") as f:
+                f.write("new executable")
+
+            collision_path = os.path.join(install_target_dir, f".{exe_name}.tmp.424242")
+            with open(collision_path, "w") as f:
+                f.write("preexisting file")
+
+            with patch("installer.ensure_pyinstaller_installed", return_value=True), \
+                 patch("installer.build_executable", return_value=fake_exe), \
+                 patch("installer.os.getpid", return_value=424242):
+                installed_path = install_twittui(
+                    target_dir=install_target_dir,
+                    project_root=project_dir,
+                    clean_build_artifacts=False,
+                )
+
+            with open(collision_path, "r") as f:
+                self.assertEqual(f.read(), "preexisting file")
+            with open(installed_path, "r") as f:
+                self.assertEqual(f.read(), "new executable")
+
+    def test_install_twittui_replacement_failure_preserves_binary_and_cleans_staging(self) -> None:
+        """Verify failed atomic promotion leaves the old executable intact and removes staging."""
+        with tempfile.TemporaryDirectory() as project_dir, tempfile.TemporaryDirectory() as install_target_dir:
+            dist_dir = os.path.join(project_dir, "dist")
+            os.makedirs(dist_dir, exist_ok=True)
+            exe_name = get_default_executable_name()
+            fake_exe = os.path.join(dist_dir, exe_name)
+            with open(fake_exe, "w") as f:
+                f.write("new executable")
+            installed_path = os.path.join(install_target_dir, exe_name)
+            with open(installed_path, "w") as f:
+                f.write("old executable")
+
+            with patch("installer.ensure_pyinstaller_installed", return_value=True), \
+                 patch("installer.build_executable", return_value=fake_exe), \
+                 patch("installer.os.replace", side_effect=OSError("promotion failed")):
+                with self.assertRaisesRegex(OSError, "promotion failed"):
+                    install_twittui(
+                        target_dir=install_target_dir,
+                        project_root=project_dir,
+                        clean_build_artifacts=False,
+                    )
+
+            with open(installed_path, "r") as f:
+                self.assertEqual(f.read(), "old executable")
+            self.assertEqual(os.listdir(install_target_dir), [exe_name])
+
     def test_clean_build_artifacts_removes_dirs_and_specs(self) -> None:
         """Verify clean_build_artifacts removes build/, dist/, and .spec files."""
         with tempfile.TemporaryDirectory() as project_dir:

@@ -2076,13 +2076,27 @@ def patch_toga_textual() -> None:
             class _DiscardingTextIO:
                 """Discard stdout writes cleanly without unbounded memory accumulation."""
 
+                encoding: str = "utf-8"
+                errors: str = "replace"
+                closed: bool = False
+
                 def write(self, s: str) -> int:
                     return len(s) if s else 0
+
+                def writelines(self, lines: Any) -> None:
+                    for _ in lines:
+                        pass
 
                 def flush(self) -> None:
                     pass
 
                 def isatty(self) -> bool:
+                    return False
+
+                def writable(self) -> bool:
+                    return True
+
+                def readable(self) -> bool:
                     return False
 
             def safe_main_loop(self: Any) -> None:

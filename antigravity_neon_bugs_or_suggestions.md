@@ -426,7 +426,11 @@ TwitTUI is an ambitious dual-backend (GTK 3 + Textual TUI) TWiT.tv podcast brows
   - In the GTK→Textual crash fallback (lines 333-353): `"Couldn’t recognize the image file format"` matches only a curly apostrophe (`’`, U+2019), missing ASCII `Couldn't`; `warnings.filterwarnings` for `[toga_textual]` is not installed; and `(RuntimeError, Exception)` is redundant.
   - `main.py:330` and `toga_textual_backend.py:1804` redirect `stdout` into an unbounded in-memory `io.StringIO()` for the entire app lifetime; redirecting to `open(os.devnull, "w")` (or a bounded/discarding stream) prevents unbounded memory growth.
 - **Applied Fix & Verification**:
-  Moved `show_terminal_splash()` after `resolve_toga_backend(argv)`, handled `KeyboardInterrupt` cleanly with `sys.exit(130)`, removed duplicate icon/GTK app patching, fixed apostrophe matching + `_configure_textual_warnings()` in the GTK→Textual fallback, and replaced `io.StringIO()` sinks with zero-allocation `_NullTextIO` (`main.py`, `toga_textual_backend.py`). Verified by `test_low_fixes.py:test_21_cli_bootstrap_splash_order_ctrl_c_fallback_and_null_sink`.
+  1. **Deferred Splash & Clean `Ctrl+C` Abort (`main.py:268-289, 358-375, 434-435`)**: Moved `show_terminal_splash()` after `resolve_toga_backend(argv)` so `--help`, `--clean`, and `--install` exit cleanly without emitting loading or closing banners, and updated `KeyboardInterrupt` handling during the interactive backend prompt to abort cleanly with `sys.exit(130)`.
+  2. **Deduplicated Startup Patching (`main.py:305-316`, `twittui_form.py:241-355`)**: Removed duplicate `patch_toga_icons()`/`patch_toga_gtk_app()` invocations from `main()` (keeping idempotent `_twittui_*_patched` guards in `twittui_form.py`).
+  3. **Apostrophe-Agnostic GTK→Textual Fallback (`main.py:360-433`)**: Matched `"recognize the image file format"` (covering both ASCII `'` and curly `’` U+2019), dropped the redundant `(RuntimeError, Exception)` tuple, applied `_configure_textual_warnings()`, closed any stale idle GTK event loop and reset `toga.App.app = None` before constructing the fallback Textual app, and cleared Toga backend/factory caches.
+  4. **Zero-Allocation Text Stream Sinks & `StderrRedirector` Compliance (`main.py:21-35, 333-358`, `toga_textual_backend.py:2076-2108`)**: Replaced unbounded `io.StringIO()` stdout sinks with zero-allocation `_NullTextIO` / `_DiscardingTextIO` implementing standard text-I/O attributes/methods (`encoding`, `errors`, `closed`, `write`, `writelines`, `flush`, `isatty`, `writable`, `readable`), and returned integer character counts from `StderrRedirector.write()`.
+  5. **Verification**: Verified by `test_low_fixes.py:36-135` (`test_21_cli_bootstrap_splash_order_ctrl_c_fallback_and_null_sink` and `test_21b_cli_fallback_resets_stale_app_curly_apostrophe_and_stream_contract`).
 
 ### 22. PyInstaller Packaging Edge Cases (`installer.py`)
 - **Location**: `installer.py:173-177`, `installer.py:215-216`, `installer.py:250-266`, `installer.py:418`
@@ -438,7 +442,11 @@ TwitTUI is an ambitious dual-backend (GTK 3 + Textual TUI) TWiT.tv podcast brows
   - `os.chmod(destination_path, current_mode | 0o755)` widens group/world permissions even under restrictive umasks (`0o077`).
   - `--strip` on Linux can corrupt certain binary wheels / PyGObject shared libraries; consider making it opt-in.
 - **Applied Fix & Verification**:
-  Added `_probe_packages_in_interpreter()` for target-interpreter probing, scoped `gi.overrides` hidden imports to non-Windows builds with `gi`, added `yt_dlp` and `twittui` collection, filtered virtualenvs/`.`/`/tmp`/toolchain paths in `find_local_executable_path()`, respected active `umask` on `chmod`, and made `--strip` opt-in (`installer.py`). Verified by `test_low_fixes.py:test_22_installer_cross_probe_path_exclusions_umask_and_opt_in_strip`.
+  1. **Cross-Interpreter Package Probing (`installer.py:217-257`)**: Added `_probe_packages_in_interpreter()` to probe optional packages (`toga_gtk`, `gi`, `yt_dlp`, `defusedxml`, `nh3`) inside the target `--python-executable` via subprocess when it differs from `sys.executable`, returning `set()` on cross-probe failure rather than leaking host-interpreter packages.
+  2. **Platform-Scoped `gi.overrides` & Complete Collection (`installer.py:325-343`)**: Gated `--hidden-import=gi.overrides.Gtk` and `gi.overrides.Pango` on `"gi" in optional_available and platform.system() not in ("Windows", "Darwin")`, and collected `twittui`, `yt_dlp`, `defusedxml`, and `nh3` when present in the target interpreter.
+  3. **Safe `PATH` Resolution (`installer.py:136-214`)**: Filtered relative paths (`.`/`./`), `/tmp`/`/var/tmp`/`/`, active `VIRTUAL_ENV` / `CONDA_PREFIX` / `sys.prefix` virtualenvs, and language-toolchain paths (`/.venv/`, `/venv/`, `/.conda/`, `/.cargo/`, `/.rustup/`, `/.nvm/`, `/.pyenv/`, `/.rbenv/`, `/.asdf/`, `/.poetry/`, `/node_modules/`) out of `find_local_executable_path()`.
+  4. **Umask-Safe Atomic Binary Install & Opt-In `--strip` (`installer.py:289-293, 463-526, 585-605`, `main.py:172-177, 221-229`)**: Made `--strip` opt-in (`strip_binary=False` by default, exposed as `--strip` in both `installer.py` and `main.py`), staged the copied binary in the target directory, applied `(0o755 & ~current_umask) | 0o700` inside a `try/finally` umask restore block, and promoted via atomic `os.replace()` (preventing `ETXTBSY` on live upgrades and removing any leftover staged file on error).
+  5. **Verification**: Verified by `test_low_fixes.py:140-279` (`test_22_installer_cross_probe_path_exclusions_umask_and_opt_in_strip` and `test_22b_installer_macos_gi_gate_main_strip_conda_path_and_atomic_install`) and `test_install.py`.
 
 ### 23. Configuration, Cleanup, Filename & API Edge Cases (`twittui_form.py`)
 - **Location**: `twittui_form.py:571, 1528, 2875-2881, 3455, 3954-4003, 4045, 4133, 5556-5595, 5654, 6697`
@@ -581,9 +589,9 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 | :--- | :---: | :---: | :--- |
 | **1. Critical / High** | 7 (#1–#7) | Complete | `test_critical_fixes.py` (7 tests) |
 | **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (21 tests), `test_episode_activation.py` (3 tests), updated `test_install.py` / `test_snap.py` (10 tests) / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` / `test_open_destination.py` / `test_backend_factory.py` |
-| **3. Low / Edge Cases** | 3 (#21–#23) | Complete | `test_low_fixes.py` (4 tests) |
+| **3. Low / Edge Cases** | 3 (#21–#23) | Complete | `test_low_fixes.py` (6 tests) |
 | **4. Architectural & Quality Suggestions** | 7 (#1–#7) | Complete | `test_architecture_suggestions.py` (10 tests) |
-| **Total Test Suite** | **30 items** | **317 / 317 Passing** | `python -W always::ResourceWarning -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched; non-fatal PyInstaller diagnostics and a pending-task warning emitted) |
+| **Total Test Suite** | **30 items** | **321 / 321 Passing** | `python -W always::ResourceWarning -m unittest discover -s . -p "test_*.py" -v` (25 modules, no `ResourceWarning`s; one asyncio pending-task warning; isolated `SNAP_USER_DATA`) |
 
 ---
 
@@ -666,15 +674,14 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 ### Section 3: Low / Edge-Case Fixes Implemented (#21–#23)
 
 21. **CLI Bootstrap & Fallback Quirks (`main.py`, `toga_textual_backend.py`) (#21)**:
-    - Moved `show_terminal_splash()` after `resolve_toga_backend(argv)` so `--help`, `--clean`, and `--install` do not emit the loading banner.
-    - Handled `KeyboardInterrupt` during the interactive backend prompt cleanly by aborting with exit code `130` instead of launching a default backend.
-    - Removed duplicate `patch_toga_icons()`/`patch_toga_gtk_app()` invocations on startup.
-    - Made the GTK→Textual fallback trigger apostrophe-agnostic (`"recognize the image file format"`), applied `_configure_textual_warnings()` in the fallback path, and replaced unbounded `io.StringIO()` stdout sinks with zero-allocation `_NullTextIO`.
-22. **PyInstaller Packaging Edge Cases (`installer.py`) (#22)**:
-    - Added `_probe_packages_in_interpreter()` to inspect `toga_gtk`, `gi`, and `yt_dlp` in the target `--python-executable` rather than the host interpreter.
-    - Scoped `--hidden-import=gi.overrides.Gtk` and `gi.overrides.Pango` to non-Windows builds where `gi` is available, and collected `yt_dlp` when installed.
-    - Filtered active virtualenvs, relative `.`, `/tmp`, and language-toolchain directories (`/.venv/`, `/.cargo/`, `/.nvm/`, `/.pyenv/`, `/node_modules/`) out of `find_local_executable_path()`.
-    - Respected the active process `umask` when setting executable permissions (`(0o755 & ~umask) | 0o700`) and made `--strip` opt-in (`strip_binary=False` by default, `--strip` CLI flag).
+    - Moved `show_terminal_splash()` after `resolve_toga_backend(argv)` (`main.py:370-374`) so `--help`, `--clean`, and `--install` do not emit loading or closing banners, and handled `KeyboardInterrupt` during the interactive backend prompt (`main.py:286-288`) by aborting cleanly with exit code `130`.
+    - Removed duplicate `patch_toga_icons()`/`patch_toga_gtk_app()` invocations on startup (`main.py:305-316`) and returned integer character counts from `StderrRedirector.write()` (`main.py:25-29`).
+    - Made the GTK→Textual fallback (`main.py:383-433`) apostrophe-agnostic (`"recognize the image file format"`), removed the redundant `(RuntimeError, Exception)` tuple, applied `_configure_textual_warnings()`, closed any stale idle GTK loop and cleared `toga.App.app = None` prior to fallback Textual instantiation, and replaced unbounded `io.StringIO()` stdout sinks with zero-allocation `_NullTextIO` (`main.py:333-358`) / `_DiscardingTextIO` (`toga_textual_backend.py:2076-2108`) supporting standard text-stream methods/attributes, verified by `test_low_fixes.py:36-135` (`test_21`, `test_21b`).
+22. **PyInstaller Packaging Edge Cases (`installer.py`, `main.py`) (#22)**:
+    - Added `_probe_packages_in_interpreter()` (`installer.py:217-257`) to inspect `toga_gtk`, `gi`, `yt_dlp`, `defusedxml`, and `nh3` inside the target `--python-executable` via subprocess (returning `set()` on cross-probe failure rather than leaking host packages).
+    - Scoped `--hidden-import=gi.overrides.Gtk` and `gi.overrides.Pango` to non-Windows/non-macOS builds where `gi` is available (`installer.py:325-343`), and collected `twittui`, `yt_dlp`, `defusedxml`, and `nh3` when present.
+    - Filtered active virtualenvs (`VIRTUAL_ENV`, `CONDA_PREFIX`, `sys.prefix`), relative `.`, `/tmp`/`/var/tmp`, and language-toolchain directories (`/.venv/`, `/.conda/`, `/.cargo/`, `/.rustup/`, `/.nvm/`, `/.pyenv/`, `/.rbenv/`, `/.asdf/`, `/.poetry/`, `/node_modules/`) out of `find_local_executable_path()` (`installer.py:136-214`).
+    - Staged binaries in exclusive, uniquely named temporary files in the install directory and atomically replaced the destination only after applying umask-respecting executable permissions (`(0o755 & ~umask) | 0o700`, `installer.py:490-530`); failed promotion preserves the old binary and cleans only the owned temporary file. Made `--strip` opt-in (`strip_binary=False` by default, exposed via `--strip` in both `installer.py:585-605` and `main.py:172-177, 221-229`), verified by `test_low_fixes.py:140-279` (`test_22`, `test_22b`) and `test_install.py` staging-collision and replacement-failure tests.
 23. **Configuration, Cleanup, Filename, Dialog & API Edge Cases (`twittui_form.py`) (#23)**:
     - Added `_schedule_env_save()` / `_flush_pending_env_saves()` (0.35s UI-loop debounce flushed on Preferences close and app exit), numeric validation in `on_block_change()` / `on_rate_limit_change()`, and kept `api_rate_limiter.rate_limit` bound to `self.get_rate_limit`.
     - Preserved custom Club TWiT Memberful feed IDs (e.g. `.../rss/9055?auth=...`) in Preferences instead of resetting them to `9041`.
@@ -703,7 +710,7 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
    - Added `*.egg-info/`, `*.log`, and `*.spec` to `.gitignore` and removed `twittui.egg-info/` from git tracking (`git rm -r --cached`).
    - Added `.github/workflows/ci.yml` running `py_compile *.py twittui/*.py` and the full `unittest` suite under `xvfb-run` on Python 3.11 and 3.12 with `PyYAML` installed and isolated `SNAP_USER_DATA` / `TWITTUI_CACHE_DB`.
 7. **Reconciled Documentation Drift in `Technical_review.md` (Suggestion #7)**:
-   - Updated every drifted section of `Technical_review.md` to accurately reflect the `twittui/` architecture, `SHOW_REGISTRY`, `RateLimitScreen`, `TextualSelectFolderScreen`, `patch_toga_gtk_app()`, allowlist `HTMLParser` / `nh3` / `bleach` sanitizer, path-segment `_LocalHTMLHandler` token + clean shutdown, non-reentrant `ApiRateLimiter.lock`, normalized WAL SQLite schema + SHA-256 keys + 24-hour TTL, `tiered_search.py` threshold (`68.0`) & field priority, debounced `0o600` `.env` persistence, Snap/PyInstaller/CI tooling, and the 25-module / 300-test suite matrix.
+   - Updated every drifted section of `Technical_review.md` to accurately reflect the `twittui/` architecture, `SHOW_REGISTRY`, `RateLimitScreen`, `TextualSelectFolderScreen`, `patch_toga_gtk_app()`, allowlist `HTMLParser` / `nh3` / `bleach` sanitizer, path-segment `_LocalHTMLHandler` token + clean shutdown, non-reentrant `ApiRateLimiter.lock`, normalized WAL SQLite schema + SHA-256 keys + 24-hour TTL, `tiered_search.py` threshold (`68.0`) & field priority, debounced `0o600` `.env` persistence, Snap/PyInstaller/CI tooling, and the 25-module / 321-test suite matrix.
 
 ---
 
