@@ -22,11 +22,15 @@ from tiered_search import (
 )
 from toga_textual_backend import (
     OpenFileDialog,
+    RateLimitScreen,
     SaveFileDialog,
     TextualActivityIndicator,
+    TextualChoiceDialogScreen,
     TextualDialogScreen,
     TextualProgressBarImpl,
+    TextualSelectFolderScreen,
     TextualTable,
+    TogaLoadingIndicator,
     patch_toga_textual,
 )
 from twittui_form import TwitTUIForm, launch_stream_safe, write_restricted_file
@@ -1038,6 +1042,162 @@ class TestMediumFixes(unittest.TestCase):
                 self.assertEqual(pending_fut.result(), False)
 
         asyncio.run(run_live_tui_checks())
+
+    def test_18b_textual_backend_edge_cases(self) -> None:
+        """Verify mounted ProgressBar/ActivityIndicator sync, Toga file dialogs, Table marks, and hide() modal guards."""
+        async def run_edge_checks() -> None:
+            form = TwitTUIForm("TextualEdgeTest", "org.twit.test.tui18b", cache_db_path=":memory:")
+            with patch.object(form, "_refresh_catalog"):
+                form.startup()
+            tapp = form._impl.native
+            async with tapp.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+
+                # 1. Toga 0.5 OpenFileDialog / SaveFileDialog resolve cleanly via await window.dialog(...)
+                open_dlg = toga.OpenFileDialog("Open Media", file_types=["mp4", "mp3"])
+                save_dlg = toga.SaveFileDialog("Save Media", "episode.mp4", file_types=["mp4"])
+                self.assertEqual(open_dlg._impl.file_types, ["mp4", "mp3"])
+                self.assertEqual(save_dlg._impl.file_types, ["mp4"])
+                self.assertIsNone(await asyncio.wait_for(form.main_window.dialog(open_dlg), timeout=5.0))
+                self.assertIsNone(await asyncio.wait_for(form.main_window.dialog(save_dlg), timeout=5.0))
+
+                # 2. Mounted ProgressBar (determinate + indeterminate) & ActivityIndicator animation timer sync
+                pb_det = toga.ProgressBar(max=200.0, value=75.0)
+                pb_ind = toga.ProgressBar(max=None)
+                ind_stopped = toga.ActivityIndicator()
+                ind_running = toga.ActivityIndicator(running=True)
+                self.assertIsInstance(ind_stopped._impl.native, TogaLoadingIndicator)
+
+                sec_win = toga.Window(title="WidgetsWindow")
+                sec_win.content = toga.Box(children=[pb_det, pb_ind, ind_stopped, ind_running])
+                sec_win.show()
+                await pilot.pause()
+
+                # Determinate ProgressBar retains pre-mount values after on_mount() and clamps on shrink
+                self.assertEqual(pb_det.max, 200.0)
+                self.assertEqual(pb_det.value, 75.0)
+                self.assertEqual(pb_det._impl.native.total, 200.0)
+                self.assertEqual(pb_det._impl.native.progress, 75.0)
+                pb_det.max = 50.0
+                self.assertEqual(pb_det.value, 50.0)
+                self.assertEqual(pb_det._impl.native.total, 50.0)
+                self.assertEqual(pb_det._impl.native.progress, 50.0)
+
+                # Indeterminate ProgressBar reports value=None and switches cleanly to determinate
+                self.assertIsNone(pb_ind.max)
+                self.assertIsNone(pb_ind.value)
+                self.assertIsNone(pb_ind._impl.native.total)
+                pb_ind.max = 100.0
+                self.assertEqual(pb_ind.value, 0.0)
+                self.assertEqual(pb_ind._impl.native.total, 100.0)
+                self.assertEqual(pb_ind._impl.native.progress, 0.0)
+
+                # ActivityIndicator keeps animation timer stopped while hidden and toggles cleanly live
+                self.assertFalse(ind_stopped._impl.native.display)
+                self.assertIsNone(ind_stopped._impl.native.auto_refresh)
+                self.assertTrue(ind_running._impl.native.display)
+                self.assertIsNotNone(ind_running._impl.native.auto_refresh)
+                ind_stopped.start()
+                ind_running.stop()
+                self.assertTrue(ind_stopped._impl.native.display)
+                self.assertIsNotNone(ind_stopped._impl.native.auto_refresh)
+                self.assertFalse(ind_running._impl.native.display)
+                self.assertIsNone(ind_running._impl.native.auto_refresh)
+
+                # 3. Window.hide() dismisses stacked modals, invokes callbacks, marks _finished/_close_requested
+                loop = asyncio.get_running_loop()
+                choice_fut = loop.create_future()
+                folder_fut = loop.create_future()
+                cb_results: list[object] = []
+                fallback_choice = {"label": "720p Fallback"}
+                choice_screen = TextualChoiceDialogScreen(
+                    "Resolution",
+                    "Pick one",
+                    [{"label": "1080p"}],
+                    choice_fut,
+                    default_result=fallback_choice,
+                )
+                folder_screen = TextualSelectFolderScreen("Folder", future=folder_fut)
+                rate_screen = RateLimitScreen()
+                tapp.push_screen(choice_screen, callback=cb_results.append)
+                await pilot.pause()
+                tapp.push_screen(folder_screen)
+                await pilot.pause()
+                tapp.push_screen(rate_screen)
+                await pilot.pause()
+
+                sec_win.hide()
+                await pilot.pause()
+
+                self.assertTrue(choice_fut.done())
+                self.assertEqual(choice_fut.result(), fallback_choice)
+                self.assertTrue(folder_fut.done())
+                self.assertIsNone(folder_fut.result())
+                self.assertTrue(choice_screen._finished)
+                self.assertTrue(folder_screen._finished)
+                self.assertTrue(rate_screen._close_requested)
+                self.assertEqual(cb_results, [fallback_choice])
+                stack_depth_after_hide = len(tapp._screen_stack)
+                # Late idempotent _finish() must not pop the active main screen
+                choice_screen._finish({"label": "late"})
+                self.assertEqual(len(tapp._screen_stack), stack_depth_after_hide)
+
+                # 4. Non-shrinking pop_screen() loop guard prevents infinite spin in Window.hide()
+                sec_win2 = toga.Window(title="GuardWindow")
+                sec_win2.content = toga.Box(children=[toga.Label("Guard")])
+                sec_win2.show()
+                await pilot.pause()
+                guard_fut = loop.create_future()
+                guard_modal = TextualDialogScreen("Wait", "Guarded", [("OK", True)], guard_fut, default_result="fallback")
+                tapp.push_screen(guard_modal)
+                await pilot.pause()
+                with patch.object(tapp, "pop_screen", return_value=None):
+                    sec_win2.hide()
+                self.assertTrue(guard_fut.done())
+                self.assertEqual(guard_fut.result(), "fallback")
+                self.assertTrue(guard_modal._finished)
+                # Cleanly unwind the two screens left by mocked no-op pop_screen
+                while len(tapp._screen_stack) > 1:
+                    tapp.pop_screen()
+                await pilot.pause()
+
+                # 5. TextualTable incremental ops shift _marked_rows cleanly & widen updated cells without clear()
+                tbl = form.episodes_list
+                tbl.data = [
+                    {"episode": "1", "title": "Short 1", "date": "2025-01-01", "length": "1:00", "size": "10 MB"},
+                    {"episode": "2", "title": "Short 2", "date": "2025-01-02", "length": "1:00", "size": "20 MB"},
+                    {"episode": "3", "title": "Short 3", "date": "2025-01-03", "length": "1:00", "size": "30 MB"},
+                ]
+                await pilot.pause()
+                tbl._impl.native._marked_rows = {2}
+                tbl._impl.native._last_anchor_row = 2
+                tbl._impl.native._refresh_marked_visuals()
+
+                with (
+                    patch.object(tbl._impl.native, "clear", wraps=tbl._impl.native.clear) as spy_clear,
+                    patch.object(tbl._impl.native, "update_cell", wraps=tbl._impl.native.update_cell) as spy_update_cell,
+                ):
+                    tbl.data.append({"episode": "4", "title": "Short 4", "date": "2025-01-04", "length": "1:00", "size": "40 MB"})
+                    row2 = tbl.data[2]
+                    row2.title = "A Significantly Longer Updated Episode Title"
+                    tbl._impl.source_change(row2)
+                    del tbl.data[0]
+                    spy_clear.assert_not_called()
+                    self.assertTrue(
+                        any(call.kwargs.get("update_width") is True for call in spy_update_cell.call_args_list),
+                        "Expected source_change() to pass update_width=True to update_cell()",
+                    )
+
+                self.assertEqual(tbl._impl.native.row_count, 3)
+                self.assertEqual(tbl._impl.native._marked_rows, {1})
+                self.assertEqual(tbl._impl.native._last_anchor_row, 1)
+                row1_key = tbl._impl.native._row_locations.get_key(1)
+                self.assertEqual(
+                    tbl._impl.native.rows[row1_key].label.plain,
+                    tbl._impl.native.MARKED_LABEL,
+                )
+
+        asyncio.run(run_edge_checks())
 
 
 if __name__ == "__main__":

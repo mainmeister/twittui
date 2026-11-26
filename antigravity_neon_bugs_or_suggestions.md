@@ -368,7 +368,12 @@ TwitTUI is an ambitious dual-backend (GTK 3 + Textual TUI) TWiT.tv podcast brows
 - **Recommended Fix**:
   Dismiss active modals properly in `_patched_win_hide()`, use `_resolve_dialog_future()` in all dialog classes, add `on_mount()` sync to `TogaProgressBar`, toggle `self.native.display` in `TextualActivityIndicator.start()/stop()`, and apply incremental row operations in `TextualTable`.
 - **Applied Fix & Verification**:
-  Applied all five fixes in `toga_textual_backend.py`. Verified by `test_medium_fixes.py:test_18_textual_backend_dialogs_progressbar_indicator_table_and_hide`.
+  1. **Modal Dismissal & Loop-Safety in `Window.hide()` (`toga_textual_backend.py:239-328, 357-503, 539-717, 2241-2297`)**: Hardened `_patched_win_hide()` (wrapped in `_ensure_active_app()`) to resolve any pending `future`/`_future` via `_resolve_dialog_future()` with `default_result`, mark `_finished = True` / `_close_requested = True`, invoke `top_screen.dismiss(default_result)` on active modals (firing Textual `push_screen(..., callback=...)` handlers) with `pop_screen()` fallback, and guard the loop against non-shrinking stacks (`len(stack) >= before_len`). Made `_finish()` idempotent (`self._finished`) across `TextualDialogScreen`, `TextualChoiceDialogScreen` (now forwarding `ChoiceDialog.default_result`), and `TextualSelectFolderScreen`.
+  2. **Unified Dialog Future Resolution (`toga_textual_backend.py:221-237, 745-764`)**: Updated `OpenFileDialog` and `SaveFileDialog` (also preserving `self.file_types`) to resolve via `_resolve_dialog_future(future, None)` so `await window.dialog(...)` works cleanly with Toga 0.5's `Dialog`/`AsyncResult` wrappers across all dialog classes.
+  3. **`ProgressBar` Pre-Mount & Indeterminate Sync (`toga_textual_backend.py:1402-1476`)**: Applied pre-mount `set_max()`/`set_value()` updates immediately, added `TogaProgressBar.on_mount()` synchronization, returned `None` from `get_value()` when `max is None` (matching Toga 0.5's indeterminate contract), and clamped/reset `value` cleanly on `max` transitions.
+  4. **`ActivityIndicator` Visibility & Animation Timer Control (`toga_textual_backend.py:1605-1662`)**: Introduced `TogaLoadingIndicator(LoadingIndicator)` whose `auto_refresh` property and `on_mount()` synchronize both `display` and Textual's 16 FPS animation timer with `TextualActivityIndicator.start()/stop()`, preventing background timer ticks while stopped and avoiding pre-mount event-loop errors.
+  5. **Incremental `TextualTable` Operations (`toga_textual_backend.py:1263-1370`)**: Implemented O(1) tail `add_row()` in `source_insert()` (with negative-index normalization and shift-anchor maintenance), O(1) `remove_row()` in `source_remove()` (preserving and visually refreshing shifted `_marked_rows`), and O(columns) in-place `update_cell(..., update_width=True)` in `source_change()` so cells widen cleanly without `clear(columns=True)` rebuilds.
+  6. **Verification**: Verified by `test_medium_fixes.py:976-1200` (`test_18_textual_backend_dialogs_progressbar_indicator_table_and_hide` and `test_18b_textual_backend_edge_cases`).
 
 ---
 
@@ -568,10 +573,10 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 | Executive Summary Section | Items | Status | Regression Test Suite |
 | :--- | :---: | :---: | :--- |
 | **1. Critical / High** | 7 (#1–#7) | Complete | `test_critical_fixes.py` (7 tests) |
-| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (18 tests), `test_episode_activation.py` (3 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
+| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (19 tests), `test_episode_activation.py` (3 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
 | **3. Low / Edge Cases** | 3 (#21–#23) | Complete | `test_low_fixes.py` (4 tests) |
 | **4. Architectural & Quality Suggestions** | 7 (#1–#7) | Complete | `test_architecture_suggestions.py` (10 tests) |
-| **Total Test Suite** | **30 items** | **312 / 312 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
+| **Total Test Suite** | **30 items** | **313 / 313 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
 
 ---
 
@@ -637,9 +642,9 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
     - Added `resolve: bool = True` to `launch_stream_safe()` (`twittui/media.py:151-192`, `twittui_form.py:351-366`), passed `resolve=False` from `on_stream_press()` (`twittui_form.py:5713-5741`) after pre-resolution, aligned YouTube skip matching (`youtube-nocookie.com`/`yt.be`), and ensured `head_resp.close()` always runs in `resolve_stream_url()` (`twittui/media.py:47-99`).
     - Routed YouTube streaming through `_open_browser_quietly()` (`twittui_form.py:689-733`), which rejects empty or `-`-prefixed strings and in live POSIX Textual TUI mode spawns `open` (macOS) or `xdg-open` / `gio open` / `sensible-browser` (Linux/Unix, with `OSError` fallback) with `stdin`/`stdout`/`stderr=subprocess.DEVNULL` and `start_new_session=True` instead of mutating process-global `sys.stdout`/`sys.stderr`, verified by `test_medium_fixes.py:875-967` (`test_16_and_17`, `test_17b`).
 18. **Textual Backend Lifecycle & Widget Gaps (`toga_textual_backend.py`) (#18)**:
-    - Dismissed active modal screens cleanly in `_patched_win_hide()` so `await window.dialog(...)` futures never hang.
-    - Updated `OpenFileDialog` and `SaveFileDialog` to resolve via `_resolve_dialog_future()`.
-    - Added `on_mount()` synchronization to `TogaProgressBar`, toggled `self.native.display` in `TextualActivityIndicator.start()/stop()`, and implemented incremental row insertion/removal/cell updates in `TextualTable`.
+    - Hardened `_patched_win_hide()` (`toga_textual_backend.py:2241-2297`) under `_ensure_active_app()` to resolve stacked modal futures via `_resolve_dialog_future()`, mark `_finished`/`_close_requested`, invoke `dismiss(default_result)` (running `push_screen` callbacks) with `pop_screen()` fallback and a non-shrinking-stack loop guard, and made `_finish()` idempotent across `TextualDialogScreen`, `TextualChoiceDialogScreen` (forwarding `ChoiceDialog.default_result`), and `TextualSelectFolderScreen` (`toga_textual_backend.py:239-328, 357-503, 539-717`).
+    - Routed `OpenFileDialog` and `SaveFileDialog` (`toga_textual_backend.py:745-764`, storing `file_types`) through `_resolve_dialog_future(future, None)` so `await window.dialog(...)` resolves cleanly on Toga 0.5's `Dialog`/`AsyncResult` wrappers.
+    - Added `TogaProgressBar.on_mount()` sync and Toga 0.5 indeterminate (`max=None` → `value=None`) + clamp handling in `TextualProgressBarImpl` (`toga_textual_backend.py:1402-1476`), introduced `TogaLoadingIndicator` (`toga_textual_backend.py:1605-1662`) to synchronize both `display` and the 16 FPS `auto_refresh` timer on `start()`/`stop()` and mount, and implemented incremental `TextualTable` `source_insert()` (with negative-index normalization), `source_remove()` (with shifted `_marked_rows` visual refresh), and `source_change()` (`update_cell(..., update_width=True)`) (`toga_textual_backend.py:1263-1370`), verified by `test_medium_fixes.py:976-1200` (`test_18`, `test_18b`).
 19. **Test Suite TTY Hang, Real `.env` Mutation & Skipped Snap Checks (#19)**:
     - Updated `test_install.py` to mock `sys.exit` with `side_effect=SystemExit(0)` (and `assertRaises(SystemExit)`), eliminating indefinite interactive TTY hangs.
     - Isolated `SNAP_USER_DATA` with `tempfile.TemporaryDirectory()` in `test_security.py`, `test_episode_search.py`, `test_tooltips.py`, `test_preferences.py`, and `test_open_destination.py` so developer `.env` files are never overwritten during tests.
