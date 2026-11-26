@@ -278,16 +278,85 @@ class TestCriticalFixes(unittest.TestCase):
             self.assertEqual(wait_events, [True, False])
             self.assertEqual(len(splash_closed), 1)
 
-            # 4. _run_network on_error callback fires on unhandled work exception
+            # 4. _run_network on_error & on_finally callbacks fire on unhandled work/done exceptions
             errors: list[Exception] = []
+            finally_hits: list[str] = []
             form._run_network(
                 lambda: (_ for _ in ()).throw(ValueError("boom")),
                 lambda res: None,
                 on_error=errors.append,
+                on_finally=lambda: finally_hits.append("work_err"),
             )
             await asyncio.sleep(0.05)
             self.assertEqual(len(errors), 1)
             self.assertIsInstance(errors[0], ValueError)
+            self.assertEqual(finally_hits, ["work_err"])
+
+            # 5. _run_network on_finally runs even when the asyncio task is cancelled (CancelledError)
+            cancelled_finally: list[bool] = []
+            import threading
+            gate = threading.Event()
+            task = form._run_network(
+                lambda: gate.wait(timeout=1.0),
+                lambda res: None,
+                on_finally=lambda: cancelled_finally.append(True),
+            )
+            self.assertIsNotNone(task)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                gate.set()
+            self.assertEqual(cancelled_finally, [True])
+
+            # 6. _run_network on_finally runs when loop.create_task fails (e.g. closed loop)
+            schedule_errors: list[Exception] = []
+            schedule_finally: list[bool] = []
+            bad_loop = MagicMock()
+            bad_loop.create_task.side_effect = RuntimeError("Event loop is closed")
+            orig_impl = form._impl
+            form._impl = SimpleNamespace(loop=bad_loop, native=SimpleNamespace())
+            try:
+                res_task = form._run_network(
+                    lambda: "ok",
+                    lambda res: None,
+                    on_error=schedule_errors.append,
+                    on_finally=lambda: schedule_finally.append(True),
+                )
+            finally:
+                form._impl = orig_impl
+            self.assertIsNone(res_task)
+            self.assertEqual(len(schedule_errors), 1)
+            self.assertEqual(schedule_finally, [True])
+
+            # 7. _refresh_show_dates still invokes callback even if _set_show_selector_items raises
+            form._catalog_request = 10
+            form.show_ids = {"Security Now": 1636}
+            form.show_active = {"Security Now": True}
+            form.show_date_bounds = {"Security Now": (None, None)}
+            form._show_date_cache = {}
+            dates_cb: list[bool] = []
+            dates_worker = MagicMock()
+            dates_worker.fetch_show_date_bounds.return_value = ("2005-08-18", "2025-03-04")
+            with patch.object(form, "_network_snapshot", return_value=dates_worker), \
+                 patch.object(form, "_set_show_selector_items", side_effect=RuntimeError("UI update failed")):
+                form._refresh_show_dates(10, ["Security Now"], callback=lambda: dates_cb.append(True))
+                await asyncio.sleep(0.05)
+            self.assertEqual(dates_cb, [True])
+
+            # 8. _refresh_catalog releases splash & wait overlay even if loop.create_task fails
+            wait_events.clear()
+            splash_closed.clear()
+            form._impl = SimpleNamespace(loop=bad_loop, native=SimpleNamespace())
+            try:
+                form._refresh_catalog()
+            finally:
+                form._impl = orig_impl
+            self.assertFalse(getattr(form, "_catalog_wait_held", False))
+            self.assertEqual(wait_events, [True, False])
+            self.assertEqual(len(splash_closed), 1)
 
         asyncio.run(run_checks())
 

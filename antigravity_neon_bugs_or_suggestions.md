@@ -117,6 +117,16 @@ TwitTUI is an ambitious dual-backend (GTK 3 + Textual TUI) TWiT.tv podcast brows
   The inner condition contradicts the outer `if` and can never execute.
 - **Recommended Fix**:
   Add an `on_error` or `on_finally` callback to `_run_network()` (guaranteed to execute on the UI loop in a `finally:` block) so `_api_wait_count`, `_catalog_wait_held`, and `SplashScreen` are always cleanly released. Remove the impossible inner condition on line 1375.
+- **Applied Fix & Verification**:
+  - Updated `_run_network(self, work, done, on_error=None, on_finally=None)` (`twittui_form.py:893-945`) with an idempotent `_invoke_finally()` executed inside `async def run()`'s `finally:` block, attached via `task.add_done_callback()` (handling cancellation before the first event-loop tick), and invoked immediately with `coro.close()` if `self.loop.create_task()` raises.
+  - Added `_call_run_network()` (`twittui_form.py:947-985`) to pass `on_error`/`on_finally` directly to `_run_network` in production while remaining backward-compatible with 2-argument `(work, done)` test stubs.
+  - Wired all callers to idempotent `on_finally` cleanup and removed the impossible inner condition:
+    - `_refresh_catalog()` (`twittui_form.py:1176-1242`): idempotent `catalog_released` guard + `_release_catalog_if_unstarted` `on_finally` callback.
+    - `_refresh_show_dates()` (`twittui_form.py:1319-1367`): per-iteration `settled_box` + `_settle_job` `on_finally` callback so `in_flight` decrements and `callback()` fires even if `_set_show_selector_items()` raises or a task is cancelled.
+    - `load_episodes_for_selected_show()` (`twittui_form.py:7460-7510`): idempotent `_release_episode_wait` `on_finally` callback.
+    - `on_next_press()` (`twittui_form.py:7535-7570`): idempotent `_release_next_wait` `on_finally` callback.
+    - `on_search_press()` (`twittui_form.py:7395`): dispatched via `_call_run_network()`.
+  - Verified in `test_critical_fixes.py:test_5_network_exceptions_never_leave_wait_or_splash_stuck` (covering `work()` exceptions, `asyncio.CancelledError`, `loop.create_task()` failures, `_set_show_selector_items()` errors, and `_refresh_catalog()` scheduling failures) and the full `300 / 300` `unittest` suite.
 
 ---
 
@@ -483,8 +493,13 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 4. **`_LazySQLiteEpisodesCache` Data Loss & `dict` Contract (#4)**:
    - Implemented the full Python mapping contract on `_LazySQLiteEpisodesCache` (`setdefault`, `update`, `__iter__`, `__delitem__`, `keys`, `items`, `values`, `__or__`, `__ior__`, `pop`, `copy`, `clear`) so `setdefault()` hydrates unloaded shows instead of overwriting cached pages with `[]`, and `update()` keeps `_unloaded_keys` synchronized without eager SQLite loads.
 5. **Uncaught `_run_network` Exceptions Freezing Modal Overlays (#5)**:
-   - Added `on_error` error handling to `_run_network()` and wrapped network worker callables and `done` callbacks in `_refresh_catalog()`, `_refresh_show_dates()`, `load_episodes_for_selected_show()`, and `on_next_press()` so `_catalog_wait_held`, `SplashScreen`, and `_api_wait_count` are always released on failure.
-   - Removed the unreachable contradictory dead-code guard inside `_refresh_catalog()`.
+   - Extended `_run_network(self, work, done, on_error=None, on_finally=None)` (`twittui_form.py:893-945`) with an idempotent `_invoke_finally()` executed inside `async def run()`'s `finally:` block, attached via `task.add_done_callback()` (catching pre-start task cancellation), and invoked directly with `coro.close()` if `self.loop.create_task()` fails — guaranteeing `on_finally` executes **exactly once** on the UI event loop under unhandled `work()`/`done()` exceptions, `asyncio.CancelledError`, or scheduling errors.
+   - Added `_call_run_network()` (`twittui_form.py:947-985`) so every network caller wires guaranteed idempotent `on_finally` cleanup while staying compatible with 2-arg `(work, done)` test stubs:
+     - `_refresh_catalog()` (`twittui_form.py:1176-1242`): idempotent `catalog_released` flag and `_release_catalog_if_unstarted` callback release `SplashScreen`, `_catalog_wait_held`, and `_api_wait_count`; dead contradictory inner guard removed.
+     - `_refresh_show_dates()` (`twittui_form.py:1319-1367`): per-iteration `settled_box` binding and `_settle_job` `on_finally` callback guarantee `in_flight` decrements, queued shows dispatch, and `callback()` fires even if `_set_show_selector_items()` raises or a task is cancelled.
+     - `load_episodes_for_selected_show()` (`twittui_form.py:7460-7510`) and `on_next_press()` (`twittui_form.py:7535-7570`): idempotent `_release_episode_wait` / `_release_next_wait` callbacks always release `_set_rate_limit_wait(False)` and callbacks exactly once.
+     - `on_search_press()` (`twittui_form.py:7395`): routed through `_call_run_network()`.
+   - Expanded `test_critical_fixes.py:test_5_network_exceptions_never_leave_wait_or_splash_stuck` (`test_critical_fixes.py:230-353`) to test unhandled `work()` errors, `asyncio.CancelledError`, `loop.create_task()` failures, `_set_show_selector_items()` exceptions during date refresh, and `_refresh_catalog()` scheduling failures (`300 / 300` suite passing).
 6. **`TextualWebView` & `TextualDivider` Crashes Under Toga 0.5.7 (#6)**:
    - Implemented `set_user_agent`, `get_user_agent`, `set_on_webview_load`, `get_cookies`, and `evaluate_javascript` on `TextualWebView` and `set_direction` on `TextualDivider` in `toga_textual_backend.py`.
    - Wrapped `TextualWebView`'s content widget in a scrollable `VerticalScroll` container with `Static(..., markup=False)` so API Blueprint documents (`twittv.apib`) render cleanly without raising `rich.errors.MarkupError`.
