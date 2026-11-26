@@ -288,7 +288,10 @@ TwitTUI is an ambitious dual-backend (GTK 3 + Textual TUI) TWiT.tv podcast brows
 - **Recommended Fix**:
   Wrap `temp_prefix` and `dest_path` with `glob.escape()`, align the destination extension to the actual downloaded container when `ffmpeg` is absent, and replace `os.remove` + `os.rename` with atomic `os.replace()`.
 - **Applied Fix & Verification**:
-  Wrapped `glob.glob()` prefixes with `glob.escape()`, aligned downloaded audio extensions when `ffmpeg` is unavailable, and switched file promotion to atomic `os.replace()` in `twittui_form.py`. Verified by `test_medium_fixes.py:test_13_youtube_brackets_filename_and_audio_extension_without_ffmpeg`.
+  1. **`glob.escape()` for `[` / `]` Filenames, `%` Template Escaping & Sidecar Filtering (`twittui_form.py:4170-4224`)**: Escaped `temp_prefix`, `dest_path`, and stem paths with `glob.escape()` across both `_cleanup_stale_parts()` and `_find_and_promote_output()`, escaped literal `%` characters in `outtmpl` (`temp_prefix.replace('%', '%%')`) so titles like `"Security Now [100%]"` never break `yt-dlp`, and excluded `.part` / `.part.*` / `.ytdl` / `.info.json` / `.description` fragments from promotion candidates.
+  2. **Container Extension Alignment Without `ffmpeg` & Sibling Skip Detection (`twittui_form.py:4128-4150, 4230-4244`)**: When `ffmpeg` is unavailable, aligned `final_dest` to the real downloaded container for both audio (`.m4a`/`.webm`/`.opus`/`.ogg`/`.aac`/`.mp3`/`.flac`) and video (`.mp4`/`.webm`/`.mkv`/`.mov`/`.m4v`) instead of misnaming them, and updated the pre-download skip check to detect existing aligned sibling containers so re-downloads skip cleanly.
+  3. **Validate-Before-Replace Atomic Promotion (`twittui_form.py:4225-4244, 4321-4333, 4389-4400, 4532`)**: Validated `self.is_valid_media_file(found_file)` *before* promoting via atomic `os.replace(found_file, final_dest)` (eliminating both the `os.remove`+`os.rename` data-loss window and the risk of corrupt/HTML downloads overwriting existing valid files or returning false positives via `or dest_path`), and ensured `download_episode_file()` promotes via atomic `os.replace()`.
+  4. **Verification**: Verified by `test_medium_fixes.py:573-701` (`test_13_youtube_brackets_filename_and_audio_extension_without_ffmpeg` and `test_13b_youtube_validates_before_replace_skips_aligned_existing_and_escapes_percent`).
 
 ---
 
@@ -558,10 +561,10 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 | Executive Summary Section | Items | Status | Regression Test Suite |
 | :--- | :---: | :---: | :--- |
 | **1. Critical / High** | 7 (#1–#7) | Complete | `test_critical_fixes.py` (7 tests) |
-| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (14 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
+| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (15 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
 | **3. Low / Edge Cases** | 3 (#21–#23) | Complete | `test_low_fixes.py` (4 tests) |
 | **4. Architectural & Quality Suggestions** | 7 (#1–#7) | Complete | `test_architecture_suggestions.py` (10 tests) |
-| **Total Test Suite** | **30 items** | **306 / 306 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
+| **Total Test Suite** | **30 items** | **307 / 307 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
 
 ---
 
@@ -613,10 +616,10 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 12. **Episode Cache Reconciliation Double-Fetch, Modal Lockup & Write Amplification (#12)**:
     - Updated `fetch_episodes()` (`twittui_form.py:5908-6025`) to always fetch canonical newest-first (`-airingDate`) pages by default (sorting client-side in memory), track `fetched_pages` across reconciliation loops so no page is ever requested twice, and preserve uncached gap episodes on pages with cache hits.
     - Refactored `load_episodes_for_selected_show()` (`twittui_form.py:7537-7713`) into two-phase loading: Phase 1 displays Page 1 and immediately releases the modal wait / `SplashScreen`, while Phase 2 asynchronously backfills pages 2+ under `api_rate_limiter.suppress_wait_notifications()` (`twittui/rate_limiter.py:32-43, 81-89`) with a single deferred write into normalized WAL-mode `twittui_episodes` rows (`twittui/cache.py:141-246`); sort clicks during backfill (`_episodes_backfilling`) re-sort immediately in memory without restarting Page 1. Verified by `test_medium_fixes.py:364-569` (`test_12`, `test_12b`).
-13. **YouTube Bracket Filenames, Misnamed Audio Containers & Non-Atomic Replace (#13)**:
-    - Wrapped `temp_prefix` and `dest_path` with `glob.escape()` in `download_youtube_video()` so bracketed episode titles (`[...]`) resolve and clean up properly.
-    - Aligned output file extensions to the actual downloaded audio container (`.m4a`/`.webm`/`.opus`) when `ffmpeg` is absent.
-    - Replaced `os.remove()` + `os.rename()` with atomic `os.replace()`.
+13. **YouTube Bracket Filenames, Misnamed Audio/Video Containers & Non-Atomic Replace (#13)**:
+    - Wrapped `temp_prefix`, `dest_path`, and stem patterns with `glob.escape()` in `download_youtube_video()` (`twittui_form.py:4170-4224`), escaped literal `%` in `outtmpl`, and filtered `.part`/`.ytdl`/metadata sidecars so bracketed (`[...]`) and `%`-containing titles locate and clean up reliably.
+    - Aligned output file extensions to the actual downloaded audio (`.m4a`/`.webm`/`.opus`) or video (`.webm`/`.mkv`) container when `ffmpeg` is absent (`twittui_form.py:4230-4244`) and checked aligned sibling containers during pre-download skip detection (`twittui_form.py:4128-4150`).
+    - Validated `is_valid_media_file(found_file)` *before* atomic `os.replace()` promotion (`twittui_form.py:4225-4244, 4321-4333, 4389-4400, 4532`) so corrupt/HTML outputs never overwrite existing valid files or return false positives, verified by `test_medium_fixes.py:573-701` (`test_13`, `test_13b`).
 14. **Duration (`length`) Confused with Byte Size (`expected_size`) (#14)**:
     - Removed top-level `'length'` from byte-size key extraction in `download_episodes_batch()`, reading `'length'` as bytes only inside explicit RSS enclosure sub-dictionaries.
 15. **File Descriptor Double-Close & TOCTOU Permissions in `write_restricted_file()` (#15)**:

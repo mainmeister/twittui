@@ -4117,14 +4117,36 @@ class TwitTUIForm(toga.App):
 
     def download_youtube_video(self, url: str, dest_path: str, progress_callback=None) -> bool:
         """Extract and download a YouTube video or audio stream using yt-dlp or youtube-dl."""
-        if self.is_existing_file_identical(dest_path, url):
-            local_size = os.path.getsize(dest_path)
-            print(f"Skipping download: '{dest_path}' already exists ({local_size} bytes).")
-            if progress_callback:
-                progress_callback(100.0, 100.0)
-            else:
-                self.update_progress(100.0, 100.0)
-            return True
+        has_ffmpeg = bool(shutil.which('ffmpeg'))
+        snap_audio = getattr(self, '_download_audio_only', None)
+        audio_only = snap_audio if snap_audio is not None else self.is_audio_only()
+
+        dest_dir = os.path.dirname(os.path.abspath(dest_path)) or '.'
+        base_filename = os.path.basename(dest_path)
+        base_stem, target_ext = os.path.splitext(base_filename)
+
+        # Check existing file at dest_path or (when ffmpeg is absent) an aligned sibling container
+        existing_candidates = [dest_path]
+        if not has_ffmpeg:
+            alt_exts = (
+                ('.m4a', '.webm', '.opus', '.ogg', '.aac', '.mp3', '.flac')
+                if audio_only
+                else ('.mp4', '.webm', '.mkv', '.mov', '.m4v')
+            )
+            for ext in alt_exts:
+                if ext != target_ext.lower():
+                    existing_candidates.append(os.path.join(dest_dir, f"{base_stem}{ext}"))
+
+        for existing_path in existing_candidates:
+            if self.is_existing_file_identical(existing_path, url):
+                local_size = os.path.getsize(existing_path)
+                self._last_downloaded_path = existing_path
+                print(f"Skipping download: '{existing_path}' already exists ({local_size} bytes).")
+                if progress_callback:
+                    progress_callback(100.0, 100.0)
+                else:
+                    self.update_progress(100.0, 100.0)
+                return True
 
         ytdlp_bin = shutil.which('yt-dlp') or shutil.which('youtube-dl')
         has_py_module = False
@@ -4145,20 +4167,20 @@ class TwitTUIForm(toga.App):
             self._show_dialog_threadsafe("error", "YouTube Downloader Required", error_msg, prefer_main=True)
             return False
 
-        dest_dir = os.path.dirname(os.path.abspath(dest_path)) or '.'
         os.makedirs(dest_dir, exist_ok=True)
-        base_filename = os.path.basename(dest_path)
-        base_stem, target_ext = os.path.splitext(base_filename)
         temp_prefix = os.path.join(dest_dir, f".twittui_yt_{base_stem}")
         escaped_temp_prefix = glob.escape(temp_prefix)
         escaped_dest_path = glob.escape(dest_path)
-        outtmpl = f"{temp_prefix}.%(ext)s"
+        escaped_stem_path = glob.escape(os.path.join(dest_dir, base_stem))
+        # Escape literal '%' characters so yt-dlp does not treat episode titles like '100%' as template tokens
+        outtmpl = f"{temp_prefix.replace('%', '%%')}.%(ext)s"
 
         def _cleanup_stale_parts() -> None:
             cleanup_patterns = [
                 f"{escaped_temp_prefix}*",
                 f"{escaped_dest_path}.part*",
                 f"{escaped_dest_path}*.part*",
+                f"{escaped_stem_path}.*.part*",
             ]
             for pattern in cleanup_patterns:
                 for p in glob.glob(pattern):
@@ -4169,6 +4191,16 @@ class TwitTUIForm(toga.App):
                             shutil.rmtree(p, ignore_errors=True)
                     except Exception:
                         _logger.debug("Ignored exception in %s", 'TwitTUIForm.download_youtube_video._cleanup_stale_parts', exc_info=True)
+
+        def _is_temp_fragment(path: str) -> bool:
+            name_low = os.path.basename(path).lower()
+            return (
+                name_low.endswith('.part')
+                or '.part.' in name_low
+                or name_low.endswith('.ytdl')
+                or name_low.endswith('.info.json')
+                or name_low.endswith('.description')
+            )
 
         def _find_and_promote_output(audio_mode: bool, ffmpeg_available: bool) -> str | None:
             candidates = glob.glob(f"{escaped_temp_prefix}.*")
@@ -4181,31 +4213,41 @@ class TwitTUIForm(toga.App):
                     candidates,
                     key=lambda x: (not x.endswith('.mp4'), not x.endswith('.m4a'), not x.endswith('.mp3'), len(x)),
                 ):
+                    if _is_temp_fragment(c):
+                        continue
                     if os.path.isfile(c) and os.path.getsize(c) > 1024:
                         found_file = c
                         break
 
+            if not found_file or not os.path.exists(found_file):
+                return None
+
+            # Validate media payload BEFORE atomic replacement so corrupt/HTML downloads
+            # can never overwrite an existing valid file at final_dest.
+            if not self.is_valid_media_file(found_file):
+                return None
+
             final_dest = dest_path
-            if found_file and os.path.exists(found_file):
-                # When audio-only runs without ffmpeg, keep the real container extension (e.g. .m4a/.opus/.webm)
-                # instead of falsely renaming it to .mp3.
-                if audio_mode and not ffmpeg_available:
-                    actual_ext = os.path.splitext(found_file)[1].lower()
-                    if actual_ext in {'.m4a', '.webm', '.opus', '.ogg', '.aac', '.mp3', '.flac'} and actual_ext != target_ext.lower():
-                        final_dest = os.path.join(dest_dir, f"{base_stem}{actual_ext}")
-                os.replace(found_file, final_dest)
-                return final_dest
-            return None
+            # When ffmpeg is unavailable, keep the actual container extension instead of
+            # misnaming downloaded audio (.m4a/.opus/.webm) or video (.webm/.mkv) containers.
+            if not ffmpeg_available:
+                actual_ext = os.path.splitext(found_file)[1].lower()
+                allowed_exts = (
+                    {'.m4a', '.webm', '.opus', '.ogg', '.aac', '.mp3', '.flac'}
+                    if audio_mode
+                    else {'.mp4', '.webm', '.mkv', '.mov', '.m4v'}
+                )
+                if actual_ext in allowed_exts and actual_ext != target_ext.lower():
+                    final_dest = os.path.join(dest_dir, f"{base_stem}{actual_ext}")
+
+            os.replace(found_file, final_dest)
+            return final_dest
 
         # Clean up any leftover partial pieces before starting
         _cleanup_stale_parts()
 
         if progress_callback is None:
             self.reset_progress()
-
-        has_ffmpeg = bool(shutil.which('ffmpeg'))
-        snap_audio = getattr(self, '_download_audio_only', None)
-        audio_only = snap_audio if snap_audio is not None else self.is_audio_only()
 
         if ytdlp_bin:
             cmd = [
@@ -4276,11 +4318,11 @@ class TwitTUIForm(toga.App):
                     _cleanup_stale_parts()
                     return False
 
-                # Locate finalized output file safely (handling [ ] brackets) and promote atomically
-                final_dest_path = _find_and_promote_output(audio_only, has_ffmpeg) or dest_path
+                # Locate finalized output file safely (handling [ ] brackets), validate, and promote atomically
+                final_dest_path = _find_and_promote_output(audio_only, has_ffmpeg)
                 _cleanup_stale_parts()
 
-                if os.path.exists(final_dest_path) and self.is_valid_media_file(final_dest_path):
+                if final_dest_path and os.path.exists(final_dest_path) and self.is_valid_media_file(final_dest_path):
                     self._last_downloaded_path = final_dest_path
                     if progress_callback:
                         progress_callback(100.0, 100.0)
@@ -4344,10 +4386,10 @@ class TwitTUIForm(toga.App):
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
 
-                final_dest_path = _find_and_promote_output(audio_only, has_ffmpeg) or dest_path
+                final_dest_path = _find_and_promote_output(audio_only, has_ffmpeg)
                 _cleanup_stale_parts()
 
-                if os.path.exists(final_dest_path) and self.is_valid_media_file(final_dest_path):
+                if final_dest_path and os.path.exists(final_dest_path) and self.is_valid_media_file(final_dest_path):
                     self._last_downloaded_path = final_dest_path
                     if progress_callback:
                         progress_callback(100.0, 100.0)

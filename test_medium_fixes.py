@@ -619,6 +619,86 @@ class TestMediumFixes(unittest.TestCase):
                 self.assertTrue(os.path.isfile(expected_m4a))
                 self.assertFalse(os.path.exists(dest_mp3))
 
+    def test_13b_youtube_validates_before_replace_skips_aligned_existing_and_escapes_percent(self) -> None:
+        """Corrupt downloads never clobber existing files, aligned containers skip re-download, and '%' / '.part' are safe."""
+        form = TwitTUIForm("TestApp", "org.twit.test", cache_db_path=":memory:")
+        yt_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # 1. Corrupt HTML download must NOT overwrite an existing valid file at dest_path and must return False
+            dest_existing = os.path.join(tmp_dir, "Security Now [100%] 1002.mp4")
+            original_payload = b"\x00\x00\x00\x18ftypmp42" + (b"V" * 4096)
+            with open(dest_existing, "wb") as f:
+                f.write(original_payload)
+            stale_bracket_part = dest_existing + ".part.f140.m4a"
+            with open(stale_bracket_part, "wb") as f:
+                f.write(b"stale")
+
+            captured_outtmpl = []
+
+            def mock_popen_html(cmd, **kwargs):
+                out_tmpl = cmd[cmd.index("-o") + 1]
+                captured_outtmpl.append(out_tmpl)
+                # Simulate yt-dlp interpreting '%%' as literal '%' and writing HTML + a .part sidecar
+                out_file = out_tmpl.replace("%%", "%").replace("%(ext)s", "mp4")
+                with open(out_file, "wb") as f:
+                    f.write(b"<!DOCTYPE html><html><body>Error page</body></html>" + (b" " * 2048))
+                with open(out_file + ".part", "wb") as f:
+                    f.write(b"\x00\x00\x00\x18ftypmp42" + (b"P" * 2048))
+                proc = MagicMock()
+                proc.stdout.readline.return_value = ""
+                proc.poll.return_value = 0
+                proc.wait.return_value = 0
+                return proc
+
+            form.is_audio_only = lambda: False
+            # Force download attempt even though dest_existing exists (e.g. smaller than 500KB YouTube skip threshold)
+            with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}"), \
+                 patch("subprocess.Popen", side_effect=mock_popen_html):
+                self.assertFalse(form.download_youtube_video(yt_url, dest_existing))
+
+            # Original file untouched, stale bracketed .part purged, and literal '%' escaped in outtmpl
+            with open(dest_existing, "rb") as f:
+                self.assertEqual(f.read(), original_payload)
+            self.assertFalse(os.path.exists(stale_bracket_part))
+            self.assertEqual(len(captured_outtmpl), 1)
+            self.assertIn("[100%%]", captured_outtmpl[0])
+
+            # 2. Re-downloading audio-only without ffmpeg skips an already-downloaded aligned .m4a file
+            dest_mp3 = os.path.join(tmp_dir, "Audio [Live] 1003.mp3")
+            existing_m4a = os.path.join(tmp_dir, "Audio [Live] 1003.m4a")
+            with open(existing_m4a, "wb") as f:
+                f.write(b"\x00\x00\x00\x18ftypM4A " + (b"A" * (1100 * 1024)))
+
+            form.is_audio_only = lambda: True
+            with patch("shutil.which", side_effect=lambda x: "/usr/bin/yt-dlp" if x == "yt-dlp" else None), \
+                 patch("subprocess.Popen") as mock_popen_skip:
+                self.assertTrue(form.download_youtube_video(yt_url, dest_mp3))
+                mock_popen_skip.assert_not_called()
+                self.assertEqual(form._last_downloaded_path, existing_m4a)
+
+            # 3. Video-only without ffmpeg aligns .webm container instead of misnaming it to .mp4
+            dest_mp4 = os.path.join(tmp_dir, "Video [WebM] 1004.mp4")
+            expected_webm = os.path.join(tmp_dir, "Video [WebM] 1004.webm")
+
+            def mock_popen_webm(cmd, **kwargs):
+                out_tmpl = cmd[cmd.index("-o") + 1]
+                out_file = out_tmpl.replace("%%", "%").replace("%(ext)s", "webm")
+                with open(out_file, "wb") as f:
+                    f.write(b"\x1a\x45\xdf\xa3" + (b"W" * 2048))
+                proc = MagicMock()
+                proc.stdout.readline.return_value = ""
+                proc.poll.return_value = 0
+                proc.wait.return_value = 0
+                return proc
+
+            form.is_audio_only = lambda: False
+            with patch("shutil.which", side_effect=lambda x: "/usr/bin/yt-dlp" if x == "yt-dlp" else None), \
+                 patch("subprocess.Popen", side_effect=mock_popen_webm):
+                self.assertTrue(form.download_youtube_video(yt_url, dest_mp4))
+                self.assertTrue(os.path.isfile(expected_webm))
+                self.assertFalse(os.path.exists(dest_mp4))
+
     # ------------------------------------------------------------------
     # Bug 14: Duration 'length' not mistaken for byte size expected_size
     # ------------------------------------------------------------------
