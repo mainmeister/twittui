@@ -377,11 +377,25 @@ class TestCriticalFixes(unittest.TestCase):
         self.assertIn("[/shows{?page,range}]", str(rendered))
         self.assertIn("[/unmatched]", str(rendered))
 
-        # Divider supports both horizontal and vertical directions without AttributeError
+        # set_on_webview_load, bracketed URLs, and VerticalScroll wrapping satisfy Toga 0.5
+        load_hits = []
+        wv._impl.set_on_webview_load(load_hits.append)
+        wv.on_webview_load = lambda widget: load_hits.append(widget)
+        wv.url = "https://twit.tv/api/v1.0/episodes?filter[shows]=1636"
+        self.assertIn("filter[shows]=1636", str(wv._impl.native_static.render()))
+        self.assertGreaterEqual(len(load_hits), 1)
+
+        from textual.containers import VerticalScroll
+        self.assertIsInstance(wv._impl.native, VerticalScroll)
+
+        # Divider supports both horizontal and vertical directions and dynamic switching without AttributeError
         div_h = toga.Divider(direction=Direction.HORIZONTAL)
         self.assertIsInstance(div_h._impl, TextualDivider)
         self.assertEqual(div_h.direction, Direction.HORIZONTAL)
         self.assertEqual(div_h._impl.native.orientation, "horizontal")
+        div_h.direction = Direction.VERTICAL
+        self.assertEqual(div_h.direction, Direction.VERTICAL)
+        self.assertEqual(div_h._impl.native.orientation, "vertical")
 
         div_v = toga.Divider(direction=Direction.VERTICAL)
         self.assertEqual(div_v.direction, Direction.VERTICAL)
@@ -389,10 +403,11 @@ class TestCriticalFixes(unittest.TestCase):
 
         # Async Toga 0.5.7 WebView APIs (load_url, cookies, evaluate_javascript) and live TUI doc viewer
         async def check_async_and_live_tui() -> None:
+            from http.cookiejar import CookieJar
             await wv.load_url("https://twit.tv")
             self.assertEqual(wv.url, "https://twit.tv")
             cookies = await wv.cookies
-            self.assertIsNotNone(cookies)
+            self.assertIsInstance(cookies, CookieJar)
             js_res = await wv.evaluate_javascript("1 + 1")
             self.assertIsNone(js_res)
 
@@ -406,6 +421,14 @@ class TestCriticalFixes(unittest.TestCase):
                 form.show_document_viewer("twittv.apib", "TWiT API Blueprint")
                 await pilot.pause()
                 self.assertGreaterEqual(len(tapp.screen_stack), 2)
+                scr = tapp.screen
+                vs_widgets = list(scr.query(VerticalScroll))
+                self.assertEqual(len(vs_widgets), 1)
+                self.assertGreater(vs_widgets[0].max_scroll_y, 0)
+                self.assertIs(scr.focused, vs_widgets[0])
+                await pilot.press("pagedown")
+                await pilot.pause()
+                self.assertGreater(vs_widgets[0].scroll_y, 0)
                 # Ensure pressing Escape closes the document viewer screen cleanly
                 await pilot.press("escape")
                 await pilot.pause()

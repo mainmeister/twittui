@@ -1417,11 +1417,13 @@ class TextualWebView(Widget):
     """Toga WebView fallback implementation for Textual."""
 
     SUPPORTS_ON_NAVIGATION_STARTING = False
+    SUPPORTS_ON_WEBVIEW_LOAD = True
 
     def create(self) -> None:
         self._url: str | None = None
         self._content: str = ""
         self._user_agent: str = "TwitTUI"
+        self._on_webview_load: Any = None
         self.native_static = Static(
             "WebView (Documentation / Web Content)",
             markup=False,
@@ -1434,6 +1436,9 @@ class TextualWebView(Widget):
 
     def set_user_agent(self, value: str | None) -> None:
         self._user_agent = value or "TwitTUI"
+
+    def set_on_webview_load(self, handler: Any) -> None:
+        self._on_webview_load = handler
 
     def set_content(self, root_url: str | None, content: str) -> None:
         import re as _re
@@ -1452,6 +1457,8 @@ class TextualWebView(Widget):
         try:
             display_text = text if text else "WebView (Documentation / Web Content)"
             self.native_static.update(display_text)
+            if getattr(self.native, "is_mounted", False):
+                self.native.scroll_home(animate=False)
         except Exception:
             _logger.debug("Ignored exception in %s", 'TextualWebView.set_content', exc_info=True)
         try:
@@ -1465,6 +1472,8 @@ class TextualWebView(Widget):
         try:
             label = f"Web Content: {self._url}" if self._url else "WebView (Documentation / Web Content)"
             self.native_static.update(label)
+            if getattr(self.native, "is_mounted", False):
+                self.native.scroll_home(animate=False)
         except Exception:
             _logger.debug("Ignored exception in %s", 'TextualWebView.set_url', exc_info=True)
         if future is not None and not future.done():
@@ -1993,12 +2002,23 @@ def patch_toga_textual() -> None:
                     if content_native is None or not getattr(content_native, "is_attached", False):
                         return
                     current_focused = getattr(screen_obj, "focused", None)
-                    if current_focused is not None and current_focused in content_native.walk_children():
+                    if current_focused is not None and (
+                        current_focused is content_native
+                        or current_focused in content_native.walk_children()
+                    ):
                         return
+                    focused_any = False
                     for candidate in content_native.query("Input, Select, DataTable, Switch, Button, VerticalScroll"):
                         if getattr(candidate, "can_focus", False) and not getattr(candidate, "disabled", False):
                             candidate.focus()
+                            focused_any = True
                             break
+                    if (
+                        not focused_any
+                        and getattr(content_native, "can_focus", False)
+                        and not getattr(content_native, "disabled", False)
+                    ):
+                        content_native.focus()
                 except Exception:
                     _logger.debug("Ignored exception in %s", 'patch_toga_textual._focus_first_content_control', exc_info=True)
 
