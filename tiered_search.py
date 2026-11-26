@@ -206,32 +206,12 @@ def extract_searchable_text(episode: Any) -> str:
 
     Derived directly from get_episode_fields() so filtering and match-context
     extraction always search the exact same set of fields (title, hosts/guests,
-    topics/tags, description/teaser/show notes, episode number, length, size).
+    topics/tags, description/show notes, secondary summary/teaser, episode
+    number, length, size).
     """
     if not episode:
         return ""
-
-    parts: List[str] = [field_text for _, field_text in get_episode_fields(episode) if field_text]
-    seen = set(parts)
-
-    # Also include any additional secondary descriptive keys (e.g. teaser/summary alongside description)
-    extra_keys = ('label', 'summary', 'body', 'show_notes', 'notes', 'teaser', 'snippet')
-    sources: List[Any] = [episode]
-    if isinstance(episode, dict) and isinstance(episode.get('episode_data'), dict):
-        sources.append(episode['episode_data'])
-    elif hasattr(episode, 'episode_data') and isinstance(getattr(episode, 'episode_data', None), dict):
-        sources.append(episode.episode_data)
-
-    for src in sources:
-        for key in extra_keys:
-            val = src.get(key) if isinstance(src, dict) else getattr(src, key, None)
-            if val is not None:
-                cleaned = _clean_html_for_search(str(val))
-                if cleaned and cleaned not in seen:
-                    seen.add(cleaned)
-                    parts.append(cleaned)
-
-    return " ".join(parts)
+    return " ".join(field_text for _, field_text in get_episode_fields(episode) if field_text)
 
 
 def compute_match_score(
@@ -316,14 +296,15 @@ def compute_match_score(
                     _logger.debug("rapidfuzz.partial_ratio fallback triggered", exc_info=True)
 
         # Tier 3: Phonetic (Double Metaphone) fallback for this query token
-        if phonetic_enabled and best_w_score < 75.0:
+        # Max phonetic score is 80.0 (primary) / 72.0 (secondary), so only evaluate when below 80.0.
+        if phonetic_enabled and best_w_score < 80.0:
             qw_p, qw_s = double_metaphone(qw)
             if (qw_p and qw_p in text_phonetic) or (qw_s and qw_s in text_phonetic):
                 phonetic_score = 80.0 if (qw_p and qw_p in text_phonetic) else 72.0
                 best_w_score = max(best_w_score, phonetic_score)
 
         # Enforce minimum threshold per query word
-        effective_threshold = min_word_threshold if len(qw) >= 4 else 80.0
+        effective_threshold = min_word_threshold if len(qw) >= 4 else max(min_word_threshold, 80.0)
         if best_w_score < effective_threshold:
             return 0.0
 
@@ -435,11 +416,35 @@ def get_episode_fields(episode: Any) -> List[Tuple[str, str]]:
         fields.append(('Topics', ", ".join(topics)))
 
     # 4. Description / Show Notes (cleaned to match UI MultilineTextInput offsets)
-    desc = ep_data.get('description') or ep_data.get('summary') or ep_data.get('body') or ep_data.get('show_notes') or ep_data.get('notes') or ep_data.get('teaser') or ep_data.get('snippet') or ''
-    if desc:
-        cleaned_desc = _clean_html_for_search(str(desc))
-        if cleaned_desc:
-            fields.append(('Description / Show Notes', cleaned_desc))
+    desc_keys = ('description', 'summary', 'body', 'show_notes', 'notes', 'teaser', 'snippet')
+    primary_desc = ''
+    primary_desc_key = None
+    for k in desc_keys:
+        val = ep_data.get(k)
+        if val:
+            cleaned_desc = _clean_html_for_search(str(val))
+            if cleaned_desc:
+                primary_desc = cleaned_desc
+                primary_desc_key = k
+                fields.append(('Description / Show Notes', primary_desc))
+                break
+
+    # 4b. Secondary distinct descriptive keys (e.g. teaser/summary alongside description)
+    # Stored under a separate non-'description' label so filtering and match-context
+    # extraction remain 100% aligned without misaligning GTK Description auto-scroll offsets.
+    secondary_descs: List[str] = []
+    seen_descs = {primary_desc} if primary_desc else set()
+    for k in desc_keys:
+        if k == primary_desc_key:
+            continue
+        val = ep_data.get(k)
+        if val:
+            cleaned_extra = _clean_html_for_search(str(val))
+            if cleaned_extra and cleaned_extra not in seen_descs:
+                seen_descs.add(cleaned_extra)
+                secondary_descs.append(cleaned_extra)
+    if secondary_descs:
+        fields.append(('Summary / Teaser', " ".join(secondary_descs)))
 
     # 5. Episode Number
     num = ep_data.get('number') or ep_data.get('episode') or ep_data.get('episodeNumber') or ''
@@ -482,10 +487,10 @@ def find_match_context(
     if not query or not query.strip() or not episode:
         return None
 
-    q_clean = query.strip().lower()
-    q_words = [w for w in re.split(r'\s+', q_clean) if w]
+    q_words = [w for w in re.split(r'\s+', query.strip().lower()) if w]
     if not q_words:
         return None
+    q_clean = " ".join(q_words)
 
     fields = get_episode_fields(episode)
     if not fields:
@@ -534,7 +539,7 @@ def find_match_context(
     ]
 
     for word_idx, qw in enumerate(q_words):
-        effective_threshold = min_word_threshold if len(qw) >= 4 else 80.0
+        effective_threshold = min_word_threshold if len(qw) >= 4 else max(min_word_threshold, 80.0)
         qw_p, qw_s = double_metaphone(qw) if phonetic_enabled else ("", "")
 
         for field_label, field_text, word_iter in field_words_cache:
@@ -623,26 +628,47 @@ def find_match_context(
         if not matches_by_word[word_idx]:
             return None
 
-    candidate_matches: List[MatchContext] = [
-        mc for word_list in matches_by_word for mc in word_list
-    ]
-    if not candidate_matches:
-        return None
-
     field_priority = {
         'Description / Show Notes': 3,
         'Hosts / Guests': 2,
         'Title': 1,
         'Topics': 0,
+        'Summary / Teaser': 0,
         'Episode Number': 0,
         'Length': 0,
         'Size': 0
     }
-    candidate_matches.sort(
+
+    best_per_word: List[MatchContext] = []
+    for word_matches in matches_by_word:
+        word_matches.sort(
+            key=lambda mc: (mc.score, field_priority.get(mc.field_name, 0)),
+            reverse=True
+        )
+        best_per_word.append(word_matches[0])
+
+    if not best_per_word:
+        return None
+
+    non_exact_best = [mc for mc in best_per_word if mc.match_tier != "Exact Match"]
+    if non_exact_best:
+        # Multi-word query with at least one fuzzy/phonetic token: highlight the
+        # highest-signal non-exact match for hover explanation & auto-scrolling,
+        # and align aggregate score with compute_match_score() (capped at 99.0).
+        non_exact_best.sort(
+            key=lambda mc: (mc.score, field_priority.get(mc.field_name, 0)),
+            reverse=True
+        )
+        chosen = non_exact_best[0]
+        avg_score = sum(mc.score for mc in best_per_word) / len(best_per_word)
+        chosen.score = min(99.0, max(60.0, avg_score))
+        return chosen
+
+    best_per_word.sort(
         key=lambda mc: (mc.score, field_priority.get(mc.field_name, 0)),
         reverse=True
     )
-    return candidate_matches[0]
+    return best_per_word[0]
 
 
 def rank_and_filter_episodes(

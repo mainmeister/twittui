@@ -243,6 +243,47 @@ class TestMediumFixes(unittest.TestCase):
         self.assertIn("Fuzzy Match", ctx.match_tier)
         self.assertEqual(ctx.matched_token.lower(), "security")
 
+    def test_10b_tiered_search_multiword_signal_secondary_teaser_and_threshold_parity(self) -> None:
+        """Multi-word hover context highlights non-exact tokens; secondary teaser stays in sync; thresholds match."""
+        # 1. Multi-word mixed exact + phonetic/fuzzy highlights the high-signal non-exact token
+        ep_mixed = {
+            "title": "Security Now 520",
+            "description": "Fr. Robert Ballecer joins Leo Laporte to discuss routers.",
+        }
+        score = compute_match_score("Security ballacer", extract_searchable_text(ep_mixed))
+        ctx_mixed = find_match_context(ep_mixed, "Security ballacer")
+        self.assertIsNotNone(ctx_mixed)
+        self.assertEqual(ctx_mixed.field_name, "Description / Show Notes")
+        self.assertIn("Phonetic Match", ctx_mixed.match_tier)
+        self.assertEqual(ctx_mixed.matched_token, "Ballecer")
+        self.assertLess(ctx_mixed.score, 100.0)
+        self.assertAlmostEqual(ctx_mixed.score, score, places=3)
+
+        # 2. Secondary teaser alongside description is found by BOTH rank_and_filter_episodes AND find_match_context
+        ep_dual = {
+            "title": "Linux Weekly 10",
+            "description": "Main show notes covering kernel updates.",
+            "teaser": "Bonus segment about WireGuard VPN tunnels.",
+        }
+        self.assertEqual(len(rank_and_filter_episodes([ep_dual], "WireGuard")), 1)
+        ctx_dual = find_match_context(ep_dual, "WireGuard")
+        self.assertIsNotNone(ctx_dual)
+        self.assertEqual(ctx_dual.field_name, "Summary / Teaser")
+        self.assertEqual(ctx_dual.matched_token, "WireGuard")
+
+        # 3. Phonetic fallback below 80.0 and custom min_word_threshold > 80.0 agree in both functions
+        # 'phillip' vs 'filip': fuzzy_ratio ~76.9% (< 80.0), primary Double Metaphone = 'FLP' (score 80.0)
+        ep_phon = {"title": "Guest Filip", "description": "Talking with Filip today."}
+        text_phon = extract_searchable_text(ep_phon)
+        self.assertGreaterEqual(compute_match_score("phillip", text_phon, min_word_threshold=78.0), 80.0)
+        self.assertIsNotNone(find_match_context(ep_phon, "phillip", min_word_threshold=78.0))
+        # Short word (< 4 chars) respects stricter min_word_threshold=90.0 in both functions
+        ep_short = {"title": "Jon speaks", "description": "Talking with Jon."}
+        self.assertEqual(compute_match_score("john", extract_searchable_text(ep_short), min_word_threshold=90.0), 0.0)
+        self.assertIsNone(find_match_context(ep_short, "john", min_word_threshold=90.0))
+        self.assertEqual(compute_match_score("jon", extract_searchable_text({"title": "John"}), min_word_threshold=90.0), 0.0)
+        self.assertIsNone(find_match_context({"title": "John"}, "jon", min_word_threshold=90.0))
+
     # ------------------------------------------------------------------
     # Bug 11: get_available_resolutions reads real _show_rss_cache keys
     # ------------------------------------------------------------------

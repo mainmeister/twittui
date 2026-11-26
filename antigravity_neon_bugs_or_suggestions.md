@@ -232,7 +232,10 @@ TwitTUI is an ambitious dual-backend (GTK 3 + Textual TUI) TWiT.tv podcast brows
 - **Recommended Fix**:
   Derive `extract_searchable_text()` directly from `get_episode_fields()` so searched fields and inspected fields can never drift; unify tier precedence/thresholds between scoring and context extraction; and require multi-word queries to match all tokens (or pick the highest-signal non-exact token for hover explanations).
 - **Applied Fix & Verification**:
-  Unified `extract_searchable_text()` on top of `get_episode_fields()`, aligned Tier 2/Tier 3 scoring and thresholds (`68.0` default, `80.0` for `< 4`-char tokens), and enforced all-token matching in `find_match_context()` (`tiered_search.py`). Verified by `test_medium_fixes.py:test_10_tiered_search_includes_hosts_topics_teaser_and_blocks_partial_false_positives`.
+  1. **Zero-Drift Field Parity (`tiered_search.py:204-214, 418-448`)**: Derived `extract_searchable_text()` purely from `get_episode_fields()` (`" ".join(field_text for _, field_text in get_episode_fields(episode) if field_text)`), covering `Title`, `Hosts / Guests`, `Topics`, `Description / Show Notes`, `Episode Number`, `Length`, and `Size`, plus a separate `Summary / Teaser` field for any distinct secondary descriptive keys (`teaser`, `summary`, `notes`, `snippet`) present alongside a primary description — ensuring `rank_and_filter_episodes()` and `find_match_context()` always inspect the exact same text without interfering with GTK `Description / Show Notes` offset auto-scrolling.
+  2. **Unified Tier 2 / Tier 3 Precedence & Thresholds (`tiered_search.py:298-311, 541-625`)**: Aligned `compute_match_score()` and `find_match_context()` on the same short-word threshold (`max(min_word_threshold, 80.0)` for `< 4`-char tokens; `min_word_threshold` default `68.0`), aligned Tier 3 phonetic fallback (`< 80.0`, scoring `80.0` primary / `72.0` secondary) so weak phonetic hits never outrank stronger fuzzy matches, and normalized multi-space queries (`q_clean = " ".join(q_words)`).
+  3. **All-Token Gating & High-Signal Multi-Word Context (`tiered_search.py:627-671`)**: Required every query token to match in `find_match_context()` (eliminating partial-query false positives such as `"Episode ZZZZZNOTFOUND"`), and for mixed exact + fuzzy/phonetic multi-word queries (e.g., `"Security ballacer"`), selected the highest-signal non-exact token (`Description / Show Notes`: `Phonetic Match ("ballacer" ≈ "Ballecer")`) with its aggregate score aligned to `compute_match_score()` (`<= 99.0`) rather than misleadingly reporting `Exact Match (100.0)` on `"Security"`.
+  4. **Verification**: Verified by `test_medium_fixes.py:205-285` (`test_10_tiered_search_includes_hosts_topics_teaser_and_blocks_partial_false_positives` and `test_10b_tiered_search_multiword_signal_secondary_teaser_and_threshold_parity`).
 
 ---
 
@@ -550,10 +553,10 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 | Executive Summary Section | Items | Status | Regression Test Suite |
 | :--- | :---: | :---: | :--- |
 | **1. Critical / High** | 7 (#1–#7) | Complete | `test_critical_fixes.py` (7 tests) |
-| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (11 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
+| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (12 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
 | **3. Low / Edge Cases** | 3 (#21–#23) | Complete | `test_low_fixes.py` (4 tests) |
 | **4. Architectural & Quality Suggestions** | 7 (#1–#7) | Complete | `test_architecture_suggestions.py` (10 tests) |
-| **Total Test Suite** | **30 items** | **303 / 303 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
+| **Total Test Suite** | **30 items** | **304 / 304 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
 
 ---
 
@@ -596,9 +599,9 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
    - Preserved `'Ç'`, `'Ñ'`, and collapsed word-boundary spaces prior to encoding (`double_metaphone.py:16-38, 72-76, 408-412`), wired `padded` into `substr()` so all boundary/space-matching rules are reachable, and audited every `string_at()` slice length via AST.
    - Aligned every rule against Lawrence Philips' canonical specification: `CHAE` (`('K', 'X')`), `DG` (`('TK', 'TK')`), `GN` / `GLI`, Italian `AGGI`/`OGGI` (without corrupting English `-UGGI`/`-IGGI`), `J` & `L` (proper `not is_slavo_germanic` guard and removal of empty `secondary.append('')` that truncated secondary codes like `CABALLEROS`), `R` `-IER` & `S` `SIO`/`SIA`/`SIAN` `is_slavo_germanic` guards, `SCH` secondary (`SK`), `TION`/`TIA`/`TCH` vs `TH`/`TTH` (removing non-canonical `"TIEN"`), initial `W` fallthrough & `WICZ`/`WITZ` (`('TS', 'FX')`), and `Z` `is_slavo_germanic` guard (`AMAZING`/`LAZY`/`PIZZA`/`KAZAKH`), verified by 8 canonical vector tests in `test_double_metaphone.py`.
 10. **Tiered Search Field Omissions, Score Inversion & Partial-Query False Positives (`tiered_search.py`) (#10)**:
-    - Derived `extract_searchable_text()` directly from `get_episode_fields()` so hosts, guests, topics, tags, teaser, and snippet are always searchable alongside title and description.
-    - Aligned Tier 2 (Fuzzy) and Tier 3 (Phonetic) precedence, scores (`80.0` primary / `72.0` secondary), and short-word thresholds (`80.0` for `< 4`-char tokens; `68.0` default) between `compute_match_score()` and `find_match_context()`.
-    - Required every query token to match in `find_match_context()`, eliminating partial-query false positives.
+    - Derived `extract_searchable_text()` (`tiered_search.py:204-214`) purely from `get_episode_fields()` (`tiered_search.py:418-448`), adding a distinct `Summary / Teaser` field for secondary descriptive keys alongside `Description / Show Notes` so filtering and hover context inspection never drift and GTK Description auto-scroll offsets stay aligned.
+    - Aligned Tier 2 (Fuzzy) and Tier 3 (Phonetic) precedence, fallback threshold (`< 80.0`), scores (`80.0` primary / `72.0` secondary), multi-space query normalization, and short-word thresholds (`max(min_word_threshold, 80.0)` for `< 4`-char tokens; `68.0` default) between `compute_match_score()` (`tiered_search.py:298-311`) and `find_match_context()` (`tiered_search.py:541-625`).
+    - Required every query token to match in `find_match_context()` (`tiered_search.py:627-671`), eliminating partial-query false positives, and selected the highest-signal non-exact token with score aligned to `compute_match_score()` for mixed multi-word queries, verified by `test_medium_fixes.py:205-285` (`test_10`, `test_10b`).
 11. **Dead RSS Cache Lookup in `get_available_resolutions()` (#11)**:
     - Replaced the dead `f"rss_{feed_file}"` cache key lookup with the actual `f"{show_key}_video"` and `f"{show_key}_audio"` keys populated by `fetch_show_rss_items()`.
 12. **Episode Cache Reconciliation Double-Fetch & Write Amplification (#12)**:
