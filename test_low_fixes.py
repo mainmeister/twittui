@@ -405,6 +405,78 @@ class TestLowAndEdgeCaseFixes(unittest.TestCase):
         dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
         self.assertEqual(dep_warnings, [], f"Unexpected DeprecationWarnings: {[str(w.message) for w in dep_warnings]}")
 
+    def test_23c_debounce_revert_ytdlp_termination_html_perms_and_reserved_names(self) -> None:
+        """Verify debounce revert cancels stale pending save, exit/cancel terminates active yt-dlp, preview HTML is 0o600, and Windows reserved names are escaped."""
+        import subprocess
+
+        form = TwitTUIForm("EdgeTest23c", "org.twit.test.23c", cache_db_path=":memory:")
+
+        # 1. Debounce revert: reverting back to last-saved value cancels stale pending write
+        async def check_debounce_revert() -> None:
+            saved: list[tuple[str, str]] = []
+            form._impl = SimpleNamespace(loop=asyncio.get_running_loop(), native=SimpleNamespace())
+            form._last_saved_env["TWITAPI_APPLICATIONID"] = "orig"
+            with patch.object(TwitTUIForm, "save_env_setting", side_effect=lambda k, v: saved.append((k, v))):
+                form._schedule_env_save("TWITAPI_APPLICATIONID", "edited")
+                self.assertEqual(form._pending_env_saves.get("TWITAPI_APPLICATIONID"), "edited")
+                form._schedule_env_save("TWITAPI_APPLICATIONID", "orig")
+                self.assertNotIn("TWITAPI_APPLICATIONID", form._pending_env_saves)
+                form._flush_pending_env_saves()
+                self.assertEqual(saved, [])
+
+        asyncio.run(check_debounce_revert())
+
+        # 2. Exit / Cancel terminates active yt-dlp subprocess (escalating to kill on timeout)
+        stubborn_proc = MagicMock()
+        stubborn_proc.poll.return_value = None
+        stubborn_proc.wait.side_effect = [subprocess.TimeoutExpired(cmd="yt-dlp", timeout=1.0), 0]
+        form._is_downloading = True
+        form._cancel_download = False
+        form._active_download_proc = stubborn_proc
+        with patch.object(form, "show_splash_screen"), patch.object(form, "exit"):
+            form.on_close_press(None)
+        self.assertTrue(form._cancel_download)
+        stubborn_proc.terminate.assert_called_once()
+        stubborn_proc.kill.assert_called_once()
+        self.assertIsNone(form._active_download_proc)
+
+        # Cancel mid-download also terminates active subprocess immediately
+        cancel_proc = MagicMock()
+        cancel_proc.poll.return_value = None
+        cancel_proc.wait.return_value = 0
+        form._is_downloading = True
+        form._cancel_download = False
+        form._active_download_proc = cancel_proc
+        with patch.object(form, "reset_progress"):
+            form.on_cancel_press(None)
+        self.assertTrue(form._cancel_download)
+        cancel_proc.terminate.assert_called_once()
+        self.assertIsNone(form._active_download_proc)
+
+        # 3. Fallback preview HTML is written with 0o600 permissions inside context manager
+        with tempfile.TemporaryDirectory() as tmp_cache:
+            with patch.object(form, "_ensure_local_server", return_value=None), \
+                 patch.object(form, "get_app_cache_dir", return_value=tmp_cache), \
+                 patch.object(form, "_open_browser_quietly"):
+                form.open_html_in_browser("<html><body>Private Preview</body></html>")
+            files = [os.path.join(tmp_cache, f) for f in os.listdir(tmp_cache) if f.startswith("twittui_preview_")]
+            self.assertEqual(len(files), 1)
+            if sys.platform != "win32":
+                self.assertEqual(stat.S_IMODE(os.stat(files[0]).st_mode), 0o600)
+
+        # 4. Windows reserved device names remain reserved even when they have extensions
+        for reserved in (
+            "CON", "prn", "Aux", "NUL", "COM1", "lpt9", "CON.txt", "prn.foo", "COM1.mp4", "LPT9.audio",
+            "COM¹.log", "LPT³.mp3",
+        ):
+            sanitized = form._sanitize_fs_component(reserved)
+            self.assertNotEqual(sanitized.upper(), reserved.upper())
+            self.assertTrue(sanitized.startswith("_"))
+
+        truncated_reserved = form._sanitize_fs_component("CONference", max_bytes=3)
+        self.assertTrue(truncated_reserved.startswith("_"))
+        self.assertLessEqual(len(truncated_reserved.encode("utf-8")), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

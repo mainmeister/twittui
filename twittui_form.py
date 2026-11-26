@@ -4,27 +4,22 @@ from toga.style.pack import COLUMN, ROW
 import asyncio
 import builtins
 import copy
-import logging
 import os
 import sys
 import shutil
 import glob
 import inspect
 import re
-import secrets
 import shlex
 import subprocess
 import threading
 import time
 import weakref
-from collections import deque
-from collections.abc import ItemsView, KeysView, Mapping, ValuesView
 from typing import Any
 from types import SimpleNamespace
 import urllib.parse
 import email.utils
 from datetime import datetime
-import xml.etree.ElementTree as ET
 import tempfile
 import pathlib
 import webbrowser
@@ -32,10 +27,9 @@ import html
 import html.parser
 import requests
 import hashlib
-import http.server
 import json
 import sqlite3
-from dotenv import find_dotenv, load_dotenv, set_key
+from dotenv import set_key
 
 from tiered_search import rank_and_filter_episodes, compute_match_score, find_match_context
 from twittui.logging_config import configure_logging, get_logger
@@ -484,6 +478,7 @@ class TwitTUIForm(toga.App):
         self._is_downloading = False
         self._download_starting = False
         self._cancel_download = False
+        self._active_download_proc = None
         self._download_lock = threading.Lock()
         self._cache_lock = threading.RLock()
         self._pending_env_saves: dict[str, str] = {}
@@ -631,6 +626,9 @@ class TwitTUIForm(toga.App):
         """Debounce rapid .env writes on interactive UI loops while remaining immediate in sync tests."""
         last_saved = getattr(self, '_last_saved_env', None)
         if isinstance(last_saved, dict) and last_saved.get(key) == value:
+            pending = getattr(self, '_pending_env_saves', None)
+            if isinstance(pending, dict):
+                pending.pop(key, None)
             return
         loop = getattr(self, 'loop', None)
         instance_overridden = 'save_env_setting' in getattr(self, '__dict__', {})
@@ -684,11 +682,32 @@ class TwitTUIForm(toga.App):
             except Exception as e:
                 print(f"Error flushing setting {k} to .env: {e}")
 
+    def _terminate_active_download_proc(self) -> None:
+        """Terminate any active child downloader subprocess (e.g. yt-dlp) cleanly without hanging."""
+        proc = getattr(self, '_active_download_proc', None)
+        self._active_download_proc = None
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=1.0)
+                    except subprocess.TimeoutExpired:
+                        _logger.debug("Timed out waiting for killed download subprocess", exc_info=True)
+        except Exception:
+            _logger.debug("Ignored exception in %s", 'TwitTUIForm._terminate_active_download_proc', exc_info=True)
+
     def _cleanup_resources_for_exit(self) -> None:
-        """Flush pending settings, cancel active downloads, and shut down _LocalHTMLServer cleanly."""
+        """Flush pending settings, cancel active downloads, terminate child downloaders, and shut down _LocalHTMLServer."""
         self._flush_pending_env_saves()
         if getattr(self, '_is_downloading', False):
             self._cancel_download = True
+        self._terminate_active_download_proc()
         server = getattr(self, '_local_server', None)
         if server is not None:
             self._local_server = None
@@ -3397,21 +3416,24 @@ class TwitTUIForm(toga.App):
                     pass
         except Exception:
             _logger.debug("Ignored exception in %s", 'TwitTUIForm.open_html_in_browser', exc_info=True)
-        temp_file = tempfile.NamedTemporaryFile(
+        with tempfile.NamedTemporaryFile(
             "w",
             dir=cache_dir,
             prefix="twittui_preview_",
             delete=False,
             suffix=".html",
             encoding="utf-8",
-        )
-        temp_file.write(html_content)
-        temp_file.close()
-        try:
-            os.chmod(temp_file.name, 0o600)
-        except Exception:
-            _logger.debug("Ignored exception in %s", 'TwitTUIForm.open_html_in_browser', exc_info=True)
-        file_uri = pathlib.Path(os.path.abspath(temp_file.name)).as_uri()
+        ) as temp_file:
+            temp_path = temp_file.name
+            try:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(temp_file.fileno(), 0o600)
+                else:
+                    os.chmod(temp_path, 0o600)
+            except Exception:
+                _logger.debug("Ignored exception in %s", 'TwitTUIForm.open_html_in_browser', exc_info=True)
+            temp_file.write(html_content)
+        file_uri = pathlib.Path(os.path.abspath(temp_path)).as_uri()
         self._open_browser_quietly(file_uri)
 
     def show_document_viewer(self, filename: str, doc_title: str) -> None:
@@ -3976,19 +3998,36 @@ class TwitTUIForm(toga.App):
         os.environ['TWITCLUBURL'] = full_url
         self._schedule_env_save('twitcluburl', full_url)
 
+    _WINDOWS_RESERVED_FS_NAMES = frozenset({
+        'CON', 'PRN', 'AUX', 'NUL',
+        'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+        'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+        'COM¹', 'COM²', 'COM³', 'LPT¹', 'LPT²', 'LPT³',
+    })
+
     @staticmethod
     def _sanitize_fs_component(name: str, fallback: str = "TWiT", max_bytes: int = 255) -> str:
-        """Sanitize a filename or folder component against control chars, dotfiles, traversal, and NAME_MAX."""
+        """Sanitize a filename or folder component against control chars, dotfiles, traversal, reserved names, and NAME_MAX."""
         cleaned = re.sub(r'[\x00-\x1f\x7f]', '', str(name or ''))
         cleaned = re.sub(r'[/\\:*?"<>|]', '', cleaned)
         cleaned = re.sub(r'\s+', ' ', cleaned).strip('. ')
         if not cleaned:
             cleaned = fallback
+        def _is_reserved_device_name(component: str) -> bool:
+            device_name = component.split('.', 1)[0].rstrip('. ').upper()
+            return device_name in TwitTUIForm._WINDOWS_RESERVED_FS_NAMES
+
+        if _is_reserved_device_name(cleaned):
+            cleaned = f"_{cleaned}"
         if max_bytes > 0:
             encoded = cleaned.encode('utf-8')
             if len(encoded) > max_bytes:
                 truncated = encoded[:max_bytes].decode('utf-8', errors='ignore').rstrip('. ')
                 cleaned = truncated or fallback
+            if _is_reserved_device_name(cleaned):
+                encoded_remainder = cleaned.encode('utf-8')[:max(0, max_bytes - 1)]
+                remainder = encoded_remainder.decode('utf-8', errors='ignore').rstrip('. ')
+                cleaned = f"_{remainder}"
         return cleaned
 
     def get_show_folder_name(self, target) -> str:
@@ -4344,6 +4383,7 @@ class TwitTUIForm(toga.App):
 
             cmd.extend(['-o', outtmpl, url])
 
+            proc = None
             try:
                 proc = subprocess.Popen(
                     cmd,
@@ -4354,19 +4394,16 @@ class TwitTUIForm(toga.App):
                     bufsize=1,
                     universal_newlines=True
                 )
+                self._active_download_proc = proc
                 pct_regex = re.compile(r'\[download\]\s+([\d\.]+)%')
                 merger_regex = re.compile(r'\[(?:Merger|ffmpeg|ExtractAudio)\]')
                 while True:
                     if getattr(self, '_cancel_download', False):
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=3)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
+                        self._terminate_active_download_proc()
                         _cleanup_stale_parts()
                         return False
 
-                    line = proc.stdout.readline()
+                    line = proc.stdout.readline() if proc.stdout is not None else ''
                     if not line and proc.poll() is not None:
                         break
                     if line:
@@ -4384,6 +4421,9 @@ class TwitTUIForm(toga.App):
                                 self.update_progress(99.0, 100.0)
 
                 retcode = proc.wait()
+                if getattr(self, '_cancel_download', False):
+                    _cleanup_stale_parts()
+                    return False
                 if retcode != 0:
                     print(f"yt-dlp returned error code {retcode}")
                     _cleanup_stale_parts()
@@ -4406,6 +4446,14 @@ class TwitTUIForm(toga.App):
                 print(f"Error executing yt-dlp for {url}: {e}")
                 _cleanup_stale_parts()
                 return False
+            finally:
+                if getattr(self, '_active_download_proc', None) is proc:
+                    self._active_download_proc = None
+                if proc is not None and getattr(proc, 'stdout', None) is not None:
+                    try:
+                        proc.stdout.close()
+                    except OSError:
+                        _logger.debug("Ignored error closing yt-dlp stdout pipe", exc_info=True)
         else:
             # Python yt_dlp module fallback
             try:
@@ -5798,6 +5846,7 @@ class TwitTUIForm(toga.App):
         if getattr(self, '_is_downloading', False):
             print("Cancelling active download...")
             self._cancel_download = True
+            self._terminate_active_download_proc()
             self.reset_progress()
         else:
             self._cleanup_resources_for_exit()
