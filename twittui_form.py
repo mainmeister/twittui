@@ -6749,8 +6749,17 @@ class TwitTUIForm(toga.App):
             elif isinstance(val, str) and val.strip():
                 topics_list.append(val.strip())
 
-        # Description / Show notes
-        desc_raw = ep_data.get('description') or ep_data.get('summary') or ep_data.get('body') or ep_data.get('teaser') or ep_data.get('snippet') or ''
+        # Description / Show notes (field precedence matches tiered_search.get_episode_fields())
+        desc_raw = (
+            ep_data.get('description')
+            or ep_data.get('summary')
+            or ep_data.get('body')
+            or ep_data.get('show_notes')
+            or ep_data.get('notes')
+            or ep_data.get('teaser')
+            or ep_data.get('snippet')
+            or ''
+        )
         desc_clean = self.clean_html_text(desc_raw)
 
         # Collect Search Match Context if present or if active search filter is applied
@@ -7117,9 +7126,15 @@ class TwitTUIForm(toga.App):
                     if match_ctx:
                         f_name = getattr(match_ctx, 'field_name', '') or (match_ctx.get('field_name', '') if isinstance(match_ctx, dict) else '')
                         char_offset = getattr(match_ctx, 'char_offset', 0) or (match_ctx.get('char_offset', 0) if isinstance(match_ctx, dict) else 0)
-                        if 'description' in str(f_name).lower() and char_offset > 0:
-                            def _scroll_desc_to_match(target_input=desc_input, offset=int(char_offset)) -> bool:
+                        try:
+                            char_offset_int = int(char_offset or 0)
+                        except (TypeError, ValueError):
+                            char_offset_int = 0
+                        if 'description' in str(f_name).lower() and char_offset_int > 0:
+                            def _scroll_desc_to_match(target_input=desc_input, target_win=win, offset=char_offset_int) -> bool:
                                 try:
+                                    if getattr(self, '_metadata_window', None) is not target_win:
+                                        return False
                                     impl = getattr(target_input, '_impl', None)
                                     if impl is None:
                                         return False
@@ -7139,7 +7154,9 @@ class TwitTUIForm(toga.App):
                                         clamped = max(0, min(offset, int(max_chars)))
                                         iter_pos = buf.get_iter_at_offset(clamped)
                                         buf.place_cursor(iter_pos)
-                                        textview.scroll_to_iter(iter_pos, 0.1, True, 0.0, 0.2)
+                                        scrolled = textview.scroll_to_iter(iter_pos, 0.1, True, 0.0, 0.2)
+                                        if scrolled is False and hasattr(textview, 'scroll_to_mark') and hasattr(buf, 'get_insert'):
+                                            textview.scroll_to_mark(buf.get_insert(), 0.1, True, 0.0, 0.2)
                                 except Exception:
                                     _logger.debug("Ignored exception in %s", 'TwitTUIForm._show_episode_metadata._show._scroll_desc_to_match', exc_info=True)
                                 return False

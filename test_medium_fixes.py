@@ -103,6 +103,102 @@ class TestMediumFixes(unittest.TestCase):
         mock_buf.place_cursor.assert_called_once_with(mock_iter)
         mock_textview.scroll_to_iter.assert_called_once_with(mock_iter, 0.1, True, 0.0, 0.2)
 
+    def test_8b_gtk_autoscroll_offset_parity_for_show_notes_and_plain_newlines(self) -> None:
+        """Description precedence (show_notes/notes) and plain-text newline collapsing must match between search and UI."""
+        form = TwitTUIForm("TestApp", "org.twit.test", cache_db_path=":memory:")
+
+        # 1. show_notes takes precedence over teaser in both tiered_search and extract_episode_metadata_fields
+        ep_notes = {
+            "number": "1001",
+            "title": "Security Now 1001",
+            "show_notes": "<p>Intro block</p><p>Deep dive into <b>WireGuard</b> keys.</p>",
+            "teaser": "Short teaser mentioning WireGuard at a totally different offset.",
+        }
+        ctx_notes = find_match_context(ep_notes, "WireGuard")
+        self.assertIsNotNone(ctx_notes)
+        self.assertEqual(ctx_notes.field_name, "Description / Show Notes")
+        meta_notes = form.extract_episode_metadata_fields(ep_notes)
+        self.assertEqual(
+            meta_notes["description"][ctx_notes.char_offset : ctx_notes.char_offset + len("WireGuard")],
+            "WireGuard",
+        )
+
+        # 2. Plain text with 3+ consecutive newlines (no '<' or '&') collapses identically in both layers
+        ep_plain = {
+            "number": "1002",
+            "title": "Security Now 1002",
+            "description": "Intro paragraph.\n\n\n\n\nSecond paragraph discussing Passkeys in detail.",
+        }
+        ctx_plain = find_match_context(ep_plain, "Passkeys")
+        self.assertIsNotNone(ctx_plain)
+        self.assertEqual(ctx_plain.field_name, "Description / Show Notes")
+        meta_plain = form.extract_episode_metadata_fields(ep_plain)
+        self.assertEqual(
+            meta_plain["description"][ctx_plain.char_offset : ctx_plain.char_offset + len("Passkeys")],
+            "Passkeys",
+        )
+
+    def test_8c_gtk_autoscroll_falls_back_to_scroll_to_mark_and_skips_stale_window(self) -> None:
+        """If GTK scroll_to_iter returns False before line validation, fall back to scroll_to_mark; skip if closed."""
+        ep_data = {
+            "number": "1003",
+            "title": "Security Now 1003",
+            "description": "<p>Header</p><p>Needle <b>Quantum</b> appears here.</p>",
+        }
+        ctx = find_match_context(ep_data, "Quantum")
+        self.assertIsNotNone(ctx)
+        cleaned = TwitTUIForm.clean_html_text(ep_data["description"])
+
+        form = TwitTUIForm("TestApp", "org.twit.test", cache_db_path=":memory:")
+        form.search_input = SimpleNamespace(value="Quantum")
+        fake_gtk_app = SimpleNamespace(__class__=SimpleNamespace(__module__="toga_gtk.app"))
+        form._impl = SimpleNamespace(native=fake_gtk_app)
+
+        mock_buf = MagicMock()
+        mock_buf.get_char_count.return_value = len(cleaned)
+        mock_iter = object()
+        mock_mark = object()
+        mock_buf.get_iter_at_offset.return_value = mock_iter
+        mock_buf.get_insert.return_value = mock_mark
+        mock_textview = MagicMock()
+        mock_textview.get_buffer.return_value = mock_buf
+        mock_textview.scroll_to_iter.return_value = False
+
+        real_multiline = toga.MultilineTextInput
+
+        def fake_multiline(*args, **kwargs):
+            widget = real_multiline(*args, **kwargs)
+            widget._impl.native_textview = mock_textview
+            return widget
+
+        target = SimpleNamespace(episode_data=ep_data, title="Security Now 1003", episode="1003", show="Security Now")
+        scheduled_idle = []
+        fake_glib = SimpleNamespace(idle_add=lambda fn: scheduled_idle.append(fn))
+        fake_gi = types.ModuleType("gi")
+        fake_gi_repo = types.ModuleType("gi.repository")
+        fake_gi_repo.GLib = fake_glib
+        fake_gi.repository = fake_gi_repo
+
+        with patch.dict(os.environ, {"TOGA_BACKEND": "toga_gtk"}), \
+             patch("twittui_form.toga.Window") as mock_win_cls, \
+             patch("twittui_form.toga.MultilineTextInput", side_effect=fake_multiline), \
+             patch.dict(sys.modules, {"gi": fake_gi, "gi.repository": fake_gi_repo}):
+            mock_win_cls.return_value = MagicMock()
+            form.show_episode_metadata_dialog(target)
+
+        self.assertEqual(len(scheduled_idle), 1)
+        scheduled_idle[0]()
+        mock_textview.scroll_to_iter.assert_called_once_with(mock_iter, 0.1, True, 0.0, 0.2)
+        mock_textview.scroll_to_mark.assert_called_once_with(mock_mark, 0.1, True, 0.0, 0.2)
+
+        # If metadata window was closed before idle ran, callback is a safe no-op
+        mock_textview.reset_mock()
+        mock_buf.reset_mock()
+        form._metadata_window = None
+        scheduled_idle[0]()
+        mock_buf.get_iter_at_offset.assert_not_called()
+        mock_textview.scroll_to_iter.assert_not_called()
+
     # ------------------------------------------------------------------
     # Bug 10: Tiered search field parity, multi-word gating, thresholds
     # ------------------------------------------------------------------

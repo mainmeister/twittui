@@ -190,7 +190,9 @@ TwitTUI is an ambitious dual-backend (GTK 3 + Textual TUI) TWiT.tv podcast brows
 - **Recommended Fix**:
   Inspect `getattr(desc_input._impl, 'native_textview', None)` (scrolling via `GLib.idle_add` after the window realizes), and compute `MatchContext` offsets on HTML-cleaned description text matching `desc_input.value`.
 - **Applied Fix & Verification**:
-  Updated `_show_episode_metadata()` in `twittui_form.py` to target `desc_input._impl.native_textview` via `GLib.idle_add`, and updated `tiered_search.py` to clean HTML (`_clean_html_for_search`) before computing `MatchContext.char_offset`. Verified by `test_medium_fixes.py:test_8_gtk_autoscroll_targets_native_textview_with_cleaned_html_offset`.
+  1. **GTK `native_textview` & Realization-Safe Scrolling (`twittui_form.py:7126-7183`)**: Updated `_show_episode_metadata()` so `_scroll_desc_to_match()` targets `desc_input._impl.native_textview` (falling back to `impl.native` / `impl.native.get_child()` if needed), schedules execution via `GLib.idle_add` after `win.show()`, guards against stale idle callbacks if `_metadata_window` has been closed or replaced, safely validates/clamps `char_offset` against `buf.get_char_count()`, places the cursor via `buf.place_cursor(iter_pos)`, scrolls via `textview.scroll_to_iter(iter_pos, 0.1, True, 0.0, 0.2)`, and falls back to `textview.scroll_to_mark(buf.get_insert(), 0.1, True, 0.0, 0.2)` whenever GTK 3 returns `False` prior to completing wrapped line-height validation.
+  2. **100% Search-to-UI Offset & Field Parity (`tiered_search.py:189-201, 437-443`, `twittui_form.py:6752-6763`)**: Updated `tiered_search._clean_html_for_search()` to strip HTML tags/entities and unconditionally collapse `\n{3,}` → `\n\n` (matching `TwitTUIForm.clean_html_text()` identically for both HTML and plain-text descriptions), and aligned `TwitTUIForm.extract_episode_metadata_fields()` description key precedence (`description` → `summary` → `body` → `show_notes` → `notes` → `teaser` → `snippet`) with `tiered_search.get_episode_fields()`.
+  3. **Verification**: Verified live under real GTK 3.0 (`toga-gtk` 0.5.7 / `xvfb-run` secondary `toga.Window` with 400 wrapped HTML paragraphs: `buf_text_at_offset == 'SpinRite'`, `visible == True`) and via unit tests in `test_medium_fixes.py:47-201` (`test_8_gtk_autoscroll_targets_native_textview_with_cleaned_html_offset`, `test_8b_gtk_autoscroll_offset_parity_for_show_notes_and_plain_newlines`, `test_8c_gtk_autoscroll_falls_back_to_scroll_to_mark_and_skips_stale_window`).
 
 ---
 
@@ -540,10 +542,10 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 | Executive Summary Section | Items | Status | Regression Test Suite |
 | :--- | :---: | :---: | :--- |
 | **1. Critical / High** | 7 (#1–#7) | Complete | `test_critical_fixes.py` (7 tests) |
-| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (7 tests), `test_medium_fixes.py` (9 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
+| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (7 tests), `test_medium_fixes.py` (11 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
 | **3. Low / Edge Cases** | 3 (#21–#23) | Complete | `test_low_fixes.py` (4 tests) |
 | **4. Architectural & Quality Suggestions** | 7 (#1–#7) | Complete | `test_architecture_suggestions.py` (10 tests) |
-| **Total Test Suite** | **30 items** | **300 / 300 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
+| **Total Test Suite** | **30 items** | **302 / 302 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
 
 ---
 
@@ -580,7 +582,8 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 ### Section 2: Medium Fixes Implemented (#8–#20)
 
 8. **GTK Auto-Scroll to Search Match & Offset Alignment (#8)**:
-   - Updated `_show_episode_metadata()` to target `desc_input._impl.native_textview` via `GLib.idle_add` and compute `MatchContext.char_offset` in `tiered_search.py` against HTML-cleaned description text (`_clean_html_for_search`) matching `desc_input.value`.
+   - Updated `_show_episode_metadata()` (`twittui_form.py:7126-7183`) so `_scroll_desc_to_match()` targets `desc_input._impl.native_textview` via `GLib.idle_add` after `win.show()`, guards against stale callbacks after window close/replacement, clamps `char_offset` safely to the buffer length, invokes `scroll_to_iter()`, and falls back to `scroll_to_mark(buf.get_insert(), ...)` when GTK 3 defers scrolling prior to wrapped line-height validation.
+   - Aligned `TwitTUIForm.extract_episode_metadata_fields()` (`twittui_form.py:6752-6763`) description field precedence (`description` → `summary` → `body` → `show_notes` → `notes` → `teaser` → `snippet`) with `tiered_search.get_episode_fields()` (`tiered_search.py:437-443`), and updated `_clean_html_for_search()` (`tiered_search.py:189-201`) to collapse `\n{3,}` unconditionally so plain-text and HTML `MatchContext.char_offset` values match `desc_input.value` identically. Verified under real GTK 3 (`xvfb-run`) and by `test_medium_fixes.py:47-201` (`test_8`, `test_8b`, `test_8c`).
 9. **Double Metaphone Phonetic Rules & Dead Code (`double_metaphone.py`) (#9)**:
    - Preserved `Ç` and `Ñ` and word-boundary spaces prior to encoding, removed unused `padded`, fixed `TH`/`TCH` (`3`-char vs `2`-char slice bug), `GGI`, `SCH` secondary (`SK` vs `KK`), `GN`, `GLI`, `DG`, and `WICZ`/`WITZ` rules against Lawrence Philips' specification, and added dedicated vectors in `test_double_metaphone.py`.
 10. **Tiered Search Field Omissions, Score Inversion & Partial-Query False Positives (`tiered_search.py`) (#10)**:

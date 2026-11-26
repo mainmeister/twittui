@@ -197,7 +197,7 @@ def _clean_html_for_search(text: str) -> str:
         s = re.sub(r"</\s*li\s*>", "\n", s, flags=re.I)
         s = re.sub(r"<[^>]+>", "", s)
         s = html.unescape(s)
-        s = re.sub(r"\n{3,}", "\n\n", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
 
 
