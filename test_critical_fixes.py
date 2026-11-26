@@ -495,9 +495,9 @@ class TestCriticalFixes(unittest.TestCase):
             release.wait(timeout=2.0)
             return True
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            form.download_episode_file = slow_download
-            form.show_download_complete_dialog = MagicMock()
+        with tempfile.TemporaryDirectory() as tmp_dir, \
+             patch.object(form, "download_episode_file", side_effect=slow_download), \
+             patch.object(form, "show_download_complete_dialog"):
             target = SimpleNamespace(
                 title="Ep 1",
                 episode="1",
@@ -519,6 +519,81 @@ class TestCriticalFixes(unittest.TestCase):
             release.set()
             t1.join(timeout=2.0)
             self.assertEqual(calls, ["https://cdn.twit.tv/ep1.mp4"])
+
+        # 7e. Off-thread dialog/progress never fall through to direct native mutation if loop fails
+        failing_loop = MagicMock()
+        failing_loop.is_running.return_value = True
+        failing_loop.call_soon_threadsafe.side_effect = RuntimeError("loop closed")
+        form._impl = SimpleNamespace(loop=failing_loop, native=SimpleNamespace())
+        mock_win_fail = MagicMock()
+        form._main_window = mock_win_fail
+        mock_bar = MagicMock()
+        form.progress_bar = mock_bar
+
+        def bg_fail_calls() -> None:
+            form._show_dialog_threadsafe("error", "Closed Loop", "Should not touch UI off-thread")
+            form.show_download_complete_dialog("/tmp", ["ep1.mp4"])
+            form.update_progress(50.0, 100.0)
+
+        t_fail = threading.Thread(target=bg_fail_calls)
+        t_fail.start()
+        t_fail.join(timeout=2.0)
+        mock_win_fail.error_dialog.assert_not_called()
+        mock_win_fail.info_dialog.assert_not_called()
+        self.assertEqual(failing_loop.call_soon_threadsafe.call_count, 3)
+
+        # 7f. Re-entrant on_download_press while first call is awaiting resolution prompt is blocked
+        form._is_downloading = False
+        form._download_starting = False
+        form.episodes_list = SimpleNamespace(selection=[SimpleNamespace(title="Ep 1", episode="1")])
+
+        async def test_concurrent_on_download_press_during_await() -> None:
+            entered = asyncio.Event()
+            release = asyncio.Event()
+            worker_stub = MagicMock()
+            worker_stub.get_available_resolutions.return_value = [
+                {"id": "video_hd", "label": "HD", "url": "https://cdn.twit.tv/ep1_hd.mp4"},
+                {"id": "video_sd", "label": "SD", "url": "https://cdn.twit.tv/ep1_sd.mp4"},
+            ]
+
+            async def slow_prompt(*args, **kwargs):
+                entered.set()
+                await release.wait()
+                return {"id": "video_hd", "url": "https://cdn.twit.tv/ep1_hd.mp4"}
+
+            with patch.object(form, "_network_snapshot", return_value=worker_stub), \
+                 patch.object(form, "prompt_resolution_choice", side_effect=slow_prompt), \
+                 patch.object(form, "_show_dialog_threadsafe") as mock_dlg, \
+                 patch.object(form, "download_episodes_batch") as mock_batch:
+                t_first = asyncio.create_task(form.on_download_press())
+                await asyncio.wait_for(entered.wait(), timeout=2.0)
+                # Second press while first is awaiting prompt must be blocked cleanly
+                await form.on_download_press()
+                mock_dlg.assert_called_once()
+                self.assertEqual(mock_dlg.call_args[0][0], "info")
+                release.set()
+                await t_first
+                # Wait briefly for single background download thread to invoke mock_batch
+                for _ in range(50):
+                    if mock_batch.call_count >= 1:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertEqual(mock_batch.call_count, 1)
+                self.assertFalse(form._download_starting)
+
+        asyncio.run(test_concurrent_on_download_press_during_await())
+
+        # 7g. on_open_destination_press captures destination on UI thread before spawning worker
+        with patch.object(form, "get_destination_folder", return_value="/tmp/twit_dl") as mock_get_dest, \
+             patch("threading.Thread") as mock_thread_cls:
+            mock_thread_cls.return_value = MagicMock()
+            form.on_open_destination_press()
+            mock_get_dest.assert_called_once()
+            mock_thread_cls.assert_called_once_with(
+                target=form.open_destination_folder,
+                args=("/tmp/twit_dl",),
+                daemon=True,
+            )
 
 
 if __name__ == "__main__":

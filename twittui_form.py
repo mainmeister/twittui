@@ -461,6 +461,7 @@ class TwitTUIForm(toga.App):
         self.preferences_cmd = None
         self._preferences_window = None
         self._is_downloading = False
+        self._download_starting = False
         self._cancel_download = False
         self._download_lock = threading.Lock()
         self._cache_lock = threading.RLock()
@@ -564,11 +565,18 @@ class TwitTUIForm(toga.App):
         message: str,
         host_win: Any = None,
         on_result: Any = None,
+        *,
+        prefer_main: bool = False,
     ) -> None:
         """Display an info or error dialog safely on the UI thread."""
         def _present() -> None:
             try:
-                win = host_win if host_win is not None else self._active_dialog_window()
+                if host_win is not None:
+                    win = host_win
+                elif prefer_main:
+                    win = getattr(self, 'main_window', None)
+                else:
+                    win = self._active_dialog_window()
                 if not win:
                     return
                 self._present_window_dialog(win, kind, title, message, on_result=on_result)
@@ -576,12 +584,23 @@ class TwitTUIForm(toga.App):
                 print(f"Error displaying {kind} dialog '{title}': {e}")
 
         loop = getattr(self, 'loop', None)
-        if loop is not None and loop.is_running() and threading.current_thread() is not threading.main_thread():
-            try:
-                loop.call_soon_threadsafe(_present)
+        if threading.current_thread() is not threading.main_thread():
+            if loop is not None and loop.is_running():
+                try:
+                    loop.call_soon_threadsafe(_present)
+                except Exception:
+                    _logger.debug(
+                        "Dropped off-thread %s dialog '%s' because UI loop rejected scheduling",
+                        kind,
+                        title,
+                        exc_info=True,
+                    )
                 return
-            except Exception:
-                _logger.debug("Ignored exception in %s", 'TwitTUIForm._show_dialog_threadsafe', exc_info=True)
+            # Avoid touching real native GTK/Textual windows from a background thread
+            candidate_win = host_win if host_win is not None else getattr(self, '_main_window', None)
+            if isinstance(candidate_win, toga.Window):
+                _logger.debug("Skipped off-thread %s dialog '%s' without running UI loop", kind, title)
+                return
         _present()
 
     def _schedule_env_save(self, key: str, value: str, delay: float = 0.35) -> None:
@@ -1900,13 +1919,24 @@ class TwitTUIForm(toga.App):
             except Exception:
                 _logger.debug("Ignored exception in %s", 'TwitTUIForm.update_progress._update', exc_info=True)
 
-        if hasattr(self, 'loop') and self.loop and self.loop.is_running():
+        loop = getattr(self, 'loop', None)
+        if threading.current_thread() is not threading.main_thread():
+            if loop is not None and loop.is_running():
+                try:
+                    loop.call_soon_threadsafe(_update)
+                except Exception:
+                    _logger.debug("Dropped off-thread progress update because UI loop rejected scheduling", exc_info=True)
+                return
+            if isinstance(self.progress_bar, toga.Widget):
+                _logger.debug("Skipped off-thread progress update without running UI loop")
+                return
+        elif loop is not None and loop.is_running():
             try:
-                self.loop.call_soon_threadsafe(_update)
+                loop.call_soon_threadsafe(_update)
+                return
             except Exception:
-                _update()
-        else:
-            _update()
+                _logger.debug("Falling back to direct UI-thread progress update", exc_info=True)
+        _update()
 
     def reset_progress(self) -> None:
         """Reset progress bar to 0."""
@@ -4103,12 +4133,7 @@ class TwitTUIForm(toga.App):
                 "Please install yt-dlp (e.g. 'pip install yt-dlp' or via your package manager) and try again."
             )
             print(f"Error: {error_msg}")
-            try:
-                main_win = self.main_window
-            except Exception:
-                main_win = None
-            if main_win:
-                self._show_dialog_threadsafe("error", "YouTube Downloader Required", error_msg, host_win=main_win)
+            self._show_dialog_threadsafe("error", "YouTube Downloader Required", error_msg, prefer_main=True)
             return False
 
         dest_dir = os.path.dirname(os.path.abspath(dest_path)) or '.'
@@ -4537,21 +4562,7 @@ class TwitTUIForm(toga.App):
         files_text = "\n".join(str(fn) for fn in downloaded_files)
         message = f"{folder_line}\n\n{files_text}"
         title = "Downloads Complete"
-
-        def _show():
-            try:
-                if hasattr(self, 'main_window') and self.main_window:
-                    self._present_window_dialog(self.main_window, "info", title, message)
-            except Exception as e:
-                print(f"Error displaying download complete dialog: {e}")
-
-        if hasattr(self, 'loop') and self.loop and self.loop.is_running():
-            try:
-                self.loop.call_soon_threadsafe(_show)
-            except Exception:
-                _show()
-        else:
-            _show()
+        self._show_dialog_threadsafe("info", title, message, prefer_main=True)
 
     def download_episodes_batch(
         self,
@@ -4701,15 +4712,18 @@ class TwitTUIForm(toga.App):
 
     async def on_download_press(self, widget=None) -> None:
         """Process selected episodes for batch download with resolution prompt if multiple are available."""
+        download_starting_acquired = False
         try:
             self._cancel_hover_timer()
-            if getattr(self, '_is_downloading', False):
+            if getattr(self, '_is_downloading', False) or getattr(self, '_download_starting', False):
                 self._show_dialog_threadsafe(
                     "info",
                     "Download In Progress",
                     "A download is already in progress. Please wait for it to finish or press Cancel first.",
                 )
                 return
+            self._download_starting = True
+            download_starting_acquired = True
             selected = self.episodes_list.selection
             if not selected:
                 print("No episode selected for download")
@@ -4808,6 +4822,25 @@ class TwitTUIForm(toga.App):
                 )
                 return
 
+            # Merge resolution discovery caches safely under _cache_lock before snapshotting
+            cache_lock = getattr(self, '_cache_lock', None)
+            def _merge_res_caches() -> None:
+                for cache_attr in (
+                    '_memberful_feeds_cache',
+                    '_show_rss_cache',
+                    '_media_webpage_cache',
+                    '_episode_detail_cache',
+                ):
+                    w_cache = getattr(worker, cache_attr, None)
+                    s_cache = getattr(self, cache_attr, None)
+                    if isinstance(w_cache, dict) and isinstance(s_cache, dict):
+                        s_cache.update(w_cache)
+            if cache_lock is not None:
+                with cache_lock:
+                    _merge_res_caches()
+            else:
+                _merge_res_caches()
+
             # Snapshot UI widget settings on the UI thread before spawning background worker
             download_snapshot = {
                 'base_dest_dir': self.get_destination_folder(),
@@ -4827,6 +4860,9 @@ class TwitTUIForm(toga.App):
             thread.start()
         except Exception as e:
             print(f"Error initiating download: {e}")
+        finally:
+            if download_starting_acquired:
+                self._download_starting = False
 
     def format_stream_command(self, streamer_template: str, url: str) -> str:
         """Format the streamer command string with the episode media URL safely."""
