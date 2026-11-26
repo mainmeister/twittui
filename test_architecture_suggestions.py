@@ -258,6 +258,30 @@ class TestArchitectureSuggestions(unittest.TestCase):
                 self.assertEqual(norm_count, 2)
                 self.assertEqual(legacy_count, 0)
 
+    def test_all_shows_fts_search_migrates_legacy_episode_blobs(self) -> None:
+        """All-shows FTS searches include legacy episode blobs before normalized migration."""
+        from twittui.cache import ensure_cache_schema, search_episodes_fts
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = os.path.join(tmp_dir, "legacy_search.db")
+            legacy_episode = {
+                "id": "legacy-search-1",
+                "title": "Legacy archive entry",
+                "description": "needleword from the old episode cache",
+            }
+            with sqlite3.connect(db_path) as conn:
+                ensure_cache_schema(conn, db_path=db_path)
+                now = time.time()
+                conn.execute(
+                    "INSERT INTO twittui_cache VALUES ('episodes', '1636', ?, ?, ?)",
+                    (json.dumps([legacy_episode]), now, now),
+                )
+                conn.commit()
+
+                hits = search_episodes_fts(conn, "needleword", show_id=None, db_path=db_path)
+
+            self.assertEqual([episode["id"] for episode in hits], ["legacy-search-1"])
+
     def test_show_date_bounds_24h_ttl_expiration(self) -> None:
         """show_date_bounds entries older than 24 hours expire and are purged on startup."""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -330,6 +354,209 @@ class TestArchitectureSuggestions(unittest.TestCase):
         callback.assert_called_once()
         for name in shows:
             self.assertIsNotNone(form.show_date_bounds[name][1])
+
+    def test_cold_start_nonblocking_date_scraping_and_runtime_ttl(self) -> None:
+        """Cold start dismisses splash & wait right after initial episodes while dates scrape concurrently with 24h TTL."""
+        form = TwitTUIForm("ColdStartApp", "org.twit.test")
+        shows = [f"Show {i}" for i in range(6)]
+        form.show_combo = SimpleNamespace(value="Show 0", items=[])
+        form.show_ids = {name: 200 + i for i, name in enumerate(shows)}
+        form.show_active = {name: True for name in shows}
+        form.show_date_bounds = {name: (None, None) for name in shows}
+        form._show_date_cache = {}
+        form._show_date_cache_ts = {}
+        form._set_rate_limit_wait = MagicMock()
+        form.close_splash_screen = MagicMock()
+        form.update_episodes_display = MagicMock()
+
+        worker = MagicMock()
+        worker.show_ids = dict(form.show_ids)
+        worker.show_active = dict(form.show_active)
+        worker.show_date_bounds = dict(form.show_date_bounds)
+        worker._show_date_cache = {}
+        worker._show_date_cache_ts = {}
+        worker.api_status_label = SimpleNamespace(text="")
+        worker.fetch_shows.return_value = shows
+        worker.fetch_episodes.return_value = [{"id": "1", "title": "Ep 1"}]
+        worker._episodes_all_loaded = True
+        worker.fetch_show_date_bounds.side_effect = lambda sid: ("2020-01-01", f"2025-02-{int(sid) - 199:02d}")
+        form._network_snapshot = MagicMock(return_value=worker)
+
+        jobs: list[tuple] = []
+        form._run_network = lambda work, done: jobs.append((work, done))
+
+        form._refresh_catalog()
+        form._set_rate_limit_wait.assert_called_once_with(True)
+        form._set_rate_limit_wait.reset_mock()
+
+        # Shows catalog arrives -> spawns initial episodes + 4 bounded-concurrency background date jobs
+        shows_work, shows_done = jobs.pop(0)
+        shows_done(shows_work())
+        ep_jobs = [j for j in jobs if "fetch_all" in getattr(j[0], "__name__", "")]
+        date_jobs = [j for j in jobs if j not in ep_jobs]
+        self.assertEqual(len(ep_jobs), 1)
+        self.assertEqual(len(date_jobs), 4)
+
+        # Initial episodes finish -> splash & wait overlay dismiss IMMEDIATELY while 6 date scrapes are pending
+        jobs.remove(ep_jobs[0])
+        ep_jobs[0][1](ep_jobs[0][0]())
+        form.close_splash_screen.assert_called_once()
+        form._set_rate_limit_wait.assert_called_once_with(False)
+        self.assertFalse(getattr(form, "_catalog_wait_held", False))
+
+        # Drain remaining background date jobs; UI stays unlocked and bounds fill in
+        while jobs:
+            self.assertLessEqual(len(jobs), 4)
+            w, d = jobs.pop(0)
+            d(w())
+        for name in shows:
+            self.assertIsNotNone(form.show_date_bounds[name][1])
+        form.close_splash_screen.assert_called_once()
+        form._set_rate_limit_wait.assert_called_once_with(False)
+
+        # Runtime TTL enforcement: expire one show in-memory (> 24h) and verify _refresh_show_dates re-scrapes it
+        expired_sid = str(form.show_ids["Show 0"])
+        form._show_date_cache_ts[expired_sid] = time.time() - SHOW_DATE_BOUNDS_TTL_SECONDS - 60.0
+        form._refresh_show_dates(form._catalog_request, shows)
+        self.assertEqual(len(jobs), 1)
+        w, d = jobs.pop(0)
+        d(w())
+        self.assertGreater(form._show_date_cache_ts[expired_sid], time.time() - 10.0)
+
+    def test_normalized_sqlite_pagination_deduplication_fts5_and_vacuum(self) -> None:
+        """Normalized SQLite table supports SQL deduplication, lazy LIMIT/OFFSET pagination, FTS5 search, and VACUUM."""
+        from twittui.cache import (
+            count_normalized_episodes,
+            delete_persistent_cache,
+            load_episodes_page,
+            search_episodes_fts,
+            upsert_normalized_episodes,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = os.path.join(tmp_dir, "full_norm.db")
+            form1 = TwitTUIForm("NormFull1", "org.twit.normfull1", cache_db_path=db_path)
+
+            # Include intentional duplicate episode IDs to verify SQL-level deduplication
+            sn_eps = [
+                {
+                    "id": str(i),
+                    "number": str(i),
+                    "title": f"Security Now {i}: Passkey & Zero-Trust Deep Dive" if i == 42 else f"Security Now {i}",
+                    "airingDate": f"2025-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}",
+                    "description": "<p>Steve Gibson examines <b>cryptographic passkeys</b> and DNSSEC.</p>"
+                    if i == 42
+                    else f"<p>Weekly security briefing episode {i} with padding {'x' * 200}</p>",
+                    "hosts": [{"label": "Steve Gibson"}, {"label": "Leo Laporte"}],
+                    "topics": ["Cryptography", "Privacy"] if i == 42 else ["Security"],
+                }
+                for i in range(120, 0, -1)
+            ]
+            sn_eps_with_dups = [sn_eps[0], *sn_eps, sn_eps[-1]]
+            form1._save_to_persistent_cache("episodes", "1636", sn_eps_with_dups)
+
+            twit_eps = [
+                {
+                    "id": "9001",
+                    "number": "900",
+                    "title": "TWiT 900: Quantum Computing Breakthrough",
+                    "airingDate": "2025-03-01",
+                    "description": "Discussion on fault-tolerant qubits and silicon photonics.",
+                    "hosts": ["Leo Laporte"],
+                    "topics": ["Quantum"],
+                }
+            ]
+            form1._save_to_persistent_cache("episodes", "1634", twit_eps)
+
+            # Verify SQL-level deduplication + incremental upsert_normalized_episodes
+            with sqlite3.connect(db_path) as conn:
+                self.assertEqual(count_normalized_episodes(conn, "1636"), 120)
+                upsert_count = upsert_normalized_episodes(
+                    conn,
+                    "1636",
+                    [
+                        {
+                            "id": "42",
+                            "number": "42",
+                            "title": "Security Now 42: Passkey & Hardware Tokens",
+                            "airingDate": "2025-07-15",
+                            "description": "<p>Updated notes on FIDO2 hardware passkeys.</p>",
+                            "hosts": [{"label": "Steve Gibson"}],
+                            "topics": ["FIDO2"],
+                        },
+                        {
+                            "id": "121",
+                            "number": "121",
+                            "title": "Security Now 121: Post-Quantum TLS",
+                            "airingDate": "2025-08-01",
+                            "description": "ML-KEM deployment across browsers.",
+                        },
+                    ],
+                    db_path=db_path,
+                )
+                conn.commit()
+                self.assertEqual(upsert_count, 2)
+                self.assertEqual(count_normalized_episodes(conn, "1636"), 121)
+
+                # SQL pagination helper
+                page2_sql = load_episodes_page(conn, "1636", page=2, page_size=50)
+                self.assertEqual(len(page2_sql), 50)
+                self.assertEqual(page2_sql[0]["id"], "70")
+
+                # Direct FTS5 search (single show, cross-show, and punctuation safety)
+                fts_sn = search_episodes_fts(conn, 'FIDO2: "passkeys" (hardware)', show_id="1636")
+                self.assertEqual([e["id"] for e in fts_sn], ["42"])
+                fts_all = search_episodes_fts(conn, "photonics", show_id=None)
+                self.assertEqual([e["id"] for e in fts_all], ["9001"])
+
+            # Fresh instance: SQL-level pagination via fetch_episodes(page=2) decodes ONLY 50 rows, not 121
+            with patch("json.loads", wraps=json.loads) as spy_loads:
+                form2 = TwitTUIForm("NormFull2", "org.twit.normfull2", cache_db_path=db_path)
+                form2.show_combo = MagicMock(value="Security Now")
+                form2.show_ids = {"Security Now": 1636, "This Week in Tech": 1634}
+                form2._episodes_all_loaded = True
+                self.assertEqual(spy_loads.call_count, 0)
+                self.assertEqual(form2._episodes_cache.count_episodes("1636"), 121)
+                self.assertEqual(spy_loads.call_count, 0)
+
+                with patch.object(form2, "get_api_app_id", return_value="id"), \
+                     patch.object(form2, "get_api_app_key", return_value="key"), \
+                     patch("twittui_form.load_twittui_dotenv"), \
+                     patch("twittui_form.requests.get") as mock_get:
+                    page2 = form2.fetch_episodes(1636, page=2)
+                    self.assertEqual(len(page2), 50)
+                    self.assertEqual(page2[0]["id"], "70")
+                    self.assertEqual(mock_get.call_count, 0)
+                    # Only the 50 paginated rows were decoded from SQLite; full show stays unloaded
+                    self.assertEqual(spy_loads.call_count, 50)
+                    self.assertIn("1636", form2._episodes_cache._unloaded_keys)
+
+            # CatalogMixin.search_episodes integrates Tier 4b FTS5 seamlessly (even offline / no API creds)
+            with patch.object(form2, "get_api_app_id", return_value=""), \
+                 patch.object(form2, "get_api_app_key", return_value=""), \
+                 patch.object(form2, "fetch_show_rss_items", return_value=[]), \
+                 patch.object(form2, "fetch_club_twit_rss_items", return_value=[]), \
+                 patch("twittui_form.load_twittui_dotenv"):
+                hits = form2.search_episodes("photonics", show_name="All TWiT.tv Shows")
+                self.assertEqual([h["id"] for h in hits], ["9001"])
+
+            # Clearing episodes cache clears FTS5, runs VACUUM/checkpoint, shrinks total DB+WAL footprint, and keeps 0o600
+            def _db_footprint(path: str) -> int:
+                return sum(
+                    os.path.getsize(p)
+                    for p in (path, f"{path}-wal")
+                    if os.path.exists(p)
+                )
+
+            size_before = _db_footprint(db_path)
+            delete_persistent_cache(db_path, category="episodes")
+            size_after = _db_footprint(db_path)
+            self.assertLess(size_after, size_before)
+            self.assertEqual(os.stat(db_path).st_mode & 0o777, 0o600)
+            with sqlite3.connect(db_path) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM twittui_episodes").fetchone()[0], 0)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM twittui_episodes_fts").fetchone()[0], 0)
+                self.assertEqual(conn.execute("PRAGMA freelist_count").fetchone()[0], 0)
 
     def test_structured_logging_file_permissions_and_cli_flags(self) -> None:
         """--log-file / configure_logging writes structured logs to a 0o600 file while default stays silent."""

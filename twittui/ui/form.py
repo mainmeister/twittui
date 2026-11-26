@@ -291,6 +291,7 @@ class TwitTUIForm(
         self.show_date_bounds = {}
         self._shows_cache = {}
         self._show_date_cache = {}
+        self._show_date_cache_ts: dict[str, float] = {}
         self._show_names_by_display = {}
         self.current_episodes = []
         self.current_page = 1
@@ -591,9 +592,11 @@ class TwitTUIForm(
                             else:
                                 self._shows_cache[key] = val
                         elif category == 'show_date_bounds':
-                            age = now - float(updated_at or 0.0)
+                            updated_ts = float(updated_at or 0.0)
+                            age = now - updated_ts
                             if age <= SHOW_DATE_BOUNDS_TTL_SECONDS:
                                 self._show_date_cache[key] = tuple(val) if isinstance(val, (list, tuple)) else val
+                                self._show_date_cache_ts[key] = updated_ts
                             else:
                                 expired_date_bound_keys.append(key)
                         elif category == 'episode_detail':
@@ -705,9 +708,10 @@ class TwitTUIForm(
         cache_lock = getattr(self, '_cache_lock', None)
         def _copy_caches() -> None:
             for name in ('show_ids', 'show_active', 'show_date_bounds', '_show_date_cache',
-                         '_show_names_by_display', '_memberful_feeds_cache', '_show_rss_cache',
-                         '_shows_cache', '_episodes_cache', '_triangulation_archive_cache',
-                         '_episode_detail_cache', '_media_webpage_cache', '_api_search_cache'):
+                         '_show_date_cache_ts', '_show_names_by_display', '_memberful_feeds_cache',
+                         '_show_rss_cache', '_shows_cache', '_episodes_cache',
+                         '_triangulation_archive_cache', '_episode_detail_cache',
+                         '_media_webpage_cache', '_api_search_cache'):
                 val = getattr(self, name, None)
                 if isinstance(val, dict):
                     setattr(worker, name, val.copy())
@@ -1013,6 +1017,22 @@ class TwitTUIForm(
             except Exception as e:
                 _logger.warning(f"Unable to close splash screen: {e}")
 
+    def _is_show_date_cache_fresh(self, show_id_str: str) -> bool:
+        """Return True if cached date bounds for ``show_id_str`` include an end date and are within the 24h TTL."""
+        cache = getattr(self, '_show_date_cache', None)
+        if not isinstance(cache, dict) or show_id_str not in cache:
+            return False
+        cached = cache.get(show_id_str)
+        if not cached or len(cached) < 2 or cached[1] is None:
+            return False
+        ts_map = getattr(self, '_show_date_cache_ts', None)
+        if isinstance(ts_map, dict) and show_id_str in ts_map:
+            if (time.time() - float(ts_map[show_id_str])) > SHOW_DATE_BOUNDS_TTL_SECONDS:
+                cache.pop(show_id_str, None)
+                ts_map.pop(show_id_str, None)
+                return False
+        return True
+
     def _refresh_catalog(self):
         self._catalog_request = getattr(self, '_catalog_request', 0) + 1
         token = self._catalog_request
@@ -1027,16 +1047,14 @@ class TwitTUIForm(
             self._catalog_wait_held = True
             self._set_rate_limit_wait(True)
 
-        pending = {'shows': True, 'episodes': True}
         catalog_released = False
         subtasks_started = False
 
-        def check_finished(task):
+        def release_catalog():
             nonlocal catalog_released
             if token != getattr(self, '_catalog_request', 0):
                 return
-            pending[task] = False
-            if not pending['shows'] and not pending['episodes'] and not catalog_released:
+            if not catalog_released:
                 catalog_released = True
                 self.close_splash_screen()
                 if getattr(self, '_catalog_wait_held', False):
@@ -1045,8 +1063,7 @@ class TwitTUIForm(
 
         def _release_catalog_if_unstarted():
             if not subtasks_started:
-                check_finished('shows')
-                check_finished('episodes')
+                release_catalog()
 
         def done(shows):
             nonlocal subtasks_started
@@ -1063,6 +1080,10 @@ class TwitTUIForm(
                 }
                 if getattr(self, '_show_date_cache', None) is not None:
                     self._show_date_cache.update(getattr(worker, '_show_date_cache', {}))
+                if getattr(self, '_show_date_cache_ts', None) is not None:
+                    worker_ts = getattr(worker, '_show_date_cache_ts', None)
+                    if isinstance(worker_ts, dict):
+                        self._show_date_cache_ts.update(worker_ts)
                 if getattr(worker, '_shows_cache', None) is not None:
                     self._shows_cache = getattr(worker, '_shows_cache', None)
                 if getattr(self, 'api_status_label', None):
@@ -1074,16 +1095,16 @@ class TwitTUIForm(
                 finally:
                     self._setting_catalog = False
                 if not shows:
-                    check_finished('shows')
-                    check_finished('episodes')
+                    release_catalog()
                     return
                 subtasks_started = True
-                self.load_episodes_for_selected_show(callback=lambda: check_finished('episodes'))
-                self._refresh_show_dates(token, shows, callback=lambda: check_finished('shows'))
+                # Dismiss splash & wait modal as soon as the show catalog and initial episodes finish;
+                # archive date scraping runs asynchronously in the background without blocking startup.
+                self.load_episodes_for_selected_show(callback=release_catalog)
+                self._refresh_show_dates(token, shows)
             except Exception as e:
                 _logger.warning(f"Error processing fetched show catalog: {e}")
-                check_finished('shows')
-                check_finished('episodes')
+                release_catalog()
 
         def _safe_fetch_shows():
             try:
@@ -1126,18 +1147,27 @@ class TwitTUIForm(
         pending_shows: list[tuple[str, Any]] = []
         for show_name in shows[index:]:
             show_id = self.show_ids.get(show_name)
-            cached = (
-                self._show_date_cache.get(str(show_id))
-                if show_id and getattr(self, '_show_date_cache', None) is not None
-                else None
+            if not show_id:
+                continue
+            show_id_str = str(show_id)
+            ts_map = getattr(self, '_show_date_cache_ts', None)
+            was_expired = (
+                isinstance(ts_map, dict)
+                and show_id_str in ts_map
+                and (time.time() - float(ts_map[show_id_str])) > SHOW_DATE_BOUNDS_TTL_SECONDS
             )
-            if cached and cached[1] is not None:
+            if was_expired:
+                if isinstance(getattr(self, '_show_date_cache', None), dict):
+                    self._show_date_cache.pop(show_id_str, None)
+                ts_map.pop(show_id_str, None)
+                current_start = self.show_date_bounds.get(show_name, (None, None))[0]
+                self.show_date_bounds[show_name] = (current_start, None)
+            elif self._is_show_date_cache_fresh(show_id_str):
+                cached = self._show_date_cache[show_id_str]
                 current_start = self.show_date_bounds.get(show_name, (None, None))[0]
                 self.show_date_bounds[show_name] = (current_start or cached[0], cached[1])
                 continue
-            if not show_id:
-                continue
-            if self.show_date_bounds.get(show_name, (None, None))[1] is not None:
+            elif self.show_date_bounds.get(show_name, (None, None))[1] is not None:
                 continue
             pending_shows.append((show_name, show_id))
 
@@ -1190,6 +1220,8 @@ class TwitTUIForm(
                             resolved_bounds = (current_start or bounds[0], bounds[1])
                             if getattr(self, '_show_date_cache', None) is not None:
                                 self._show_date_cache[str(current_id)] = resolved_bounds
+                            if isinstance(getattr(self, '_show_date_cache_ts', None), dict):
+                                self._show_date_cache_ts[str(current_id)] = time.time()
                             self.show_date_bounds[current_name] = resolved_bounds
                             selected = self._selected_show_name()
                             self._setting_catalog = True
@@ -2051,19 +2083,28 @@ class TwitTUIForm(
             def _persist_worker_episodes() -> None:
                 if persisted_box[0]:
                     return
-                if (
-                    show_id_key
-                    and getattr(worker, '_episodes_from_api', False)
-                    and isinstance(getattr(worker, '_episodes_cache', None), dict)
-                    and show_id_key in worker._episodes_cache
-                ):
-                    try:
+                cache_lock = getattr(self, '_cache_lock', None)
+                if cache_lock is not None:
+                    cache_lock.acquire()
+                try:
+                    if token != self._episode_request:
+                        return
+                    if (
+                        show_id_key
+                        and getattr(worker, '_episodes_all_loaded', False)
+                        and getattr(worker, '_episodes_from_api', False)
+                        and isinstance(getattr(worker, '_episodes_cache', None), dict)
+                        and show_id_key in worker._episodes_cache
+                    ):
                         worker._save_to_persistent_cache(
                             'episodes', show_id_key, worker._episodes_cache[show_id_key]
                         )
                         persisted_box[0] = True
-                    except Exception:
-                        _logger.debug("Ignored exception in %s", 'TwitTUIForm.load_episodes_for_selected_show._persist_worker_episodes', exc_info=True)
+                except Exception:
+                    _logger.debug("Ignored exception in %s", 'TwitTUIForm.load_episodes_for_selected_show._persist_worker_episodes', exc_info=True)
+                finally:
+                    if cache_lock is not None:
+                        cache_lock.release()
 
             def fetch_all():
                 # Phase 1: fetch page 1 immediately; defer SQLite persistence across pages
@@ -2104,7 +2145,11 @@ class TwitTUIForm(
                     if status or self.api_status_label.text == getattr(self, '_episode_api_status', None):
                         self.api_status_label.text = status
                 self._episode_api_status = status
-                if hasattr(self, '_episodes_cache') and hasattr(worker, '_episodes_cache'):
+                if (
+                    self._episodes_all_loaded
+                    and hasattr(self, '_episodes_cache')
+                    and hasattr(worker, '_episodes_cache')
+                ):
                     self._episodes_cache.update(worker._episodes_cache)
                 self.current_episodes = episodes_list
                 if self._episodes_all_loaded:

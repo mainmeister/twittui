@@ -195,12 +195,13 @@ class TestShowCatalog(unittest.TestCase):
         self.assertEqual(self.form.show_date_bounds['Security Now'], ('2005-08-18T22:06:55Z', '2025-03-04'))
         self.assertEqual(self.form._show_date_cache['1636'], ('2005-08-18T22:06:55Z', '2025-03-04'))
 
-    def test_refresh_catalog_holds_wait_dialog_until_dates_and_episodes_finish(self):
+    def test_refresh_catalog_releases_wait_and_splash_after_episodes_while_dates_scrape_in_background(self):
         self.form.show_combo = SimpleNamespace(value='Security Now', items=[])
         self.form.show_ids = {'Security Now': 1636}
         self.form.show_active = {'Security Now': True}
         self.form.show_date_bounds = {'Security Now': ('2005-08-18', None)}
         self.form._set_rate_limit_wait = MagicMock()
+        self.form.close_splash_screen = MagicMock()
         self.form.update_episodes_display = MagicMock()
 
         worker = MagicMock()
@@ -221,21 +222,25 @@ class TestShowCatalog(unittest.TestCase):
         self.form._set_rate_limit_wait.assert_called_with(True)
         self.form._set_rate_limit_wait.reset_mock()
 
-        # 1. Shows API finishes
+        # 1. Shows API finishes -> initial episodes + background date scraping both start
         network_jobs[0][1](['Security Now'])
 
-        # Verify dialog not closed yet
+        # Splash & wait dialog remain held while initial episodes are loading
         self.form._set_rate_limit_wait.assert_not_called()
+        self.form.close_splash_screen.assert_not_called()
 
         episodes_job = [j for j in network_jobs[1:] if 'fetch_all' in getattr(j[0], '__name__', '')][0]
         dates_job = [j for j in network_jobs[1:] if j != episodes_job][0]
 
-        # 2. Episode list finishes first
+        # 2. Initial episodes finish -> splash & wait dialog dismiss immediately without waiting for dates
         episodes_job[1](([{'title': 'SN 1'}], 1))
-        self.form._set_rate_limit_wait.assert_not_called()
+        self.form.close_splash_screen.assert_called_once()
+        self.form._set_rate_limit_wait.assert_called_once_with(False)
 
-        # 3. Show dates finish second
+        # 3. Background show-date scrape finishes later and updates bounds silently
         dates_job[1](('2005-08-18', '2025-03-04'))
+        self.assertEqual(self.form.show_date_bounds['Security Now'], ('2005-08-18', '2025-03-04'))
+        self.form.close_splash_screen.assert_called_once()
         self.form._set_rate_limit_wait.assert_called_once_with(False)
 
     def test_refresh_catalog_holds_wait_dialog_when_dates_finish_before_episodes(self):
@@ -244,6 +249,7 @@ class TestShowCatalog(unittest.TestCase):
         self.form.show_active = {'Security Now': True}
         self.form.show_date_bounds = {'Security Now': ('2005-08-18', None)}
         self.form._set_rate_limit_wait = MagicMock()
+        self.form.close_splash_screen = MagicMock()
         self.form.update_episodes_display = MagicMock()
 
         worker = MagicMock()
@@ -270,13 +276,125 @@ class TestShowCatalog(unittest.TestCase):
         episodes_job = [j for j in network_jobs[1:] if 'fetch_all' in getattr(j[0], '__name__', '')][0]
         dates_job = [j for j in network_jobs[1:] if j != episodes_job][0]
 
-        # Dates finish first
+        # Dates finish first -> wait dialog and splash remain open until initial episodes complete
         dates_job[1](('2005-08-18', '2025-03-04'))
         self.form._set_rate_limit_wait.assert_not_called()
+        self.form.close_splash_screen.assert_not_called()
 
-        # Episodes finish second
+        # Episodes finish second -> splash & wait dialog dismiss once
         episodes_job[1](([{'title': 'SN 1'}], 1))
+        self.form.close_splash_screen.assert_called_once()
         self.form._set_rate_limit_wait.assert_called_once_with(False)
+
+    @patch('twittui_form.load_twittui_dotenv')
+    def test_deferred_first_episode_page_does_not_reconcile_entire_partial_cache(self, _load):
+        self.form.show_combo = SimpleNamespace(value='Security Now', items=[])
+        self.form.show_ids = {'Security Now': 1636}
+        self.form._episodes_cache = {'1636': [{'id': 'cached-old', 'title': 'Cached episode'}]}
+        self.form._episodes_all_loaded = False
+        self.form._defer_episodes_persist = True
+
+        def response_for_page(page):
+            start = 151 - (page - 1) * 50
+            episodes = [
+                {'id': str(ep_id), 'label': f'Episode {ep_id}'}
+                for ep_id in range(start, start - 50, -1)
+            ]
+            next_link = f'https://twit.tv/api/v1.0/episodes?page={page + 1}' if page < 3 else None
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {'count': 150, 'episodes': episodes, '_links': {'next': next_link}},
+            )
+
+        with patch.object(self.form, 'get_api_app_id', return_value='id'), \
+             patch.object(self.form, 'get_api_app_key', return_value='key'), \
+             patch('twittui_form.api_rate_limiter.get', side_effect=lambda url, **kwargs: response_for_page(
+                 int(url.split('page=')[1].split('&')[0])
+             )) as get:
+            episodes = self.form.fetch_episodes(1636, page=1)
+
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(len(episodes), 50)
+
+    @patch('twittui_form.load_twittui_dotenv')
+    def test_incomplete_background_backfill_preserves_existing_episode_cache(self, _load):
+        self.form.show_combo = SimpleNamespace(value='Security Now', items=[])
+        self.form.show_ids = {'Security Now': 1636}
+        cached_episode = {'id': 'cached-old', 'title': 'Cached episode'}
+        self.form._episodes_cache = {'1636': [cached_episode]}
+        self.form._episodes_all_loaded = False
+        self.form._save_to_persistent_cache = MagicMock()
+        self.form._set_rate_limit_wait = MagicMock()
+        self.form.update_episodes_display = MagicMock()
+        jobs = []
+        self.form._run_network = lambda work, done: jobs.append((work, done))
+
+        page_one = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                'count': 100,
+                'episodes': [{'id': str(i), 'label': f'Episode {i}'} for i in range(50)],
+                '_links': {'next': 'https://twit.tv/api/v1.0/episodes?page=2'},
+            },
+        )
+        page_two = SimpleNamespace(status_code=503, json=lambda: {})
+        self.form.load_episodes_for_selected_show()
+
+        with patch.object(self.form, 'get_api_app_id', return_value='id'), \
+             patch.object(self.form, 'get_api_app_key', return_value='key'), \
+             patch('twittui_form.api_rate_limiter.get', side_effect=[page_one, page_two]):
+            page_one_result = jobs[0][0]()
+            jobs[0][1](page_one_result)
+            backfill_result = jobs[1][0]()
+            jobs[1][1](backfill_result)
+
+        self.assertEqual(self.form._episodes_cache, {'1636': [cached_episode]})
+        self.form._save_to_persistent_cache.assert_not_called()
+
+    @patch('twittui_form.load_twittui_dotenv')
+    def test_clear_cache_invalidates_active_episode_backfill(self, _load):
+        self.form.show_combo = SimpleNamespace(value='Security Now', items=[])
+        self.form.show_ids = {'Security Now': 1636}
+        self.form._episodes_cache = {'1636': [{'id': 'cached-old', 'title': 'Cached episode'}]}
+        self.form._episodes_all_loaded = False
+        self.form._save_to_persistent_cache = MagicMock()
+        self.form._delete_from_persistent_cache = MagicMock()
+        self.form._set_rate_limit_wait = MagicMock()
+        self.form.update_episodes_display = MagicMock()
+        jobs = []
+        self.form._run_network = lambda work, done: jobs.append((work, done))
+
+        page_one = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                'count': 100,
+                'episodes': [{'id': str(i), 'label': f'Episode {i}'} for i in range(50)],
+                '_links': {'next': 'https://twit.tv/api/v1.0/episodes?page=2'},
+            },
+        )
+        page_two = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                'count': 100,
+                'episodes': [{'id': str(i), 'label': f'Episode {i}'} for i in range(50, 100)],
+                '_links': {},
+            },
+        )
+        self.form.load_episodes_for_selected_show()
+
+        with patch.object(self.form, 'get_api_app_id', return_value='id'), \
+             patch.object(self.form, 'get_api_app_key', return_value='key'), \
+             patch('twittui_form.api_rate_limiter.get', side_effect=[page_one, page_two]):
+            page_one_result = jobs[0][0]()
+            jobs[0][1](page_one_result)
+            self.form.clear_cache()
+            backfill_result = jobs[1][0]()
+            jobs[1][1](backfill_result)
+
+        self.assertEqual(len(self.form._episodes_cache), 0)
+        self.assertFalse(self.form._episodes_backfilling)
+        self.form._save_to_persistent_cache.assert_not_called()
+        self.form._delete_from_persistent_cache.assert_called_once_with()
 
     def test_show_list_display_and_selection_survive_date_refresh(self):
         import asyncio

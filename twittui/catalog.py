@@ -5,13 +5,18 @@ from __future__ import annotations
 from datetime import datetime
 import html
 import re
+import time
 import urllib.parse
 
 import requests
 
 from tiered_search import compute_match_score, rank_and_filter_episodes
 from twittui._compat import api_rate_limiter, compat_attr
-from twittui.cache import _shows_cache_key_hash, episode_cache_key
+from twittui.cache import (
+    SHOW_DATE_BOUNDS_TTL_SECONDS,
+    _shows_cache_key_hash,
+    episode_cache_key,
+)
 from twittui.config import load_twittui_dotenv
 from twittui.logging_config import get_logger
 from twittui.shows import (
@@ -155,7 +160,16 @@ class CatalogMixin:
         show_id_str = str(show_id)
         if getattr(self, '_show_date_cache', None) is not None and show_id_str in self._show_date_cache:
             cached_bounds = self._show_date_cache[show_id_str]
-            if cached_bounds and cached_bounds[0] is not None and cached_bounds[1] is not None:
+            ts_map = getattr(self, '_show_date_cache_ts', None)
+            is_expired = (
+                isinstance(ts_map, dict)
+                and show_id_str in ts_map
+                and (time.time() - float(ts_map[show_id_str])) > SHOW_DATE_BOUNDS_TTL_SECONDS
+            )
+            if is_expired:
+                self._show_date_cache.pop(show_id_str, None)
+                ts_map.pop(show_id_str, None)
+            elif cached_bounds and cached_bounds[0] is not None and cached_bounds[1] is not None:
                 return cached_bounds
 
         def page_dates(page_html):
@@ -194,6 +208,8 @@ class CatalogMixin:
             result = (min(oldest_dates), max(newest_dates))
             if getattr(self, '_show_date_cache', None) is not None:
                 self._show_date_cache[show_id_str] = result
+            if isinstance(getattr(self, '_show_date_cache_ts', None), dict):
+                self._show_date_cache_ts[show_id_str] = time.time()
             self._save_to_persistent_cache('show_date_bounds', show_id_str, result)
             return result
         except (requests.RequestException, ValueError, TypeError) as e:
@@ -380,21 +396,32 @@ class CatalogMixin:
         show_id_key = str(show_id) if show_id is not None else ''
         page_num = int(page or 1)
         page_size = 50
-        cached_list = self._episodes_cache.get(show_id_key, [])
 
-        if page_num > 1 and cached_list and getattr(self, '_episodes_all_loaded', False):
-            start_idx = (page_num - 1) * page_size
-            end_idx = page_num * page_size
-            if start_idx < len(cached_list):
-                self._episodes_from_api = True
-                self._episodes_all_loaded = end_idx >= len(cached_list)
-                self._episode_api_status = ''
-                return cached_list[start_idx:end_idx]
+        if page_num > 1 and getattr(self, '_episodes_all_loaded', False) and show_id_key in self._episodes_cache:
+            if hasattr(self._episodes_cache, 'get_page') and hasattr(self._episodes_cache, 'count_episodes'):
+                total_cached = self._episodes_cache.count_episodes(show_id_key)
+                if total_cached > 0:
+                    page_slice = self._episodes_cache.get_page(
+                        show_id_key, page=page_num, page_size=page_size
+                    )
+                    self._episodes_from_api = True
+                    self._episodes_all_loaded = (not page_slice) or (page_num * page_size) >= total_cached
+                    self._episode_api_status = ''
+                    return page_slice
             else:
-                self._episodes_from_api = True
-                self._episodes_all_loaded = True
-                self._episode_api_status = ''
-                return []
+                cached_list = self._episodes_cache.get(show_id_key, [])
+                if cached_list:
+                    start_idx = (page_num - 1) * page_size
+                    end_idx = page_num * page_size
+                    if start_idx < len(cached_list):
+                        self._episodes_from_api = True
+                        self._episodes_all_loaded = end_idx >= len(cached_list)
+                        self._episode_api_status = ''
+                        return cached_list[start_idx:end_idx]
+                    self._episodes_from_api = True
+                    self._episodes_all_loaded = True
+                    self._episode_api_status = ''
+                    return []
 
         if page and int(page) > 1 and getattr(self, '_episodes_all_loaded', False):
             return []
@@ -431,7 +458,13 @@ class CatalogMixin:
                 page = int(page or 1)
                 page_size = 50
 
-                cached_list = self._episodes_cache.get(show_id_key, [])
+                defer_first_page_reconciliation = (
+                    page == 1 and getattr(self, '_defer_episodes_persist', False)
+                )
+                cached_list = (
+                    [] if defer_first_page_reconciliation
+                    else self._episodes_cache.get(show_id_key, [])
+                )
                 cached_keys = {self._episode_cache_key(e) for e in cached_list if self._episode_cache_key(e) is not None}
 
                 if page > 1 and cached_list and getattr(self, '_episodes_all_loaded', False):
@@ -934,5 +967,21 @@ class CatalogMixin:
                 combined = f"{t} {d} {s} {num} {dur} {sz}".lower()
                 if compute_match_score(query_str, combined, fuzzy_enabled=fuzzy_enabled, phonetic_enabled=phonetic_enabled) > 0.0:
                     add_result(ep)
+
+        # Tier 4b: Indexed SQLite FTS5 full-text search across persisted normalized episodes
+        episodes_cache = getattr(self, '_episodes_cache', None)
+        if episodes_cache is not None and hasattr(episodes_cache, 'search_fts'):
+            try:
+                target_show_id = None
+                if not is_all_shows:
+                    if show_id is not None and str(show_id).strip():
+                        target_show_id = str(show_id).strip()
+                    elif selected_show and hasattr(self, 'show_ids') and self.show_ids.get(selected_show):
+                        target_show_id = str(self.show_ids[selected_show])
+                fts_hits = episodes_cache.search_fts(query_str, show_id=target_show_id, limit=200)
+                for ep in fts_hits:
+                    add_result(ep)
+            except Exception as e:
+                _logger.debug("SQLite FTS5 cache search skipped: %s", e, exc_info=True)
 
         return rank_and_filter_episodes(results, query_str, fuzzy_enabled=fuzzy_enabled, phonetic_enabled=phonetic_enabled)

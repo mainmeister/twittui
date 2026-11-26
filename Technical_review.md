@@ -600,7 +600,7 @@ GitHub Actions runs on pushes and pull requests across Python 3.11 and 3.12 on `
 
 ## 13. Quality Assurance & Automated Test Suite
 
-TwitTUI maintains an automated test suite comprising **326 unit and integration tests across 25 test modules**, running cleanly on both headless terminals and graphical sessions without hanging on interactive TTYs or mutating `.env`.
+TwitTUI maintains an automated test suite comprising **332 unit and integration tests across 25 test modules**, running cleanly on both headless terminals and graphical sessions without hanging on interactive TTYs or mutating `.env`.
 
 ```
 test_*.py Test Coverage Matrix:
@@ -635,4 +635,4 @@ The test suite runs directly with Python's standard `unittest` runner:
 ```bash
 python -m unittest discover -s . -p "test_*.py" -v
 ```
-All 326 tests execute reliably without interactive TTY prompts or developer `.env` modifications, confirming regression-free operation across the entire codebase.
+All 332 tests execute reliably without interactive TTY prompts or developer `.env` modifications, confirming regression-free operation across the entire codebase.

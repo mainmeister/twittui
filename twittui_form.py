@@ -33,11 +33,15 @@ from twittui.cache import (
     _LazySQLiteEpisodesCache,
     _restrict_file_permissions,
     _shows_cache_key_hash,
+    count_normalized_episodes,
     delete_persistent_cache,
     ensure_cache_schema,
     episode_cache_key,
     get_cache_db_path,
+    load_episodes_page,
     save_normalized_episodes,
+    search_episodes_fts,
+    upsert_normalized_episodes,
 )
 from twittui.config import (
     TWIT_API_DOCS_URL,
@@ -139,6 +143,7 @@ __all__ = [
     "apply_tooltip_to_impl",
     "build_stream_args",
     "configure_logging",
+    "count_normalized_episodes",
     "delete_persistent_cache",
     "ensure_cache_schema",
     "episode_cache_key",
@@ -149,6 +154,7 @@ __all__ = [
     "get_widget_tooltip",
     "is_safe_http_url",
     "launch_stream_safe",
+    "load_episodes_page",
     "load_twittui_dotenv",
     "main",
     "patch_toga_gtk_app",
@@ -159,8 +165,10 @@ __all__ = [
     "safe_xml_fromstring",
     "sanitize_html_content",
     "save_normalized_episodes",
+    "search_episodes_fts",
     "set_key",
     "set_widget_tooltip",
+    "upsert_normalized_episodes",
     "write_restricted_file",
 ]
 

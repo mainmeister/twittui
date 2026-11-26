@@ -267,20 +267,28 @@ class PreferencesMixin:
 
     def clear_cache(self) -> None:
         """Clear all cached data retrieved from the TWiT API or scraped from twit.tv."""
-        self._shows_cache = None
-        self._show_date_cache = {}
-        self.show_date_bounds = {}
-        self._episodes_cache = {}
-        self._triangulation_archive_cache = {}
-        self._episode_detail_cache = {}
-        self._media_webpage_cache = {}
-        self._api_search_cache = {}
-        self._show_rss_cache = {}
-        self._club_rss_cache = None
-        self._memberful_feeds_cache = {}
-        self._search_catalog = None
-        self._search_catalog_show = None
-        self._delete_from_persistent_cache()
+        from twittui.cache import _LazySQLiteEpisodesCache
+
+        with self._cache_lock:
+            self._next_episode_request()
+            self._episodes_backfilling = False
+            self._episodes_all_loaded = False
+            self._episodes_from_api = False
+            self._shows_cache = None
+            self._show_date_cache = {}
+            self._show_date_cache_ts = {}
+            self.show_date_bounds = {}
+            self._episodes_cache = _LazySQLiteEpisodesCache(getattr(self, '_cache_db_path', None))
+            self._triangulation_archive_cache = {}
+            self._episode_detail_cache = {}
+            self._media_webpage_cache = {}
+            self._api_search_cache = {}
+            self._show_rss_cache = {}
+            self._club_rss_cache = None
+            self._memberful_feeds_cache = {}
+            self._search_catalog = None
+            self._search_catalog_show = None
+            self._delete_from_persistent_cache()
 
     def on_clear_cache_press(self, widget=None) -> None:
         """Handler for Clear Cache button in Preferences window."""
