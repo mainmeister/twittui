@@ -10,9 +10,26 @@ from __future__ import annotations
 
 import logging
 import os
+import urllib.parse
 
 LOGGER_NAME = "twittui"
 _LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+
+
+def safe_url_for_log(url: str) -> str:
+    """Return only a URL's scheme and host, excluding paths and credentials."""
+    try:
+        parsed = urllib.parse.urlsplit(str(url))
+        scheme = parsed.scheme.lower()
+        hostname = parsed.hostname
+        if scheme not in {"http", "https"} or not hostname:
+            return "<redacted-url>"
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+        return f"{scheme}://{host}"
+    except (TypeError, ValueError):
+        return "<redacted-url>"
 
 
 def _ensure_base_logger() -> logging.Logger:

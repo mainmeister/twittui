@@ -10,7 +10,7 @@ import urllib.parse
 import requests
 
 from tiered_search import compute_match_score, rank_and_filter_episodes
-from twittui._compat import api_rate_limiter, compat_attr, quiet_print as print
+from twittui._compat import api_rate_limiter, compat_attr
 from twittui.cache import _shows_cache_key_hash, episode_cache_key
 from twittui.config import load_twittui_dotenv
 from twittui.logging_config import get_logger
@@ -44,7 +44,7 @@ class CatalogMixin:
             app_key = self.get_api_app_key()
 
             if not app_id or not app_key:
-                print("API credentials not found in settings or .env file, using default shows")
+                _logger.info("API credentials not found in settings or .env file, using default shows")
                 set_status('Shows API credentials missing; using fallback show list.')
                 self.show_ids = {name: sid for name, sid in compat_attr('DEFAULT_SHOWS', DEFAULT_SHOWS)}
                 self.show_active = {name: None for name in self.show_ids}
@@ -140,7 +140,7 @@ class CatalogMixin:
             self.show_date_bounds = {name: (None, None) for name in self.show_ids}
             return sorted(self.show_ids, key=str.casefold)
         except Exception as e:
-            print(f"Error fetching shows: {e}")
+            _logger.warning(f"Error fetching shows: {e}")
             set_status('Shows API request failed; using fallback show list.')
             self.show_ids = {name: sid for name, sid in compat_attr('DEFAULT_SHOWS', DEFAULT_SHOWS)}
             self.show_active = {name: None for name in self.show_ids}
@@ -197,7 +197,7 @@ class CatalogMixin:
             self._save_to_persistent_cache('show_date_bounds', show_id_str, result)
             return result
         except (requests.RequestException, ValueError, TypeError) as e:
-            print(f"Error fetching show archive dates: {e}")
+            _logger.warning(f"Error fetching show archive dates: {e}")
             return None
 
     def test_api_credentials(self, app_id: str, app_key: str) -> tuple[bool, str]:
@@ -236,6 +236,7 @@ class CatalogMixin:
         except requests.exceptions.RequestException as e:
             return False, f"Failed: Network error communicating with TWiT API: {e}"
         except Exception as e:
+            _logger.warning("Error testing TWiT API credentials: %s", e, exc_info=True)
             return False, f"Failed: Error testing TWiT API credentials: {e}"
 
     def _episode_cache_key(self, ep):
@@ -314,7 +315,7 @@ class CatalogMixin:
                 return detail
             return None
         except Exception as e:
-            print(f"Error fetching episode details: {e}")
+            _logger.warning(f"Error fetching episode details: {e}")
             return None
 
     def fetch_triangulation_archive(self, page):
@@ -368,7 +369,7 @@ class CatalogMixin:
             self._save_to_persistent_cache('triangulation_archive', f"{page_key[0]}|||{1 if page_key[1] else 0}", self._triangulation_archive_cache[page_key])
             return result
         except (requests.RequestException, ValueError, TypeError) as e:
-            print(f"Error fetching Triangulation archive: {e}")
+            _logger.warning(f"Error fetching Triangulation archive: {e}")
             return None
 
     def fetch_episodes(self, show_id, page=1, sort=None):
@@ -603,7 +604,7 @@ class CatalogMixin:
                         return episodes
                 self._episode_api_status = f'Episodes API failed (HTTP {response.status_code}); RSS may not contain the full archive.'
         except Exception as e:
-            print(f"Error fetching episodes from API: {e}")
+            _logger.warning(f"Error fetching episodes from API: {e}")
             self._episode_api_status = f'Episodes API failed ({e}); RSS may not contain the full archive.'
 
         if page and int(page) > 1 and getattr(self, '_episodes_from_api', False):
@@ -848,7 +849,7 @@ class CatalogMixin:
                         }
                         add_result(ep_info)
         except Exception as e:
-            print(f"Error searching API: {e}")
+            _logger.warning(f"Error searching API: {e}")
 
         fuzzy_enabled = self.is_fuzzy_search_enabled()
         phonetic_enabled = self.is_phonetic_search_enabled()
@@ -883,7 +884,7 @@ class CatalogMixin:
                         }
                         add_result(ep)
             except Exception as e:
-                print(f"Error searching show RSS: {e}")
+                _logger.warning(f"Error searching show RSS: {e}")
 
         # Tier 3: Club TWiT RSS Feed
         try:
@@ -919,7 +920,7 @@ class CatalogMixin:
                         }
                         add_result(ep)
         except Exception as e:
-            print(f"Error searching Club TWiT RSS: {e}")
+            _logger.warning(f"Error searching Club TWiT RSS: {e}")
 
         # Tier 4: Search across currently loaded episodes if any
         if hasattr(self, 'current_episodes') and self.current_episodes:

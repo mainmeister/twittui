@@ -6,7 +6,6 @@ imports while locating project-root runtime assets reliably from any subpackage.
 
 from __future__ import annotations
 
-import builtins
 import os
 import subprocess
 import sys
@@ -76,19 +75,6 @@ def _is_textual_tui_running(app: Any = None) -> bool:
         native_mod.startswith(("toga_textual", "textual"))
         and getattr(native, "_running", False)
     )
-
-
-def quiet_print(*args: Any, **kwargs: Any) -> None:
-    """Route internal form/worker diagnostic prints to logger instead of corrupting TUI stdout."""
-    if os.environ.get("TWITTUI_DEBUG_STDOUT") == "1" and not _is_textual_environment():
-        builtins.print(*args, **kwargs)
-        return
-    sep = kwargs.get("sep", " ")
-    if sep is None:
-        sep = " "
-    msg = sep.join(str(a) for a in args).strip()
-    if msg:
-        _logger.debug("%s", msg)
 
 
 class ApiRateLimiter(_BaseApiRateLimiter):

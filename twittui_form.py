@@ -27,7 +27,6 @@ from twittui._compat import (
     _is_textual_tui_running,
     api_rate_limiter,
     launch_stream_safe,
-    quiet_print as print,
 )
 from twittui.cache import (
     SHOW_DATE_BOUNDS_TTL_SECONDS,

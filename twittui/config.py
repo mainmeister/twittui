@@ -11,7 +11,7 @@ from typing import Any
 import urllib.parse
 from dotenv import set_key
 
-from twittui._compat import PROJECT_ROOT, compat_attr, quiet_print as print
+from twittui._compat import PROJECT_ROOT, compat_attr
 
 from twittui.logging_config import get_logger
 
@@ -148,7 +148,7 @@ class ConfigMixin:
                 if isinstance(last_saved, dict):
                     last_saved[k] = v
             except Exception as e:
-                print(f"Error flushing setting {k} to .env: {e}")
+                _logger.warning(f"Error flushing setting {k} to .env: {e}")
 
     @staticmethod
     def _default_streamer_template() -> str:
@@ -235,6 +235,7 @@ class ConfigMixin:
                 except Exception:
                     _logger.debug("Ignored exception in %s", 'TwitTUIForm.save_env_setting', exc_info=True)
         except Exception:
+            _logger.debug("dotenv.set_key failed for %s; falling back to restricted file write", key, exc_info=True)
             try:
                 lines = []
                 if os.path.exists(target_path):
@@ -250,7 +251,7 @@ class ConfigMixin:
                     lines.append(f"{key}={value}\n")
                 compat_attr("write_restricted_file", write_restricted_file)(target_path, "".join(lines))
             except Exception as e:
-                print(f"Warning: Could not save {key} to {target_path}: {e}")
+                _logger.warning(f"Warning: Could not save {key} to {target_path}: {e}")
 
     def is_fuzzy_search_enabled(self) -> bool:
         """Return True if Fuzzy Match search preference is enabled."""
@@ -359,7 +360,8 @@ class ConfigMixin:
             except Exception:
                 _logger.debug("Ignored exception in %s", 'TwitTUIForm.get_app_cache_dir', exc_info=True)
             return cache_dir
-        except Exception:
+        except OSError:
+            _logger.debug("Unable to create cache directory %s; falling back to temp dir", cache_dir, exc_info=True)
             return tempfile.gettempdir()
 
     def get_full_club_twit_url(self) -> str:

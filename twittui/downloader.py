@@ -17,8 +17,7 @@ import urllib.parse
 
 import requests
 
-from twittui._compat import quiet_print as print
-from twittui.logging_config import get_logger
+from twittui.logging_config import get_logger, safe_url_for_log
 
 _logger = get_logger("downloader")
 
@@ -199,7 +198,8 @@ class DownloaderMixin:
 
         try:
             local_size = os.path.getsize(dest_path)
-        except Exception:
+        except OSError:
+            _logger.debug("Could not stat local file %s", dest_path, exc_info=True)
             return False
 
         if local_size <= 0:
@@ -237,7 +237,7 @@ class DownloaderMixin:
                         else:
                             return False
                     except Exception as e:
-                        print(f"Error calculating MD5 checksum for {dest_path}: {e}")
+                        _logger.warning(f"Error calculating MD5 checksum for {dest_path}: {e}")
 
                 if remote_length and remote_length.isdigit() and int(remote_length) == local_size:
                     return True
@@ -245,7 +245,10 @@ class DownloaderMixin:
             elif head_resp.status_code == 304:
                 return True
         except Exception as e:
-            print(f"Could not verify existing file headers via HEAD request: {e}")
+            _logger.warning(
+                "Could not verify existing file headers via HEAD request for %s (%s)",
+                safe_url_for_log(url), type(e).__name__,
+            )
             if expected_size is not None and expected_size > 0 and local_size == expected_size:
                 return True
 
@@ -277,7 +280,7 @@ class DownloaderMixin:
             if self.is_existing_file_identical(existing_path, url):
                 local_size = os.path.getsize(existing_path)
                 self._last_downloaded_path = existing_path
-                print(f"Skipping download: '{existing_path}' already exists ({local_size} bytes).")
+                _logger.info(f"Skipping download: '{existing_path}' already exists ({local_size} bytes).")
                 if progress_callback:
                     progress_callback(100.0, 100.0)
                 else:
@@ -299,7 +302,7 @@ class DownloaderMixin:
                 "Extracting YouTube video streams requires 'yt-dlp' or 'youtube-dl' to be installed on your system.\n"
                 "Please install yt-dlp (e.g. 'pip install yt-dlp' or via your package manager) and try again."
             )
-            print(f"Error: {error_msg}")
+            _logger.warning(f"Error: {error_msg}")
             self._show_dialog_threadsafe("error", "YouTube Downloader Required", error_msg, prefer_main=True)
             return False
 
@@ -451,7 +454,7 @@ class DownloaderMixin:
                     _cleanup_stale_parts()
                     return False
                 if retcode != 0:
-                    print(f"yt-dlp returned error code {retcode}")
+                    _logger.warning(f"yt-dlp returned error code {retcode}")
                     _cleanup_stale_parts()
                     return False
 
@@ -465,11 +468,11 @@ class DownloaderMixin:
                         progress_callback(100.0, 100.0)
                     else:
                         self.update_progress(100.0, 100.0)
-                    print(f"Finished downloading YouTube video: {final_dest_path}")
+                    _logger.info(f"Finished downloading YouTube video: {final_dest_path}")
                     return True
                 return False
             except Exception as e:
-                print(f"Error executing yt-dlp for {url}: {e}")
+                _logger.warning("Error executing yt-dlp for %s (%s)", safe_url_for_log(url), type(e).__name__)
                 _cleanup_stale_parts()
                 return False
             finally:
@@ -540,11 +543,14 @@ class DownloaderMixin:
                         progress_callback(100.0, 100.0)
                     else:
                         self.update_progress(100.0, 100.0)
-                    print(f"Finished downloading YouTube video: {final_dest_path}")
+                    _logger.info(f"Finished downloading YouTube video: {final_dest_path}")
                     return True
                 return False
             except Exception as e:
-                print(f"Error downloading YouTube video with yt_dlp module: {e}")
+                _logger.warning(
+                    "Error downloading YouTube video with yt_dlp module for %s (%s)",
+                    safe_url_for_log(url), type(e).__name__,
+                )
                 _cleanup_stale_parts()
                 return False
 
@@ -557,7 +563,7 @@ class DownloaderMixin:
         # Check if identical file already exists on disk
         if self.is_existing_file_identical(dest_path, url, expected_size=expected_size):
             local_size = os.path.getsize(dest_path)
-            print(f"Skipping download: '{dest_path}' already exists and is confirmed identical ({local_size} bytes).")
+            _logger.info(f"Skipping download: '{dest_path}' already exists and is confirmed identical ({local_size} bytes).")
             if progress_callback:
                 progress_callback(local_size, local_size)
             else:
@@ -592,7 +598,10 @@ class DownloaderMixin:
                         if self.is_valid_media_url(cand) and (not dl_audio_only or self.is_audio_url(cand)):
                             return self.download_episode_file(cand, dest_path, block_size, progress_callback=progress_callback, expected_size=expected_size)
 
-                    print(f"Error: URL '{url}' returned an HTML document instead of a playable media stream.")
+                    _logger.warning(
+                        "URL '%s' returned an HTML document instead of a playable media stream.",
+                        safe_url_for_log(url),
+                    )
                     return False
 
                 total_bytes = 0
@@ -612,7 +621,7 @@ class DownloaderMixin:
                                     for chunk in iter(lambda: f.read(65536), b''):
                                         hasher.update(chunk)
                                 if hasher.hexdigest().lower() == etag.lower():
-                                    print(f"Skipping download: '{dest_path}' already exists and matches MD5 checksum ({etag}).")
+                                    _logger.info(f"Skipping download: '{dest_path}' already exists and matches MD5 checksum ({etag}).")
                                     if progress_callback:
                                         progress_callback(total_bytes, total_bytes)
                                     else:
@@ -621,7 +630,7 @@ class DownloaderMixin:
                             except Exception:
                                 _logger.debug("Ignored exception in %s", 'TwitTUIForm.download_episode_file', exc_info=True)
                         else:
-                            print(f"Skipping download: '{dest_path}' already exists with matching size ({local_size} bytes).")
+                            _logger.info(f"Skipping download: '{dest_path}' already exists with matching size ({local_size} bytes).")
                             if progress_callback:
                                 progress_callback(total_bytes, total_bytes)
                             else:
@@ -640,7 +649,7 @@ class DownloaderMixin:
                 with open(temp_path, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=block_size):
                         if getattr(self, '_cancel_download', False):
-                            print("Download cancelled by user")
+                            _logger.info("Download cancelled by user")
                             break
                         if chunk:
                             f.write(chunk)
@@ -664,7 +673,10 @@ class DownloaderMixin:
                 return False
 
             if not self.is_valid_media_file(temp_path):
-                print(f"Error: Downloaded content from '{url}' contains text/HTML rather than valid media.")
+                _logger.warning(
+                    "Downloaded content from '%s' contains text/HTML rather than valid media.",
+                    safe_url_for_log(url),
+                )
                 if os.path.exists(temp_path):
                     try:
                         os.remove(temp_path)
@@ -681,10 +693,10 @@ class DownloaderMixin:
             else:
                 if total_bytes > 0:
                     self.update_progress(total_bytes, total_bytes)
-            print(f"Finished downloading: {dest_path} ({downloaded_bytes} bytes)")
+            _logger.info(f"Finished downloading: {dest_path} ({downloaded_bytes} bytes)")
             return True
         except Exception as e:
-            print(f"Error downloading {url} to {dest_path}: {e}")
+            _logger.warning("Error downloading %s (%s)", safe_url_for_log(url), type(e).__name__)
             if os.path.exists(temp_path):
                 try:
                     os.remove(temp_path)
@@ -863,7 +875,7 @@ class DownloaderMixin:
         if download_lock is not None:
             lock_acquired = download_lock.acquire(blocking=False)
             if not lock_acquired:
-                print("Batch download already in progress; ignoring concurrent request.")
+                _logger.info("Batch download already in progress; ignoring concurrent request.")
                 return
 
         self._is_downloading = True
@@ -882,18 +894,18 @@ class DownloaderMixin:
         downloaded_files = []
         total_targets = len(targets) if targets else 1
 
-        print(f"Starting batch download for {len(targets)} episode(s) to '{base_dest_dir}' (block size: {block_size})...")
+        _logger.info(f"Starting batch download for {len(targets)} episode(s) to '{base_dest_dir}' (block size: {block_size})...")
         try:
             try:
                 os.makedirs(base_dest_dir, exist_ok=True)
             except Exception as e:
-                print(f"Error creating destination directory '{base_dest_dir}': {e}")
+                _logger.warning(f"Error creating destination directory '{base_dest_dir}': {e}")
                 self.reset_progress()
                 return
 
             for idx_0, target in enumerate(targets):
                 if getattr(self, '_cancel_download', False):
-                    print("Batch download cancelled.")
+                    _logger.info("Batch download cancelled.")
                     break
                 target_title = getattr(target, 'title', str(target))
                 target_num = getattr(target, 'episode', '')
@@ -912,7 +924,7 @@ class DownloaderMixin:
                     media_url = worker.resolve_target_media_url(target, audio_only=audio_only)
 
                 if not media_url:
-                    print(f"[{idx_0 + 1}/{total_targets}] No media URL found for episode: {target_num} {target_title}")
+                    _logger.warning(f"[{idx_0 + 1}/{total_targets}] No media URL found for episode: {target_num} {target_title}")
                     batch_pct = ((idx_0 + 1) / total_targets) * 100.0
                     self.update_progress(batch_pct, 100.0)
                     continue
@@ -922,7 +934,7 @@ class DownloaderMixin:
                 try:
                     os.makedirs(item_dest_dir, exist_ok=True)
                 except Exception as e:
-                    print(f"Error creating destination directory '{item_dest_dir}': {e}")
+                    _logger.warning(f"Error creating destination directory '{item_dest_dir}': {e}")
                     item_dest_dir = base_dest_dir
 
                 filename = worker.determine_download_filename(target, media_url)
@@ -934,8 +946,8 @@ class DownloaderMixin:
                     target, media_url=media_url, matched_resolution=matched_res_dict
                 )
 
-                sanitized_log_url = re.sub(r'([?&]auth=)[^&]+', r'\1[REDACTED]', media_url)
-                print(f"[{idx_0 + 1}/{total_targets}] Downloading '{target_title}' -> {dest_filepath} from {sanitized_log_url}")
+                sanitized_log_url = safe_url_for_log(media_url)
+                _logger.info(f"[{idx_0 + 1}/{total_targets}] Downloading '{target_title}' -> {dest_filepath} from {sanitized_log_url}")
 
                 def _item_progress(downloaded_bytes: int, total_bytes: int, item_idx=idx_0):
                     if total_bytes > 0:
@@ -1001,7 +1013,7 @@ class DownloaderMixin:
             download_starting_acquired = True
             selected = self.episodes_list.selection
             if not selected:
-                print("No episode selected for download")
+                _logger.info("No episode selected for download")
                 return
 
             if isinstance(selected, (list, tuple, set)):
@@ -1010,7 +1022,7 @@ class DownloaderMixin:
                 targets = [selected] if selected is not None else []
 
             if not targets:
-                print("No episode selected for download")
+                _logger.info("No episode selected for download")
                 return
 
             targets = [self._snapshot_episode(t) for t in targets]
@@ -1035,7 +1047,7 @@ class DownloaderMixin:
                         resolutions=resolutions
                     )
                     if not chosen_res:
-                        print("Download cancelled by user.")
+                        _logger.info("Download cancelled by user.")
                         return
                     target.selected_media_url = chosen_res.get('url')
                     target.selected_resolution = chosen_res.get('id')
@@ -1083,7 +1095,7 @@ class DownloaderMixin:
                             resolutions=batch_options
                         )
                         if not chosen_batch:
-                            print("Batch download cancelled by user.")
+                            _logger.info("Batch download cancelled by user.")
                             return
                         preferred_resolution = chosen_batch.get('id')
                     elif len(batch_options) == 1:
@@ -1134,7 +1146,7 @@ class DownloaderMixin:
             )
             thread.start()
         except Exception as e:
-            print(f"Error initiating download: {e}")
+            _logger.warning(f"Error initiating download: {e}")
         finally:
             if download_starting_acquired:
                 self._download_starting = False

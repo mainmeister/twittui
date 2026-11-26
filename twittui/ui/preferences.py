@@ -13,7 +13,6 @@ from twittui._compat import (
     _is_textual_tui_running,
     api_rate_limiter,
     compat_attr,
-    quiet_print as print,
 )
 from twittui.logging_config import get_logger
 
@@ -498,7 +497,7 @@ class PreferencesMixin:
             if selected_folder is not None:
                 self.dest_input.value = str(selected_folder)
         except Exception as e:
-            print(f"Error selecting folder: {e}")
+            _logger.warning(f"Error selecting folder: {e}")
 
     def show_api_test_dialog(self, success: bool, message: str) -> None:
         """Display a modal dialog indicating whether the TWiT API credentials test passed or failed."""

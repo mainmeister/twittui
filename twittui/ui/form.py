@@ -30,7 +30,6 @@ from twittui._compat import (
     api_rate_limiter,
     compat_attr,
     launch_stream_safe,
-    quiet_print as print,
 )
 from twittui.cache import (
     SHOW_DATE_BOUNDS_TTL_SECONDS,
@@ -44,7 +43,7 @@ from twittui.cache import (
 from twittui.catalog import CatalogMixin
 from twittui.config import ConfigMixin, TWITTUI_HOMEPAGE_URL
 from twittui.downloader import DownloaderMixin
-from twittui.logging_config import get_logger
+from twittui.logging_config import get_logger, safe_url_for_log
 from twittui.media import MediaMixin, resolve_stream_url
 from twittui.rss import RssMixin
 from twittui.ui.metadata import MetadataMixin
@@ -162,6 +161,7 @@ def patch_toga_icons(include_gtk: bool = True) -> None:
                     setattr(cls, attr_name, value)
                     return value
                 except Exception:
+                    _logger.debug("Fallback to placeholder icon in patch_toga_icons.safe_cached_get", exc_info=True)
                     return getattr(cls, attr_name, None)
 
             toga.icons.CachedIcon.__get__ = safe_cached_get
@@ -187,6 +187,7 @@ def patch_toga_icons(include_gtk: bool = True) -> None:
                 try:
                     orig_gtk_icon_init(self, interface, path)
                 except Exception:
+                    _logger.debug("Fallback to blank GdkPixbuf in patch_toga_icons.safe_gtk_icon_init", exc_info=True)
                     for size in getattr(toga_gtk.icons.Icon, "SIZES", [512, 256, 128, 72, 64, 32, 16]):
                         try:
                             self._native[size] = GdkPixbuf.Pixbuf.new(
@@ -483,7 +484,7 @@ class TwitTUIForm(
                     return
                 self._present_window_dialog(win, kind, title, message, on_result=on_result)
             except Exception as e:
-                print(f"Error displaying {kind} dialog '{title}': {e}")
+                _logger.warning(f"Error displaying {kind} dialog '{title}': {e}")
 
         loop = getattr(self, 'loop', None)
         if threading.current_thread() is not threading.main_thread():
@@ -829,6 +830,7 @@ class TwitTUIForm(
         try:
             return run_net(work, _wrapped_done)
         except Exception as exc:
+            _logger.debug("Network stub execution raised exception: %s", exc, exc_info=True)
             if callable(on_error):
                 try:
                     on_error(exc)
@@ -911,7 +913,7 @@ class TwitTUIForm(
                     window.show()
                     indicator.start()
             except Exception as e:
-                print(f"Unable to display API wait indicator: {e}")
+                _logger.warning(f"Unable to display API wait indicator: {e}")
         else:
             self._api_wait_count = max(0, count - 1)
             if self._api_wait_count:
@@ -926,7 +928,7 @@ class TwitTUIForm(
                         window.hide()
                         window.close()
                 except Exception as e:
-                    print(f"Unable to close API wait indicator: {e}")
+                    _logger.warning(f"Unable to close API wait indicator: {e}")
 
     def _next_episode_request(self):
         self._episode_request = getattr(self, '_episode_request', 0) + 1
@@ -993,7 +995,7 @@ class TwitTUIForm(
                 window.show()
                 indicator.start()
         except Exception as e:
-            print(f"Unable to display splash screen: {e}")
+            _logger.warning(f"Unable to display splash screen: {e}")
 
     def close_splash_screen(self) -> None:
         """Dismiss the active splash screen window or modal."""
@@ -1009,7 +1011,7 @@ class TwitTUIForm(
                     window.hide()
                     window.close()
             except Exception as e:
-                print(f"Unable to close splash screen: {e}")
+                _logger.warning(f"Unable to close splash screen: {e}")
 
     def _refresh_catalog(self):
         self._catalog_request = getattr(self, '_catalog_request', 0) + 1
@@ -1079,7 +1081,7 @@ class TwitTUIForm(
                 self.load_episodes_for_selected_show(callback=lambda: check_finished('episodes'))
                 self._refresh_show_dates(token, shows, callback=lambda: check_finished('shows'))
             except Exception as e:
-                print(f"Error processing fetched show catalog: {e}")
+                _logger.warning(f"Error processing fetched show catalog: {e}")
                 check_finished('shows')
                 check_finished('episodes')
 
@@ -1087,7 +1089,7 @@ class TwitTUIForm(
             try:
                 return worker.fetch_shows()
             except Exception as e:
-                print(f"Unexpected error fetching shows: {e}")
+                _logger.warning(f"Unexpected error fetching shows: {e}")
                 return None
 
         self._call_run_network(
@@ -1602,7 +1604,7 @@ class TwitTUIForm(
             else:
                 selected = self.episodes_list.selection
                 if not selected:
-                    print("No episode selected for streaming")
+                    _logger.info("No episode selected for streaming")
                     return
                 selected_target = selected[0] if isinstance(selected, list) else selected
 
@@ -1634,7 +1636,7 @@ class TwitTUIForm(
                     resolutions=resolutions
                 )
                 if not chosen_res:
-                    print("Stream cancelled by user.")
+                    _logger.info("Stream cancelled by user.")
                     return
                 media_url = chosen_res.get('url')
             elif len(resolutions) == 1:
@@ -1646,7 +1648,7 @@ class TwitTUIForm(
                 return
 
             if not media_url:
-                print("No media URL found for the selected episode")
+                _logger.warning("No media URL found for the selected episode")
                 return
 
             resolved_media_url = await asyncio.to_thread(compat_attr('resolve_stream_url', resolve_stream_url), media_url)
@@ -1655,16 +1657,16 @@ class TwitTUIForm(
 
             if self.is_youtube_url(resolved_media_url) or self.is_youtube_url(media_url):
                 target_yt_url = resolved_media_url if self.is_youtube_url(resolved_media_url) else media_url
-                print(f"Opening YouTube video in browser: {target_yt_url}")
+                _logger.info("Opening YouTube video in browser: %s", safe_url_for_log(target_yt_url))
                 try:
                     await asyncio.to_thread(self._open_browser_quietly, target_yt_url)
                 except Exception as e:
-                    print(f"Error opening YouTube in browser: {e}")
+                    _logger.warning("Error opening YouTube in browser (%s)", type(e).__name__)
                 return
 
             streamer_template = self.streamer_input.value if getattr(self, 'streamer_input', None) and self.streamer_input.value else 'env LC_ALL=C vlc %f'
-            sanitized_log_url = re.sub(r'([?&]auth=)[^&]+', r'\1[REDACTED]', resolved_media_url)
-            print(f"Launching stream player for: {sanitized_log_url}")
+            sanitized_log_url = safe_url_for_log(resolved_media_url)
+            _logger.info(f"Launching stream player for: {sanitized_log_url}")
 
             def _launch_stream():
                 try:
@@ -1678,7 +1680,7 @@ class TwitTUIForm(
 
             await asyncio.to_thread(_launch_stream)
         except Exception as e:
-            print(f"Error launching stream: {e}")
+            _logger.warning("Error launching stream (%s)", type(e).__name__)
 
     def on_cancel_press(self, widget) -> None:
         self._cancel_hover_timer()
@@ -1689,7 +1691,7 @@ class TwitTUIForm(
                 _logger.debug("Ignored exception in %s", 'TwitTUIForm.on_cancel_press', exc_info=True)
             self._metadata_window = None
         if getattr(self, '_is_downloading', False):
-            print("Cancelling active download...")
+            _logger.info("Cancelling active download...")
             self._cancel_download = True
             self._terminate_active_download_proc()
             self.reset_progress()
@@ -1730,12 +1732,14 @@ class TwitTUIForm(
             try:
                 self.exit()
             except Exception:
+                _logger.debug("Falling back to sys.exit(0) after exit() failure", exc_info=True)
                 sys.exit(0)
 
         if hasattr(self, 'loop') and self.loop and self.loop.is_running():
             try:
                 self.loop.call_later(0.05, _do_exit)
             except Exception:
+                _logger.debug("Falling back to direct exit() after loop.call_later failure", exc_info=True)
                 self.exit()
         else:
             self.exit()
@@ -1756,6 +1760,7 @@ class TwitTUIForm(
                 from toga_gtk.libs import Gtk
                 native.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
             except Exception:
+                _logger.debug("GTK PolicyType import failed; retrying with numeric scrollbar policy", exc_info=True)
                 try:
                     native.set_policy(1, 1)  # 1 corresponds to PolicyType.AUTOMATIC in GTK3/4
                 except Exception:
@@ -1997,7 +2002,7 @@ class TwitTUIForm(
             try:
                 return worker.search_episodes(query, show_id=show_id, show_name=selected_show)
             except Exception as e:
-                print(f"Unexpected error searching episodes: {e}")
+                _logger.warning(f"Unexpected error searching episodes: {e}")
                 return []
 
         self._call_run_network(_safe_search, done)
@@ -2069,7 +2074,7 @@ class TwitTUIForm(
                     if token == self._episode_request:
                         batch = worker.fetch_episodes(show_id, page=1) or []
                 except Exception as e:
-                    print(f"Unexpected error loading episodes for show {show_id}: {e}")
+                    _logger.warning(f"Unexpected error loading episodes for show {show_id}: {e}")
                 finally:
                     all_done = getattr(worker, '_episodes_all_loaded', False) or not batch or token != self._episode_request
                     if all_done:
@@ -2152,7 +2157,7 @@ class TwitTUIForm(
                                     break
                                 page += 1
                     except Exception as e:
-                        print(f"Unexpected error backfilling episodes for show {show_id}: {e}")
+                        _logger.warning(f"Unexpected error backfilling episodes for show {show_id}: {e}")
                     finally:
                         worker._defer_episodes_persist = False
                         _persist_worker_episodes()
@@ -2242,7 +2247,7 @@ class TwitTUIForm(
             try:
                 return worker.fetch_episodes(show_id, page=next_page)
             except Exception as e:
-                print(f"Unexpected error fetching next episode page: {e}")
+                _logger.warning(f"Unexpected error fetching next episode page: {e}")
                 return []
 
         self._call_run_network(_safe_fetch_next, done, on_finally=_release_next_wait)

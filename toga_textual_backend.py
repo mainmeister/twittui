@@ -627,7 +627,8 @@ class TextualSelectFolderScreen(_AppContextScreenMixin, ModalScreen):
             if not start_dir.is_dir():
                 start_dir = start_dir.parent if start_dir.parent.is_dir() else Path(os.getcwd())
             start_dir = start_dir.resolve()
-        except Exception:
+        except OSError:
+            _logger.debug("Falling back to cwd for TextualSelectFolderScreen", exc_info=True)
             start_dir = Path(os.getcwd())
         self.current_dir: Path = start_dir
 
@@ -730,6 +731,7 @@ class TextualSelectFolderScreen(_AppContextScreenMixin, ModalScreen):
                 raw = self.query_one("#folder_path_input", TextualInputWidget).value.strip()
                 chosen = Path(os.path.expanduser(raw)) if raw else self.current_dir
             except Exception:
+                _logger.debug("Falling back to current_dir in TextualSelectFolderScreen", exc_info=True)
                 chosen = self.current_dir
             self._finish(chosen)
 
@@ -828,10 +830,11 @@ class TextualSelection(Widget):
         self.native = TogaSelect(self)
 
     def _sync_options_to_native(self) -> None:
+        from textual.css.query import NoMatches
         from textual.widgets._select import SelectOverlay
         try:
             self.native.query_one(SelectOverlay)
-        except Exception:
+        except (NoMatches, AttributeError):
             return
         self._suppress_change = True
         try:
@@ -885,10 +888,11 @@ class TextualSelection(Widget):
 
     def select_item(self, index: int, item: Any) -> None:
         self._selected_index = index
+        from textual.css.query import NoMatches
         from textual.widgets._select import SelectOverlay
         try:
             self.native.query_one(SelectOverlay)
-        except Exception:
+        except (NoMatches, AttributeError):
             return
         self._suppress_change = True
         try:
@@ -1353,6 +1357,7 @@ class TextualTable(Widget):
                     else:
                         self.native.refresh_bindings()
                 except Exception:
+                    _logger.debug("Falling back to full table sync after remove_row failure", exc_info=True)
                     self._sync_data_to_native()
             else:
                 self._sync_data_to_native()
@@ -1607,7 +1612,7 @@ class TextualDivider(Widget):
         orientation = "vertical" if value == Direction.VERTICAL else "horizontal"
         try:
             self.native.orientation = orientation
-        except Exception:
+        except (AttributeError, TypeError, ValueError):
             self.native = Rule(orientation=orientation)
 
     def rehint(self) -> None:
@@ -1719,7 +1724,7 @@ class TextualPasswordInput(Widget):
         try:
             from toga_textual.widgets.textinput import TogaInput
             self.native = TogaInput(self, password=True)
-        except Exception:
+        except (ImportError, AttributeError):
             from textual.widgets import Input as TextualInput
             self.native = TextualInput(password=True)
 
@@ -1783,7 +1788,7 @@ class TextualSwitch(Widget):
         try:
             from toga_textual.widgets.switch import TogaSwitch
             self.native_switch = TogaSwitch(self)
-        except Exception:
+        except (ImportError, AttributeError):
             from textual.widgets import Switch as BaseSwitch
             self.native_switch = BaseSwitch()
 
@@ -2386,6 +2391,7 @@ def patch_toga_textual() -> None:
                     else:
                         orig_set_app(self, app)
                 except Exception:
+                    _logger.debug("Fallback to app.native.install_screen in safe_set_app", exc_info=True)
                     try:
                         app.native.install_screen(self.native, name=self.interface.id)
                     except Exception:
@@ -2402,6 +2408,7 @@ def patch_toga_textual() -> None:
                 try:
                     orig_mount(self, parent, before)
                 except Exception:
+                    _logger.debug("Fallback child install in safe_mount", exc_info=True)
                     for child in getattr(self.interface, 'children', []):
                         try:
                             child._impl.install(parent=self)
@@ -2424,7 +2431,7 @@ def patch_toga_textual() -> None:
             def custom_getattr(self: Any, name: str) -> Any:
                 try:
                     backend = self.backend
-                except Exception:
+                except AttributeError:
                     backend = os.environ.get('TOGA_BACKEND', '')
                 if backend in ('toga_textual', 'textual'):
                     if name in TEXTUAL_WIDGET_IMPLEMENTATIONS:

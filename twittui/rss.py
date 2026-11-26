@@ -10,8 +10,7 @@ import urllib.parse
 
 import requests
 
-from twittui._compat import quiet_print as print
-from twittui.logging_config import get_logger
+from twittui.logging_config import get_logger, safe_url_for_log
 from twittui.media import is_safe_http_url, safe_xml_fromstring
 from twittui.shows import KNOWN_SHOW_FEEDS, MEMBERFUL_HOST_FEEDS, MEMBERFUL_SHOW_FEEDS
 
@@ -71,7 +70,7 @@ class RssMixin:
                         try:
                             dt = email.utils.parsedate_to_datetime(pub_str)
                             date_str = dt.strftime('%Y-%m-%d')
-                        except Exception:
+                        except (ValueError, TypeError, OverflowError):
                             date_str = pub_str[:10]
 
                     title_str = title_elem.text.strip() if title_elem is not None and title_elem.text else ''
@@ -113,7 +112,10 @@ class RssMixin:
                 self._memberful_feeds_cache[fid_str] = items
                 return items
         except Exception as e:
-            print(f"Error fetching Memberful RSS feed {feed_id}: {e}")
+            _logger.warning(
+                "Error fetching Memberful RSS feed %s at %s (%s)",
+                feed_id, safe_url_for_log(feed_url), type(e).__name__,
+            )
 
         return []
 
@@ -225,7 +227,7 @@ class RssMixin:
                             try:
                                 dt = email.utils.parsedate_to_datetime(pub_str)
                                 date_str = dt.strftime('%Y-%m-%d')
-                            except Exception:
+                            except (ValueError, TypeError, OverflowError):
                                 date_str = pub_str[:10]
 
                         title_str = title_elem.text.strip() if title_elem is not None and title_elem.text else ''
@@ -265,7 +267,7 @@ class RssMixin:
                     if items:
                         break
             except Exception as e:
-                print(f"Error fetching show feed {feed_file}: {e}")
+                _logger.warning(f"Error fetching show feed {feed_file}: {e}")
 
         if cache_lock is not None:
             with cache_lock:
@@ -332,7 +334,7 @@ class RssMixin:
                     self._save_to_persistent_cache('media_webpage', f"{clean_path_or_url.strip()}|||{1 if audio_only else 0}", res)
                 return res
         except Exception as e:
-            print(f"Error scraping episode webpage {url}: {e}")
+            _logger.warning("Error scraping episode webpage %s (%s)", safe_url_for_log(url), type(e).__name__)
 
         return None
 

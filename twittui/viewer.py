@@ -27,10 +27,9 @@ from twittui._compat import (
     PROJECT_ROOT,
     _is_textual_tui_running,
     compat_attr,
-    quiet_print as print,
 )
 from twittui.config import TWIT_API_KEY_URL, TWITTUI_HOMEPAGE_URL
-from twittui.logging_config import get_logger
+from twittui.logging_config import get_logger, safe_url_for_log
 from twittui.media import is_safe_http_url, safe_xml_fromstring
 
 _logger = get_logger("viewer")
@@ -554,7 +553,7 @@ class ViewerMixin:
                 server_thread = threading.Thread(target=self._local_server.serve_forever, daemon=True)
                 server_thread.start()
             except Exception as e:
-                print(f"Warning: Could not start local HTTP server ({e})")
+                _logger.warning(f"Warning: Could not start local HTTP server ({e})")
                 self._local_server = None
         return self._local_server
 
@@ -626,7 +625,7 @@ class ViewerMixin:
 
         if not doc_path:
             err_msg = f"Could not locate {filename} file in the application directory."
-            print(f"Error: {err_msg}")
+            _logger.warning(f"Error: {err_msg}")
             if hasattr(self, 'main_window') and self.main_window:
                 self._show_dialog_threadsafe("error", "Documentation Not Found", err_msg, host_win=self.main_window)
             return
@@ -636,7 +635,7 @@ class ViewerMixin:
                 md_text = f.read()
         except Exception as e:
             err_msg = f"Failed to read {filename}: {e}"
-            print(f"Error: {err_msg}")
+            _logger.warning(f"Error: {err_msg}")
             if hasattr(self, 'main_window') and self.main_window:
                 self._show_dialog_threadsafe("error", "Read Error", err_msg, host_win=self.main_window)
             return
@@ -652,7 +651,7 @@ class ViewerMixin:
             help_window.show()
             return
         except Exception as webview_err:
-            print(f"In-app WebView viewer unavailable ({webview_err}), falling back to system browser.")
+            _logger.info(f"In-app WebView viewer unavailable ({webview_err}), falling back to system browser.")
 
         # Fallback Tier: System default web browser
         try:
@@ -660,7 +659,7 @@ class ViewerMixin:
             self.open_html_in_browser(styled_html, page_name=f"{doc_slug}.html")
         except Exception as browser_err:
             err_msg = f"Unable to display documentation: {browser_err}"
-            print(f"Error: {err_msg}")
+            _logger.warning(f"Error: {err_msg}")
             if hasattr(self, 'main_window') and self.main_window:
                 self._show_dialog_threadsafe("error", "Documentation Viewer Error", err_msg, host_win=self.main_window)
 
@@ -683,7 +682,7 @@ class ViewerMixin:
             self._open_browser_quietly(target_url)
         except Exception as e:
             err_msg = f"Failed to open project homepage URL: {e}"
-            print(f"Error: {err_msg}")
+            _logger.warning(f"Error: {err_msg}")
             self._show_dialog_threadsafe("error", "Browser Error", err_msg)
 
     def on_open_homepage(self, widget=None) -> None:
@@ -704,7 +703,7 @@ class ViewerMixin:
             self._open_browser_quietly(TWIT_API_KEY_URL)
         except Exception as e:
             err_msg = f"Failed to open API key registration URL: {e}"
-            print(f"Error: {err_msg}")
+            _logger.warning(f"Error: {err_msg}")
             self._show_dialog_threadsafe("error", "Browser Error", err_msg)
 
     def on_open_api_key_url(self, widget=None) -> None:
@@ -803,7 +802,7 @@ class ViewerMixin:
 </body>
 </html>"""
             except Exception as xslt_err:
-                print(f"XSLT rendering fallback ({xslt_err}), using Python RSS renderer.")
+                _logger.info(f"XSLT rendering fallback ({xslt_err}), using Python RSS renderer.")
 
         # ElementTree parser fallback
         try:
@@ -941,7 +940,7 @@ class ViewerMixin:
 </body>
 </html>"""
         except Exception as parse_err:
-            print(f"Error parsing RSS XML: {parse_err}")
+            _logger.warning(f"Error parsing RSS XML: {parse_err}")
             return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>RSS Feed Error</title><style>{css_content}</style></head>
 <body><div class="container"><h1>Unable to parse RSS feed</h1><p>{html.escape(str(parse_err))}</p></div></body></html>"""
@@ -957,15 +956,18 @@ class ViewerMixin:
                 self.open_html_in_browser(styled_html, page_name="club-twit-feed.html")
                 return
             else:
-                print(f"Warning: HTTP {resp.status_code} while fetching Club TWiT feed, opening direct URL.")
+                _logger.warning(f"Warning: HTTP {resp.status_code} while fetching Club TWiT feed, opening direct URL.")
         except Exception as e:
-            print(f"Error fetching Club TWiT RSS feed ({e}), opening direct URL.")
+            _logger.warning(
+                "Error fetching Club TWiT RSS feed at %s (%s), opening direct URL.",
+                safe_url_for_log(target_url), type(e).__name__,
+            )
 
         try:
             self._open_browser_quietly(target_url)
         except Exception as e:
             err_msg = f"Failed to open Club TWiT URL: {e}"
-            print(f"Error: {err_msg}")
+            _logger.warning("Could not open Club TWiT URL in browser (%s)", type(e).__name__)
             self._show_dialog_threadsafe("error", "Browser Error", err_msg)
 
     def on_show_club_url_press(self, widget=None) -> None:
@@ -982,7 +984,7 @@ class ViewerMixin:
         try:
             os.makedirs(target_dir, exist_ok=True)
         except Exception as e:
-            print(f"Could not create destination directory '{target_dir}': {e}")
+            _logger.warning(f"Could not create destination directory '{target_dir}': {e}")
 
         try:
             if sys.platform == 'win32':
@@ -1014,13 +1016,13 @@ class ViewerMixin:
                     subprocess.Popen(['xdg-open', target_dir])
                 return True
         except Exception as e:
-            print(f"Failed to launch file manager for '{target_dir}': {e}")
+            _logger.warning(f"Failed to launch file manager for '{target_dir}': {e}")
             try:
                 file_uri = pathlib.Path(target_dir).as_uri()
                 self._open_browser_quietly(file_uri)
                 return True
             except Exception as e2:
-                print(f"Fallback to browser for folder URI failed: {e2}")
+                _logger.warning(f"Fallback to browser for folder URI failed: {e2}")
                 self._show_dialog_threadsafe(
                     "error",
                     "File Manager Error",
@@ -1044,5 +1046,8 @@ class ViewerMixin:
             self._open_browser_quietly(target_url)
         except Exception as e:
             err_msg = f"Failed to open URL in browser: {e}"
-            print(f"Error: {err_msg}")
+            _logger.warning(
+                "Could not open URL in browser %s (%s)",
+                safe_url_for_log(target_url), type(e).__name__,
+            )
             self._show_dialog_threadsafe("error", "Browser Error", err_msg)

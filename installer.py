@@ -60,8 +60,9 @@ def check_python_shared_library(python_executable: str | None = None) -> tuple[b
         if output == "0":
             return False, format_shared_library_error(py_exec)
         return True, ""
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         # If unable to probe, allow build to proceed and let PyInstaller's output be handled
+        _logger.debug("Unable to probe Py_ENABLE_SHARED for %s", py_exec, exc_info=True)
         return True, ""
 
 
@@ -307,6 +308,7 @@ def build_executable(
             from generate_icon import generate_all_icons
             generate_all_icons(resources_dir)
         except Exception as e:
+            _logger.warning("Could not auto-generate icon assets: %s", e, exc_info=True)
             print(f"Warning: Could not auto-generate icon assets: {e}", file=sys.stderr)
 
     if os.path.isdir(resources_dir):
@@ -399,7 +401,8 @@ def clean_build_artifacts(
                 shutil.rmtree(build_dir, ignore_errors=False)
                 removed_items.append(build_dir)
                 print(f"Removed build directory: '{build_dir}'")
-            except Exception as e:
+            except OSError as e:
+                _logger.warning("Could not remove build directory '%s': %s", build_dir, e, exc_info=True)
                 print(f"Warning: Could not remove build directory '{build_dir}': {e}", file=sys.stderr)
 
     # 2. Clean dist directory (the installable binary folder)
@@ -410,7 +413,8 @@ def clean_build_artifacts(
                 shutil.rmtree(dist_dir, ignore_errors=False)
                 removed_items.append(dist_dir)
                 print(f"Removed distribution directory: '{dist_dir}'")
-            except Exception as e:
+            except OSError as e:
+                _logger.warning("Could not remove dist directory '%s': %s", dist_dir, e, exc_info=True)
                 print(f"Warning: Could not remove dist directory '{dist_dir}': {e}", file=sys.stderr)
 
     # 3. Clean .spec files
@@ -424,7 +428,7 @@ def clean_build_artifacts(
                 if f.endswith(".spec"):
                     spec_candidates.append(os.path.join(root, f))
         except OSError:
-            pass
+            _logger.debug("Could not list project root '%s' for .spec cleanup", root, exc_info=True)
 
         for spec_file in set(spec_candidates):
             if os.path.isfile(spec_file):
@@ -432,7 +436,8 @@ def clean_build_artifacts(
                     os.remove(spec_file)
                     removed_items.append(spec_file)
                     print(f"Removed PyInstaller spec file: '{spec_file}'")
-                except Exception as e:
+                except OSError as e:
+                    _logger.warning("Could not remove spec file '%s': %s", spec_file, e, exc_info=True)
                     print(f"Warning: Could not remove spec file '{spec_file}': {e}", file=sys.stderr)
 
     # 4. Optionally uninstall PyInstaller package
@@ -449,8 +454,10 @@ def clean_build_artifacts(
             removed_items.append("pyinstaller (pip package)")
             print("Successfully uninstalled PyInstaller package.")
         except subprocess.CalledProcessError as e:
+            _logger.warning("Failed to uninstall PyInstaller: %s", e.stderr or e.stdout or e)
             print(f"Warning: Failed to uninstall PyInstaller: {e.stderr or e.stdout or e}", file=sys.stderr)
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError) as e:
+            _logger.warning("Error during PyInstaller uninstallation: %s", e, exc_info=True)
             print(f"Warning: Error during PyInstaller uninstallation: {e}", file=sys.stderr)
 
     if removed_items:

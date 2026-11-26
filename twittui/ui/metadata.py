@@ -13,7 +13,6 @@ from toga.style import Pack
 from toga.style.pack import COLUMN, ROW
 
 from tiered_search import find_match_context
-from twittui._compat import quiet_print as print
 from twittui.logging_config import get_logger
 from twittui.shows import TRANSCRIPT_SLUG_MAP
 
@@ -701,22 +700,24 @@ class MetadataMixin:
                     try:
                         from gi.repository import GLib
                         GLib.idle_add(scroll_desc_callback)
-                    except Exception:
+                    except (ImportError, AttributeError, RuntimeError):
+                        _logger.debug("GLib.idle_add unavailable; scrolling metadata description synchronously", exc_info=True)
                         scroll_desc_callback()
 
             except Exception as e:
-                print(f"Error displaying custom episode metadata window ({e}), falling back to info_dialog.")
+                _logger.warning(f"Error displaying custom episode metadata window ({e}), falling back to info_dialog.")
                 try:
                     if hasattr(self, 'main_window') and self.main_window:
                         self._present_window_dialog(self.main_window, "info", title, message, on_result=_on_closed)
                 except Exception as inner_e:
-                    print(f"Error displaying fallback info_dialog: {inner_e}")
+                    _logger.warning(f"Error displaying fallback info_dialog: {inner_e}")
                     _on_closed()
 
         if hasattr(self, 'loop') and self.loop and self.loop.is_running():
             try:
                 self.loop.call_soon_threadsafe(_show)
-            except Exception:
+            except RuntimeError:
+                _logger.debug("Event loop unavailable; showing episode metadata directly", exc_info=True)
                 _show()
         else:
             _show()
@@ -757,7 +758,7 @@ class MetadataMixin:
                 row_item = self.episodes_list.data[row_idx]
                 self.show_episode_metadata_dialog(row_item)
             except Exception as e:
-                print(f"Error displaying episode metadata dialog: {e}")
+                _logger.warning(f"Error displaying episode metadata dialog: {e}")
 
         if hasattr(self, 'loop') and self.loop and self.loop.is_running():
             try:
@@ -839,6 +840,7 @@ class MetadataMixin:
                 native_table.connect('leave-notify-event', self._on_table_leave_notify)
                 self._table_hover_connected = True
             except Exception:
+                _logger.debug("Gdk EventMask setup unavailable; connecting GTK hover signals directly", exc_info=True)
                 try:
                     native_table.connect('motion-notify-event', self._on_table_motion_notify)
                     native_table.connect('leave-notify-event', self._on_table_leave_notify)

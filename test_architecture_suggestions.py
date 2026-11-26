@@ -22,7 +22,7 @@ import twittui
 import twittui_form
 from twittui._compat import PACKAGE_ROOT
 from twittui.cache import SHOW_DATE_BOUNDS_TTL_SECONDS
-from twittui.logging_config import configure_logging, get_logger, reset_logging
+from twittui.logging_config import configure_logging, get_logger, reset_logging, safe_url_for_log
 from twittui.shows import (
     KNOWN_SHOW_FEEDS,
     MEMBERFUL_SHOW_FEEDS,
@@ -354,6 +354,32 @@ class TestArchitectureSuggestions(unittest.TestCase):
             content = pathlib.Path(log_path).read_text(encoding="utf-8")
             self.assertIn("DEBUG [twittui.test_sub] structured diagnostic marker 42", content)
 
+    def test_signed_url_details_are_redacted_from_logs(self) -> None:
+        """URL diagnostics retain the host but never persist credentials, paths, or query values."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = os.path.join(tmp_dir, "redacted.log")
+            configure_logging(log_file=log_path, level="DEBUG")
+            signed_url = "https://user:pass@example.com/private/token?auth=secret&signature=signed#fragment"
+            self.assertEqual(safe_url_for_log(signed_url), "https://example.com")
+
+            from twittui.media import resolve_stream_url
+
+            with patch("twittui.media.requests.head", side_effect=OSError(f"request failed for {signed_url}")):
+                resolve_stream_url(signed_url)
+            form = TwitTUIForm("LogRedaction", "org.twit.log-redaction", cache_db_path=":memory:")
+            with patch.object(form, "get_club_twit_rss_url", return_value=signed_url), \
+                 patch("twittui.rss.requests.get", side_effect=OSError(f"request failed for {signed_url}")):
+                form.fetch_memberful_feed_items(9041)
+            form._open_browser_quietly = MagicMock(side_effect=OSError(f"browser failed for {signed_url}"))
+            form._show_dialog_threadsafe = MagicMock()
+            form.open_url_in_browser(signed_url)
+            reset_logging()
+
+            content = pathlib.Path(log_path).read_text(encoding="utf-8")
+            self.assertIn("https://example.com", content)
+            for sensitive_value in ("user", "pass", "/private/token", "secret", "signed", "fragment"):
+                self.assertNotIn(sensitive_value, content)
+
     def test_no_silent_broad_except_pass_handlers_remain(self) -> None:
         """AST guard ensuring no broad `except Exception: pass` silent swallowers remain in core code."""
         source_files = [
@@ -374,6 +400,93 @@ class TestArchitectureSuggestions(unittest.TestCase):
                     if is_pass and is_broad:
                         offenders.append(f"{path.name}:{node.lineno}")
         self.assertEqual(offenders, [], f"Found silent broad except-pass handlers: {offenders}")
+
+    def test_no_print_shadowing_or_unlogged_broad_exceptions(self) -> None:
+        """AST & runtime guard: zero shadowed prints in twittui/ and zero unlogged broad except handlers."""
+        import io
+        import twittui._compat as compat_mod
+
+        # 1. Verify quiet_print shadowing helper is removed from twittui._compat and twittui_form
+        self.assertFalse(hasattr(compat_mod, "quiet_print"))
+        self.assertNotIn("print", twittui_form.__dict__)
+
+        # 2. Verify no file in twittui/ or twittui_form.py shadows `print` or calls bare `print(...)`
+        pkg_files = [
+            PROJECT_ROOT / "twittui_form.py",
+            *sorted((PROJECT_ROOT / "twittui").rglob("*.py")),
+        ]
+        print_offenders: list[str] = []
+        for path in pkg_files:
+            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    for alias in node.names:
+                        if (alias.asname or alias.name) == "print":
+                            print_offenders.append(f"import:{path.relative_to(PROJECT_ROOT)}:{node.lineno}")
+                elif isinstance(node, ast.FunctionDef) and node.name == "print":
+                    print_offenders.append(f"def:{path.relative_to(PROJECT_ROOT)}:{node.lineno}")
+                elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "print":
+                    print_offenders.append(f"call:{path.relative_to(PROJECT_ROOT)}:{node.lineno}")
+        self.assertEqual(print_offenders, [], f"Found shadowed or bare print() usage: {print_offenders}")
+
+        # 3. Verify every broad `except:` / `except Exception:` across all core modules has direct observability
+        core_files = [
+            PROJECT_ROOT / "twittui_form.py",
+            PROJECT_ROOT / "toga_textual_backend.py",
+            PROJECT_ROOT / "main.py",
+            PROJECT_ROOT / "tiered_search.py",
+            PROJECT_ROOT / "installer.py",
+            *sorted((PROJECT_ROOT / "twittui").rglob("*.py")),
+        ]
+
+        def _handler_has_direct_observability(handler: ast.ExceptHandler) -> bool:
+            stack = list(handler.body)
+            while stack:
+                node = stack.pop()
+                if isinstance(node, ast.ExceptHandler):
+                    continue
+                if isinstance(node, ast.Raise):
+                    return True
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    if isinstance(node.func.value, ast.Name) and node.func.value.id in ("_logger", "logger", "logging"):
+                        return True
+                    if node.func.attr in ("error_dialog", "info_dialog", "show_error", "_present_window_dialog"):
+                        return True
+                stack.extend(ast.iter_child_nodes(node))
+            return False
+
+        unlogged_broad: list[str] = []
+        for path in core_files:
+            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ExceptHandler):
+                    is_broad = node.type is None or (
+                        isinstance(node.type, ast.Name) and node.type.id in ("Exception", "BaseException")
+                    )
+                    if is_broad and not _handler_has_direct_observability(node):
+                        unlogged_broad.append(f"{path.relative_to(PROJECT_ROOT)}:{node.lineno}")
+        self.assertEqual(unlogged_broad, [], f"Found unlogged broad exception handlers: {unlogged_broad}")
+
+        # 4. Runtime verification: module diagnostics log to --log-file without polluting stdout
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = os.path.join(tmp_dir, "diag_runtime.log")
+            configure_logging(log_file=log_path, level="DEBUG")
+            captured_out = io.StringIO()
+            with patch("sys.stdout", captured_out):
+                form = TwitTUIForm("LogRuntime", "org.twit.test")
+                with patch("twittui.config.os.makedirs", side_effect=OSError("disk read-only")):
+                    fallback_dir = form.get_app_cache_dir()
+                self.assertTrue(os.path.isdir(fallback_dir))
+                with patch("twittui.catalog.requests.get", side_effect=RuntimeError("boom")):
+                    ok, msg = form.test_api_credentials("id", "key")
+                self.assertFalse(ok)
+                self.assertIn("boom", msg)
+            reset_logging()
+
+            self.assertEqual(captured_out.getvalue(), "")
+            content = pathlib.Path(log_path).read_text(encoding="utf-8")
+            self.assertIn("Unable to create cache directory", content)
+            self.assertIn("Error testing TWiT API credentials: boom", content)
 
     def test_packaging_hygiene_and_ci_workflow(self) -> None:
         """Verify unified pyproject.toml, setup.py, .gitignore, installer.py, and CI workflow."""

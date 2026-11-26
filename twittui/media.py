@@ -13,12 +13,11 @@ import xml.etree.ElementTree as ET
 
 import requests
 
-from twittui.logging_config import get_logger
+from twittui.logging_config import get_logger, safe_url_for_log
 import asyncio
 import toga
 from toga.style import Pack
 from toga.style.pack import COLUMN
-from twittui._compat import quiet_print as print
 from twittui.shows import KNOWN_SHOW_FEEDS, MEMBERFUL_HOST_FEEDS, MEMBERFUL_SHOW_FEEDS
 
 try:
@@ -79,7 +78,10 @@ def resolve_stream_url(media_url: str, timeout: float = 10.0) -> str:
             if get_resp.status_code < 400 and get_resp.url:
                 return get_resp.url
     except Exception as exc:
-        _logger.debug("Could not resolve redirects for stream URL %s: %s", clean_url, exc)
+        _logger.debug(
+            "Could not resolve redirects for stream URL %s (%s)",
+            safe_url_for_log(clean_url), type(exc).__name__,
+        )
 
     # Fallback: unwrap known podcast tracking / redirect prefixes when unreachable
     try:
@@ -100,7 +102,7 @@ def resolve_stream_url(media_url: str, timeout: float = 10.0) -> str:
             if match:
                 return f"https://{match.group(1)}"
     except re.error:
-        _logger.debug("Regex error while unwrapping tracking URL %s", clean_url, exc_info=True)
+        _logger.debug("Regex error while unwrapping tracking URL %s", safe_url_for_log(clean_url), exc_info=True)
 
     return clean_url
 
@@ -343,7 +345,7 @@ class MediaMixin:
                     m = int(parts[2])
                     s = int(float(parts[3]))
                     return f"{h:02d}:{m:02d}:{s:02d}"
-            except Exception:
+            except (ValueError, TypeError):
                 return s_val
 
         return s_val
@@ -414,7 +416,7 @@ class MediaMixin:
             else:
                 gb = num / (1024.0 * 1024.0 * 1024.0)
                 return f"{gb:.2f} GB"
-        except Exception:
+        except (ValueError, TypeError):
             return ''
 
     def extract_size(self, episode_dict: dict, audio_only: bool = None) -> int | str | None:
@@ -494,7 +496,8 @@ class MediaMixin:
                 if header.startswith((b'<!doctype', b'<html', b'<?xml', b'<head', b'<body', b'<div', b'<table', b'<![cdata[')):
                     return False
             return True
-        except Exception:
+        except OSError:
+            _logger.debug("Could not inspect media file %s", file_path, exc_info=True)
             return False
 
     def format_stream_command(self, streamer_template: str, url: str) -> str:
@@ -502,7 +505,7 @@ class MediaMixin:
         try:
             args = build_stream_args(streamer_template, url)
             return shlex.join(args)
-        except Exception:
+        except (ValueError, TypeError):
             template = (streamer_template or 'env LC_ALL=C vlc %f').strip()
             placeholders = ['{url}', '{URL}', '{stream_url}', '{media_url}', '{file}', '%f', '%s', '%u', '{}']
             for ph in placeholders:
@@ -836,7 +839,7 @@ class MediaMixin:
             if size_val is not None:
                 try:
                     size_bytes = int(size_val)
-                except Exception:
+                except (ValueError, TypeError):
                     size_bytes = 0
 
             size_formatted = self.format_file_size(size_bytes) if size_bytes > 0 else ""
@@ -1017,7 +1020,7 @@ class MediaMixin:
                     return await self.main_window.dialog(dialog)
                 return await dialog._show(None)
             except Exception as e:
-                print(f"Error presenting Textual resolution choice dialog: {e}")
+                _logger.warning(f"Error presenting Textual resolution choice dialog: {e}")
                 return resolutions[0]
 
         # 2. Universal GUI Modal Window Fallback (for GTK / Cocoa / WinForms / etc.)
@@ -1069,5 +1072,5 @@ class MediaMixin:
 
             return await choice_future
         except Exception as e:
-            print(f"Error presenting resolution choice dialog: {e}")
+            _logger.warning(f"Error presenting resolution choice dialog: {e}")
             return resolutions[0]
