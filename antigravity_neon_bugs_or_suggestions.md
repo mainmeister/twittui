@@ -335,7 +335,8 @@ TwitTUI is an ambitious dual-backend (GTK 3 + Textual TUI) TWiT.tv podcast brows
 - **Recommended Fix**:
   Update `on_stream_press(self, widget=None, target_row=None)` and forward `row` from `on_episode_activate`, streaming `target_row` whenever explicitly provided.
 - **Applied Fix & Verification**:
-  Updated `on_stream_press()` and `on_episode_activate()` in `twittui_form.py` to stream `target_row` directly when activated. Verified by `test_medium_fixes.py:test_16_and_17_activate_streams_clicked_row_resolves_once_and_silences_browser_fds`.
+  1. **Direct Activated-Row Streaming & Rapid-Activation Superseding (`twittui_form.py:5630-5662`)**: Updated `on_stream_press(self, widget=None, target_row=None)` and `on_episode_activate(self, widget, row, **kwargs)` so activating a row (`Enter` / click via `TogaDataTable.on_data_table_row_selected` in `toga_textual_backend.py:1130-1136`) forwards `target_row=row` and streams the activated row directly rather than `episodes_list.selection[0]`. Added a monotonic `self._stream_request` token inside `stale()` so rapid overlapping activations supersede earlier in-flight stream resolutions instead of launching duplicate media players.
+  2. **Verification**: Verified end-to-end on a live headless Textual `TogaDataTable` (`Space` mark on row 0 → `Down` → `Enter` on row 2 streams row 2 while `selection` retains row 0) and on rapid overlapping activations in `test_episode_activation.py:15-134`, alongside `test_medium_fixes.py:875-900` (`test_16_and_17_activate_streams_clicked_row_resolves_once_and_silences_browser_fds`).
 
 ---
 
@@ -565,10 +566,10 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 | Executive Summary Section | Items | Status | Regression Test Suite |
 | :--- | :---: | :---: | :--- |
 | **1. Critical / High** | 7 (#1–#7) | Complete | `test_critical_fixes.py` (7 tests) |
-| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (17 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
+| **2. Medium** | 13 (#8–#20) | Complete | `test_double_metaphone.py` (8 tests), `test_medium_fixes.py` (17 tests), `test_episode_activation.py` (3 tests), updated `test_install.py` / `test_snap.py` / `test_security.py` / `test_episode_search.py` / `test_tooltips.py` |
 | **3. Low / Edge Cases** | 3 (#21–#23) | Complete | `test_low_fixes.py` (4 tests) |
 | **4. Architectural & Quality Suggestions** | 7 (#1–#7) | Complete | `test_architecture_suggestions.py` (10 tests) |
-| **Total Test Suite** | **30 items** | **309 / 309 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
+| **Total Test Suite** | **30 items** | **311 / 311 Passing** | `python -m unittest discover -s . -p "test_*.py" -v` (25 modules, `.env` untouched) |
 
 ---
 
@@ -629,7 +630,7 @@ All **23 confirmed bugs** and **7 architectural/quality suggestions** catalogued
 15. **File Descriptor Double-Close & TOCTOU Permissions in `write_restricted_file()` (#15)**:
     - Hardened `write_restricted_file()` (`twittui/config.py:52-79`, re-exported from `twittui_form.py`) with `fd_owned` tracking and `finally:` cleanup so `os.close(fd)` is never called after `os.fdopen()` assumes ownership yet always closes raw FDs if `os.fdopen()` fails or a `BaseException` occurs, tightened permissions directly on the open descriptor via `os.fchmod(fd, 0o600)`, and added `os.O_CLOEXEC` (also applied to `_create_restricted_log_file()` in `twittui/logging_config.py:48-51`), verified by `test_medium_fixes.py:808-868` (`test_15`, `test_15b`).
 16. **TUI Row Activation Streaming Wrong Episode Under Multi-Select (#16)**:
-    - Updated `on_stream_press(self, widget=None, target_row=None)` and forwarded the explicitly activated `row` from `on_episode_activate()` so pressing `Enter` or double-clicking always streams the targeted row even when other rows are marked (`☑`).
+    - Updated `on_stream_press(self, widget=None, target_row=None)` and `on_episode_activate(self, widget, row, **kwargs)` (`twittui_form.py:5630-5662`) to forward and stream the explicitly activated `row` (`toga_textual_backend.py:1130-1136`) even when other rows are marked (`☑`), and added monotonic `self._stream_request` superseding in `stale()` so rapid overlapping activations launch only the latest episode; verified end-to-end under headless Textual in `test_episode_activation.py:15-134` and `test_medium_fixes.py:875-900`.
 17. **Double Redirect Resolution & Unsilenced Browser Launches in TUI Mode (#17)**:
     - Added `resolve: bool = True` to `launch_stream_safe()` and passed `resolve=False` from `on_stream_press()` after pre-resolution.
     - Routed YouTube streaming through `_open_browser_quietly()`, which in live POSIX Textual TUI mode spawns `xdg-open`/`open` directly with `stdin`/`stdout`/`stderr` bound to `subprocess.DEVNULL` and `start_new_session=True` instead of mutating process-global `sys.stdout`/`sys.stderr`.

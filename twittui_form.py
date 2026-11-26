@@ -5647,8 +5647,12 @@ class TwitTUIForm(toga.App):
             is_audio = self.is_audio_only()
             worker = self._network_snapshot()
             token = getattr(self, '_episode_request', 0)
+            stream_token = getattr(self, '_stream_request', 0) + 1
+            self._stream_request = stream_token
 
             def stale():
+                if stream_token != getattr(self, '_stream_request', 0):
+                    return True
                 if target_row is not None:
                     return token != getattr(self, '_episode_request', 0)
                 current = self.episodes_list.selection
