@@ -1,7 +1,8 @@
 import os
+import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault('TOGA_BACKEND', 'toga_textual')
 
@@ -106,21 +107,23 @@ class TestEpisodeSearch(unittest.TestCase):
         os.environ['TWITPHONETICSEARCH'] = '1'
 
     def test_preferences_search_toggles(self):
-        form = TwitTUIForm('TestApp', 'org.twit.test')
-        self.assertTrue(form.is_fuzzy_search_enabled())
-        self.assertTrue(form.is_phonetic_search_enabled())
+        with tempfile.TemporaryDirectory() as tmp_dir, \
+             patch.dict(os.environ, {'SNAP_USER_DATA': tmp_dir, 'TWITFUZZYSEARCH': '1', 'TWITPHONETICSEARCH': '1'}, clear=False):
+            form = TwitTUIForm('TestApp', 'org.twit.test')
+            self.assertTrue(form.is_fuzzy_search_enabled())
+            self.assertTrue(form.is_phonetic_search_enabled())
 
-        form.on_fuzzy_search_toggle()
-        self.assertFalse(form.is_fuzzy_search_enabled())
+            form.on_fuzzy_search_toggle()
+            self.assertFalse(form.is_fuzzy_search_enabled())
 
-        form.on_fuzzy_search_toggle()
-        self.assertTrue(form.is_fuzzy_search_enabled())
+            form.on_fuzzy_search_toggle()
+            self.assertTrue(form.is_fuzzy_search_enabled())
 
-        form.on_phonetic_search_toggle()
-        self.assertFalse(form.is_phonetic_search_enabled())
+            form.on_phonetic_search_toggle()
+            self.assertFalse(form.is_phonetic_search_enabled())
 
-        form.on_phonetic_search_toggle()
-        self.assertTrue(form.is_phonetic_search_enabled())
+            form.on_phonetic_search_toggle()
+            self.assertTrue(form.is_phonetic_search_enabled())
 
     def test_search_by_length_and_size(self):
         form = TwitTUIForm('TestApp', 'org.twit.test')

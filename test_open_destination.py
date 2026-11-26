@@ -69,14 +69,20 @@ class TestOpenDestinationFolder(unittest.TestCase):
                         self.assertTrue(called_uri.startswith('file://'))
 
     def test_on_open_destination_press_triggers_thread(self) -> None:
-        """Verify on_open_destination_press starts a background thread."""
-        with patch.object(self.form, 'open_destination_folder') as mock_open:
-            with patch('threading.Thread') as mock_thread_cls:
-                mock_thread = MagicMock()
-                mock_thread_cls.return_value = mock_thread
-                self.form.on_open_destination_press()
-                mock_thread_cls.assert_called_once_with(target=self.form.open_destination_folder, daemon=True)
-                mock_thread.start.assert_called_once()
+        """Verify on_open_destination_press captures destination on UI thread and starts a background thread."""
+        with patch.object(self.form, 'get_destination_folder', return_value='/tmp/twit_downloads') as mock_get_dest, \
+             patch.object(self.form, 'open_destination_folder') as mock_open, \
+             patch('threading.Thread') as mock_thread_cls:
+            mock_thread = MagicMock()
+            mock_thread_cls.return_value = mock_thread
+            self.form.on_open_destination_press()
+            mock_get_dest.assert_called_once()
+            mock_thread_cls.assert_called_once_with(
+                target=self.form.open_destination_folder,
+                args=('/tmp/twit_downloads',),
+                daemon=True,
+            )
+            mock_thread.start.assert_called_once()
 
 
 if __name__ == "__main__":

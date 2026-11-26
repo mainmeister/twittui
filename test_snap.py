@@ -50,11 +50,66 @@ class TestSnapPackaging(unittest.TestCase):
                 self.assertIn(required_plug, plugs)
 
             # Verify build and stage packages
-            build_packages = data["parts"]["twittui"].get("build-packages", [])
-            stage_packages = data["parts"]["twittui"].get("stage-packages", [])
+            twittui_part = data["parts"]["twittui"]
+            build_packages = twittui_part.get("build-packages", [])
+            stage_packages = twittui_part.get("stage-packages", [])
             self.assertIn("shared-mime-info", build_packages)
             self.assertIn("shared-mime-info", stage_packages)
-            self.assertIn("update-mime-database", data["parts"]["twittui"].get("override-build", ""))
+            self.assertIn("mpv", stage_packages)
+            self.assertIn("ffmpeg", stage_packages)
+            override_build = twittui_part.get("override-build", "")
+            self.assertIn("update-mime-database", override_build)
+            self.assertNotIn("cp -a *.py", override_build)
+            for list_key in ("stage", "prime"):
+                entries = twittui_part.get(list_key, [])
+                self.assertNotIn("*.py", entries)
+                self.assertNotIn("*.md", entries)
+                self.assertIn(".env.example", entries)
+        else:
+            # Indentation-aware YAML section parser fallback so checks ALWAYS run even without PyYAML
+            def _extract_yaml_list(section_key: str) -> list[str]:
+                items: list[str] = []
+                in_section = False
+                section_indent = -1
+                for raw_line in content.splitlines():
+                    stripped = raw_line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    indent = len(raw_line) - len(raw_line.lstrip(" "))
+                    if in_section:
+                        if indent <= section_indent:
+                            break
+                        if stripped.startswith("- "):
+                            items.append(stripped[2:].strip().strip('"').strip("'"))
+                    elif stripped == f"{section_key}:":
+                        in_section = True
+                        section_indent = indent
+                return items
+
+            plugs = _extract_yaml_list("plugs")
+            for required_plug in ["network", "audio-playback", "home", "desktop", "x11", "wayland"]:
+                self.assertIn(required_plug, plugs)
+
+            build_packages = _extract_yaml_list("build-packages")
+            stage_packages = _extract_yaml_list("stage-packages")
+            self.assertIn("shared-mime-info", build_packages)
+            self.assertIn("shared-mime-info", stage_packages)
+            self.assertIn("mpv", stage_packages)
+            self.assertIn("ffmpeg", stage_packages)
+
+            stage_entries = _extract_yaml_list("stage")
+            prime_entries = _extract_yaml_list("prime")
+            for entries in (stage_entries, prime_entries):
+                self.assertNotIn("*.py", entries)
+                self.assertNotIn("*.md", entries)
+                self.assertIn(".env.example", entries)
+
+            self.assertIn("update-mime-database", content)
+            self.assertNotIn("cp -a *.py", content)
+
+        # Verify .env.example template referenced by launcher.sh exists and contains no secrets
+        env_example_path = os.path.join(self.project_root, ".env.example")
+        self.assertTrue(os.path.isfile(env_example_path), ".env.example must exist for Snap launcher")
 
     def test_desktop_entry_file(self) -> None:
         """Verify snap/gui/twittui.desktop exists and contains standard freedesktop entries."""

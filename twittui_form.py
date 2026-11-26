@@ -9,6 +9,7 @@ import os
 import sys
 import shutil
 import glob
+import inspect
 import re
 import secrets
 import shlex
@@ -16,6 +17,7 @@ import subprocess
 import threading
 import time
 from collections import deque
+from collections.abc import ItemsView, KeysView, Mapping, ValuesView
 from typing import Any
 from types import SimpleNamespace
 import urllib.parse
@@ -26,6 +28,7 @@ import tempfile
 import pathlib
 import webbrowser
 import html
+import html.parser
 import requests
 import hashlib
 import http.server
@@ -134,15 +137,84 @@ class _LazySQLiteEpisodesCache(dict):
             self._load_key(key)
         return super().get(key, default)
 
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        if not super().__contains__(key) and isinstance(key, str) and key in self._unloaded_keys:
+            self._load_key(key)
+        if super().__contains__(key):
+            return super().__getitem__(key)
+        self[key] = default
+        return default
+
     def __setitem__(self, key: str, value: Any) -> None:
         if isinstance(key, str):
             self._unloaded_keys.discard(key)
         super().__setitem__(key, value)
 
+    def __delitem__(self, key: str) -> None:
+        was_unloaded = isinstance(key, str) and key in self._unloaded_keys
+        if was_unloaded:
+            self._unloaded_keys.discard(key)
+        if super().__contains__(key):
+            super().__delitem__(key)
+        elif not was_unloaded:
+            raise KeyError(key)
+
     def pop(self, key: str, *args: Any) -> Any:
         if not super().__contains__(key) and isinstance(key, str) and key in self._unloaded_keys:
             self._load_key(key)
         return super().pop(key, *args)
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        if len(args) > 1:
+            raise TypeError(f"update expected at most 1 arguments, got {len(args)}")
+        if args:
+            other = args[0]
+            if isinstance(other, _LazySQLiteEpisodesCache):
+                # Merge already-loaded entries without triggering eager SQLite loads on unloaded keys
+                for k, v in dict.items(other):
+                    self[k] = v
+                for k in other._unloaded_keys:
+                    if not super().__contains__(k):
+                        self._unloaded_keys.add(k)
+            elif isinstance(other, Mapping):
+                for k in other:
+                    self[k] = other[k]
+            elif hasattr(other, "keys"):
+                for k in other.keys():
+                    self[k] = other[k]
+            else:
+                for k, v in other:
+                    self[k] = v
+        for k, v in kwargs.items():
+            self[k] = v
+
+    def __iter__(self) -> Any:
+        loaded = list(dict.keys(self))
+        yield from loaded
+        loaded_set = set(loaded)
+        for k in list(self._unloaded_keys):
+            if k not in loaded_set:
+                yield k
+
+    def keys(self) -> Any:
+        return KeysView(self)
+
+    def values(self) -> Any:
+        return ValuesView(self)
+
+    def items(self) -> Any:
+        return ItemsView(self)
+
+    def __or__(self, other: Any) -> Any:
+        if not isinstance(other, dict):
+            return NotImplemented
+        merged = self.copy()
+        merged.update(other)
+        return merged
+
+    def __ior__(self, other: Any) -> "_LazySQLiteEpisodesCache":
+        self.update(other)
+        return self
 
     def clear(self) -> None:
         self._unloaded_keys.clear()
@@ -273,6 +345,23 @@ def load_twittui_dotenv() -> None:
 load_twittui_dotenv()
 
 
+def _shows_cache_key_hash(app_id: str, app_key: str) -> str:
+    """Return a SHA-256 digest of API credentials so secrets are never stored verbatim in SQLite."""
+    payload = f"{app_id}\0{app_key}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _restrict_file_permissions(file_path: str | None, mode: int = 0o600) -> None:
+    """Enforce owner-only permissions on sensitive local files (skipping SQLite :memory:)."""
+    if not file_path or file_path == ":memory:":
+        return
+    try:
+        if os.path.exists(file_path):
+            os.chmod(file_path, mode)
+    except Exception:
+        pass
+
+
 def get_cache_db_path(app_id: str | None = None, custom_path: str | None = None) -> str:
     """Resolve persistent SQLite cache database file path."""
     if custom_path:
@@ -295,14 +384,18 @@ def get_cache_db_path(app_id: str | None = None, custom_path: str | None = None)
     snap_data = os.environ.get('SNAP_USER_DATA') or os.environ.get('SNAP_USER_COMMON')
     if snap_data:
         try:
-            os.makedirs(snap_data, exist_ok=True)
+            os.makedirs(snap_data, mode=0o700, exist_ok=True)
             return os.path.join(snap_data, 'twittui_cache.db')
         except Exception:
             pass
 
     user_cache = os.path.join(os.path.expanduser('~'), '.cache', 'twittui')
     try:
-        os.makedirs(user_cache, exist_ok=True)
+        os.makedirs(user_cache, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(user_cache, 0o700)
+        except Exception:
+            pass
         return os.path.join(user_cache, 'twittui_cache.db')
     except Exception:
         pass
@@ -609,18 +702,28 @@ def write_restricted_file(file_path: str, content: str) -> None:
     """Write sensitive content to disk with 0o600 (owner-only) permissions."""
     flags: int = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     fd: int = os.open(file_path, flags, 0o600)
+    fd_owned: bool = True
     try:
         try:
-            os.chmod(file_path, 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            else:
+                os.chmod(file_path, 0o600)
         except Exception:
-            pass
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            try:
+                os.chmod(file_path, 0o600)
+            except Exception:
+                pass
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd_owned = False
+        with handle:
             handle.write(content)
     except Exception:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        if fd_owned:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         raise
 
 
@@ -766,17 +869,20 @@ def build_stream_args(
 def launch_stream_safe(
     streamer_template: str,
     media_url: str,
+    *,
+    resolve: bool = True,
 ) -> subprocess.Popen:
     """Spawn the external media player safely with shell=False.
 
     Args:
         streamer_template: Command template configured by the user.
         media_url: Target stream URL.
+        resolve: Whether to follow HTTP redirects via resolve_stream_url() first.
 
     Returns:
         The spawned Popen process instance.
     """
-    resolved_url: str = resolve_stream_url(media_url)
+    resolved_url: str = resolve_stream_url(media_url) if resolve else media_url
     args: list[str] = build_stream_args(streamer_template, resolved_url)
 
     if _is_textual_tui_running():
@@ -951,6 +1057,8 @@ class TwitTUIForm(toga.App):
         self._preferences_window = None
         self._is_downloading = False
         self._cancel_download = False
+        self._download_lock = threading.Lock()
+        self._cache_lock = threading.RLock()
         self._hover_lock = threading.Lock()
         self._hover_timer = None
         self._hover_row_index = None
@@ -994,14 +1102,55 @@ class TwitTUIForm(toga.App):
                 pass
         return getattr(self, 'main_window', None)
 
+    def _show_dialog_threadsafe(
+        self,
+        kind: str,
+        title: str,
+        message: str,
+        host_win: Any = None,
+    ) -> None:
+        """Display an info or error dialog safely on the UI thread."""
+        def _present() -> None:
+            try:
+                win = host_win if host_win is not None else self._active_dialog_window()
+                if not win:
+                    return
+                if kind == 'error':
+                    win.error_dialog(title, message)
+                else:
+                    win.info_dialog(title, message)
+            except Exception as e:
+                print(f"Error displaying {kind} dialog '{title}': {e}")
+
+        loop = getattr(self, 'loop', None)
+        if loop is not None and loop.is_running() and threading.current_thread() is not threading.main_thread():
+            try:
+                loop.call_soon_threadsafe(_present)
+                return
+            except Exception:
+                pass
+        _present()
+
     def _open_browser_quietly(self, url: str) -> bool:
-        """Open a URL in the default browser while suppressing leaked terminal output in live TUI mode."""
+        """Open a URL in the default browser while silencing child OS stdio in live TUI mode.
+
+        In live Textual TUI mode on POSIX, launches the OS URL opener directly with
+        stdin/stdout/stderr redirected to DEVNULL instead of mutating process-global
+        sys.stdout/sys.stderr (which is neither thread-safe nor effective for child FDs).
+        """
         if _is_textual_tui_running(self):
-            from contextlib import redirect_stderr, redirect_stdout
-            import io
-            sink = io.StringIO()
-            with redirect_stdout(sink), redirect_stderr(sink):
-                return bool(webbrowser.open(url))
+            if sys.platform != 'win32':
+                opener = shutil.which('open') if sys.platform == 'darwin' else shutil.which('xdg-open')
+                if opener:
+                    subprocess.Popen(
+                        [opener, url],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+                    return True
+            return bool(webbrowser.open(url))
         return bool(webbrowser.open(url))
 
     def set_tooltip(self, widget: Any, tooltip_text: str | None) -> Any:
@@ -1024,15 +1173,20 @@ class TwitTUIForm(toga.App):
         elif not getattr(self, '_cache_db_path', None):
             self._cache_db_path = get_cache_db_path(getattr(self, 'app_id', None))
 
-        try:
-            parent = os.path.dirname(os.path.abspath(self._cache_db_path))
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-        except Exception:
-            pass
+        if self._cache_db_path and self._cache_db_path != ':memory:':
+            try:
+                parent = os.path.dirname(os.path.abspath(self._cache_db_path))
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                    default_cache_dir = os.path.abspath(os.path.join(os.path.expanduser('~'), '.cache', 'twittui'))
+                    if os.path.abspath(parent) == default_cache_dir:
+                        os.chmod(parent, 0o700)
+            except Exception:
+                pass
 
         try:
             with sqlite3.connect(self._cache_db_path, timeout=10.0) as conn:
+                _restrict_file_permissions(self._cache_db_path, 0o600)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS twittui_cache (
@@ -1052,18 +1206,23 @@ class TwitTUIForm(toga.App):
 
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT category, cache_key, data_json FROM twittui_cache WHERE category != 'episodes'"
+                    "SELECT category, cache_key, data_json, created_at, updated_at FROM twittui_cache WHERE category != 'episodes'"
                 )
                 rows = cursor.fetchall()
-                for category, key, data_json in rows:
+                legacy_shows_migrations: list[tuple[str, str, str, float, float]] = []
+                for category, key, data_json, created_at, updated_at in rows:
                     try:
                         val = json.loads(data_json)
                         if category == 'shows':
                             if self._shows_cache is None or not isinstance(self._shows_cache, dict):
                                 self._shows_cache = {}
-                            parts = key.split(':', 1)
-                            tuple_key = (parts[0], parts[1]) if len(parts) == 2 else (key, '')
-                            self._shows_cache[tuple_key] = val
+                            if ':' in key:
+                                parts = key.split(':', 1)
+                                hashed_key = _shows_cache_key_hash(parts[0], parts[1])
+                                self._shows_cache[hashed_key] = val
+                                legacy_shows_migrations.append((key, hashed_key, data_json, created_at, updated_at))
+                            else:
+                                self._shows_cache[key] = val
                         elif category == 'show_date_bounds':
                             self._show_date_cache[key] = tuple(val) if isinstance(val, (list, tuple)) else val
                         elif category == 'episode_detail':
@@ -1080,6 +1239,27 @@ class TwitTUIForm(toga.App):
                             self._triangulation_archive_cache[(page_num, sort_flag)] = val
                         elif category == 'api_search':
                             self._api_search_cache[key] = val
+                    except Exception:
+                        pass
+
+                # Migrate legacy plaintext 'app_id:app_key' cache keys to SHA-256 hashes immediately
+                if legacy_shows_migrations:
+                    try:
+                        conn.execute("PRAGMA secure_delete = ON")
+                        for old_key, hashed_key, data_json, created_at, updated_at in legacy_shows_migrations:
+                            conn.execute(
+                                """
+                                INSERT INTO twittui_cache (category, cache_key, data_json, created_at, updated_at)
+                                VALUES ('shows', ?, ?, ?, ?)
+                                ON CONFLICT(category, cache_key) DO NOTHING
+                                """,
+                                (hashed_key, data_json, created_at, updated_at),
+                            )
+                            conn.execute(
+                                "DELETE FROM twittui_cache WHERE category = 'shows' AND cache_key = ?",
+                                (old_key,),
+                            )
+                        conn.commit()
                     except Exception:
                         pass
 
@@ -1100,6 +1280,7 @@ class TwitTUIForm(toga.App):
             now = time.time()
             data_json = json.dumps(data)
             with sqlite3.connect(db_path, timeout=10.0) as conn:
+                _restrict_file_permissions(db_path, 0o600)
                 conn.execute(
                     """
                     INSERT INTO twittui_cache (category, cache_key, data_json, created_at, updated_at)
@@ -1121,9 +1302,15 @@ class TwitTUIForm(toga.App):
             with sqlite3.connect(db_path, timeout=10.0) as conn:
                 if category:
                     conn.execute("DELETE FROM twittui_cache WHERE category = ?", (category,))
+                    conn.commit()
                 else:
                     conn.execute("DELETE FROM twittui_cache")
-                conn.commit()
+                    conn.commit()
+                    if db_path and db_path != ':memory:':
+                        try:
+                            conn.execute("VACUUM")
+                        except Exception:
+                            pass
         except Exception:
             pass
 
@@ -1134,21 +1321,29 @@ class TwitTUIForm(toga.App):
         for name in ('show_combo', 'sort_order_button', 'date_radio', 'episode_radio',
                      'title_radio', 'length_radio', 'size_radio', 'audio_only_checkbox',
                      'fuzzy_search_checkbox', 'phonetic_search_checkbox', 'app_id_input',
-                     'app_key_input', 'url_input', 'api_status_label', 'block_input', 'rate_limit_input'):
+                     'app_key_input', 'url_input', 'api_status_label', 'block_input',
+                     'rate_limit_input', 'dest_input', 'show_folders_checkbox', 'streamer_input'):
             widget = getattr(self, name, None)
             if widget is not None:
                 values = {key: getattr(widget, key) for key in ('value', 'text')
                           if hasattr(widget, key)}
                 setattr(worker, name, SimpleNamespace(**values))
-        for name in ('show_ids', 'show_active', 'show_date_bounds', '_show_date_cache',
-                     '_show_names_by_display', '_memberful_feeds_cache', '_show_rss_cache',
-                     '_shows_cache', '_episodes_cache', '_triangulation_archive_cache',
-                     '_episode_detail_cache', '_media_webpage_cache', '_api_search_cache'):
-            val = getattr(worker, name, None)
-            if isinstance(val, dict):
-                setattr(worker, name, val.copy())
-            elif isinstance(val, list):
-                setattr(worker, name, list(val))
+        cache_lock = getattr(self, '_cache_lock', None)
+        def _copy_caches() -> None:
+            for name in ('show_ids', 'show_active', 'show_date_bounds', '_show_date_cache',
+                         '_show_names_by_display', '_memberful_feeds_cache', '_show_rss_cache',
+                         '_shows_cache', '_episodes_cache', '_triangulation_archive_cache',
+                         '_episode_detail_cache', '_media_webpage_cache', '_api_search_cache'):
+                val = getattr(self, name, None)
+                if isinstance(val, dict):
+                    setattr(worker, name, val.copy())
+                elif isinstance(val, list):
+                    setattr(worker, name, list(val))
+        if cache_lock is not None:
+            with cache_lock:
+                _copy_caches()
+        else:
+            _copy_caches()
         worker._cache_db_path = getattr(self, '_cache_db_path', None)
         current_eps = getattr(self, 'current_episodes', None)
         if isinstance(current_eps, list):
@@ -1165,13 +1360,27 @@ class TwitTUIForm(toga.App):
                                                'date', 'length', 'duration', 'size', 'file_size',
                                                'show', 'media_url', '_search_match_context', 'match_context') if hasattr(target, name)})
 
-    def _run_network(self, work, done):
+    def _run_network(self, work, done, on_error=None):
         async def run():
             try:
                 result = await asyncio.to_thread(work)
-                done(result)
             except Exception as e:
                 print(f"Network operation failed: {e}")
+                if callable(on_error):
+                    try:
+                        on_error(e)
+                    except Exception as cb_err:
+                        print(f"Network error callback failed: {cb_err}")
+                return
+            try:
+                done(result)
+            except Exception as e:
+                print(f"Network completion callback failed: {e}")
+                if callable(on_error):
+                    try:
+                        on_error(e)
+                    except Exception as cb_err:
+                        print(f"Network error callback failed: {cb_err}")
         self.loop.create_task(run())
 
     def _rate_limit_wait_changed(self, waiting):
@@ -1372,39 +1581,52 @@ class TwitTUIForm(toga.App):
 
         def done(shows):
             if token != getattr(self, '_catalog_request', 0):
-                if getattr(self, '_catalog_wait_held', False) and getattr(self, '_catalog_request', 0) == token:
-                    self._catalog_wait_held = False
-                    self._set_rate_limit_wait(False)
-                    self.close_splash_screen()
                 return
-            if shows is None:
-                shows = sorted(self.show_ids, key=str.casefold) if getattr(self, 'show_ids', None) else []
-            self.show_ids = worker.show_ids
-            self.show_active = getattr(worker, 'show_active', {})
-            self.show_date_bounds = getattr(worker, 'show_date_bounds', {}) or {
-                name: self._show_date_cache.get(str(show_id), (None, None))
-                for name, show_id in self.show_ids.items()
-            }
-            if getattr(self, '_show_date_cache', None) is not None:
-                self._show_date_cache.update(getattr(worker, '_show_date_cache', {}))
-            if getattr(worker, '_shows_cache', None) is not None:
-                self._shows_cache = getattr(worker, '_shows_cache', None)
-            if getattr(self, 'api_status_label', None):
-                self.api_status_label.text = worker.api_status_label.text
-            selection = self._selected_show_name()
-            self._setting_catalog = True
             try:
-                self._set_show_selector_items(shows, selection)
-            finally:
-                self._setting_catalog = False
-            if not shows:
+                if shows is None:
+                    shows = sorted(self.show_ids, key=str.casefold) if getattr(self, 'show_ids', None) else []
+                self.show_ids = worker.show_ids
+                self.show_active = getattr(worker, 'show_active', {})
+                self.show_date_bounds = getattr(worker, 'show_date_bounds', {}) or {
+                    name: self._show_date_cache.get(str(show_id), (None, None))
+                    for name, show_id in self.show_ids.items()
+                }
+                if getattr(self, '_show_date_cache', None) is not None:
+                    self._show_date_cache.update(getattr(worker, '_show_date_cache', {}))
+                if getattr(worker, '_shows_cache', None) is not None:
+                    self._shows_cache = getattr(worker, '_shows_cache', None)
+                if getattr(self, 'api_status_label', None):
+                    self.api_status_label.text = worker.api_status_label.text
+                selection = self._selected_show_name()
+                self._setting_catalog = True
+                try:
+                    self._set_show_selector_items(shows, selection)
+                finally:
+                    self._setting_catalog = False
+                if not shows:
+                    check_finished('shows')
+                    check_finished('episodes')
+                    return
+                self.load_episodes_for_selected_show(callback=lambda: check_finished('episodes'))
+                self._refresh_show_dates(token, shows, callback=lambda: check_finished('shows'))
+            except Exception as e:
+                print(f"Error processing fetched show catalog: {e}")
                 check_finished('shows')
                 check_finished('episodes')
-                return
-            self.load_episodes_for_selected_show(callback=lambda: check_finished('episodes'))
-            self._refresh_show_dates(token, shows, callback=lambda: check_finished('shows'))
 
-        self._run_network(worker.fetch_shows, done)
+        def _safe_fetch_shows():
+            try:
+                return worker.fetch_shows()
+            except Exception as e:
+                print(f"Unexpected error fetching shows: {e}")
+                return None
+
+        try:
+            self._run_network(_safe_fetch_shows, done)
+        except Exception as e:
+            print(f"Failed to schedule catalog refresh: {e}")
+            check_finished('shows')
+            check_finished('episodes')
 
     def _format_show_option(self, show_name):
         first_date, last_date = self.show_date_bounds.get(show_name, (None, None))
@@ -1463,7 +1685,19 @@ class TwitTUIForm(toga.App):
                         self._setting_catalog = False
                 self._refresh_show_dates(token, shows, next_index, callback=callback)
 
-            self._run_network(lambda: worker.fetch_show_date_bounds(show_id), done)
+            def _safe_fetch_bounds(target_id=show_id):
+                try:
+                    return worker.fetch_show_date_bounds(target_id)
+                except Exception as e:
+                    print(f"Unexpected error fetching show date bounds for {target_id}: {e}")
+                    return None
+
+            try:
+                self._run_network(_safe_fetch_bounds, done)
+            except Exception as e:
+                print(f"Failed to schedule show date refresh: {e}")
+                if callable(callback):
+                    callback()
             return
 
         if index >= len(shows):
@@ -2288,7 +2522,8 @@ class TwitTUIForm(toga.App):
                                 'summary': desc_str,
                                 'link': link_elem.text.strip() if link_elem is not None and link_elem.text else '',
                                 'transcript_url': transcript_url,
-                                'enclosure_url': enc_url
+                                'enclosure_url': enc_url,
+                                'feed_file': feed_file,
                             })
                     if items:
                         break
@@ -2379,7 +2614,7 @@ class TwitTUIForm(toga.App):
                 self.show_date_bounds = {name: (None, None) for name in self.show_ids}
                 return sorted(self.show_ids, key=str.casefold)
 
-            cache_key = (app_id, app_key)
+            cache_key = _shows_cache_key_hash(app_id, app_key)
             if getattr(self, '_shows_cache', None) is not None:
                 cached_data = self._shows_cache.get(cache_key) if isinstance(self._shows_cache, dict) else None
                 if cached_data is not None:
@@ -2458,7 +2693,7 @@ class TwitTUIForm(toga.App):
                     'show_date_bounds': dict(show_date_bounds),
                 }
                 self._shows_cache[cache_key] = cached_shows_obj
-                self._save_to_persistent_cache('shows', f"{app_id}:{app_key}", cached_shows_obj)
+                self._save_to_persistent_cache('shows', cache_key, cached_shows_obj)
                 set_status('')
                 return sorted(show_ids, key=str.casefold)
 
@@ -3117,18 +3352,20 @@ class TwitTUIForm(toga.App):
         if not html_str:
             return ""
 
-        # Pre-strip dangerous container tags and their inner content
-        dangerous_tags = [
+        # Pre-strip paired and self-closing dangerous container tags (handling nested bypasses
+        # such as <scr<script>ipt>...</script> and whitespace before closing '>').
+        # Unpaired opening tags are intentionally left for the allowlist HTML parser below
+        # so trailing payload inside an unclosed <script> is dropped instead of exposed.
+        dangerous_tags = (
             "script", "style", "iframe", "object", "embed", "applet",
-            "form", "input", "button", "link", "meta", "svg", "base"
-        ]
+            "form", "input", "button", "link", "meta", "svg", "math", "base",
+        )
         sanitized = html_str
         for _ in range(5):
             prev = sanitized
             for tag in dangerous_tags:
-                sanitized = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}>", "", sanitized, flags=re.IGNORECASE | re.DOTALL)
+                sanitized = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}\s*>", "", sanitized, flags=re.IGNORECASE | re.DOTALL)
                 sanitized = re.sub(rf"<{tag}\b[^>]*/>", "", sanitized, flags=re.IGNORECASE)
-                sanitized = re.sub(rf"<{tag}\b[^>]*>", "", sanitized, flags=re.IGNORECASE)
             if sanitized == prev:
                 break
 
@@ -3178,28 +3415,122 @@ class TwitTUIForm(toga.App):
         except ImportError:
             pass
 
-        # Strip all inline event handlers (e.g., onload, onclick, onerror)
-        sanitized = re.sub(r"\s+on[a-zA-Z]+\s*=\s*(?:\"[^\"]*\"|\'[^\']*\'|[^\s>]+)", "", sanitized, flags=re.IGNORECASE)
+        # Pure-Python allowlist HTML parser fallback (immune to regex/whitespace/quote bypasses)
+        allowed_tags = frozenset({
+            "p", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "code",
+            "ul", "ol", "li", "table", "thead", "tbody", "tfoot", "tr", "th", "td",
+            "blockquote", "strong", "b", "em", "i", "u", "s", "del",
+            "a", "hr", "br", "span", "div", "img", "dl", "dt", "dd", "sup", "sub",
+        })
+        void_tags = frozenset({"br", "hr", "img"})
+        drop_content_tags = frozenset({
+            "script", "style", "iframe", "object", "applet",
+            "svg", "math", "template", "noscript", "title", "head",
+        })
+        allowed_attrs = {
+            "a": frozenset({"href", "title", "id", "name", "target", "rel"}),
+            "img": frozenset({"src", "alt", "title", "width", "height"}),
+            "th": frozenset({"align", "colspan", "rowspan"}),
+            "td": frozenset({"align", "colspan", "rowspan"}),
+            "*": frozenset({"class", "id"}),
+        }
+        safe_url_schemes = frozenset({"http", "https", "mailto"})
 
-        # Neutralize unsafe URI schemes in links or source attributes (including entity-encoded)
-        def _neutralize_schemes(match):
-            attr = match.group(1)
-            eq = match.group(2)
-            quote = match.group(3) or ''
-            val = match.group(4)
-            unescaped_val = html.unescape(val).strip().lower()
-            if any(unescaped_val.startswith(scheme) for scheme in ('javascript:', 'data:', 'vbscript:', 'file:')):
-                return f'{attr}{eq}{quote}#{quote}'
-            return match.group(0)
+        def _clean_url_attr(val: str, is_src: bool = False) -> str | None:
+            unescaped = val
+            for _ in range(3):
+                nxt = html.unescape(unescaped)
+                if nxt == unescaped:
+                    break
+                unescaped = nxt
+            # Strip ASCII control chars and whitespace before inspecting scheme (matches browser parsing)
+            normalized = re.sub(r"[\x00-\x20\x7f]+", "", unescaped).lower()
+            if not normalized:
+                return None if is_src else ""
+            if normalized.startswith(("#", "./", "../")) or (
+                normalized.startswith("/") and not normalized.startswith("//")
+            ):
+                return val.strip()
+            scheme_match = re.match(r"^([a-z][a-z0-9+.\-]*):", normalized)
+            if scheme_match:
+                if scheme_match.group(1) in safe_url_schemes:
+                    return val.strip()
+                return None if is_src else "#"
+            prefix = re.split(r"[/?#]", normalized, maxsplit=1)[0]
+            if ":" in prefix or normalized.startswith("//"):
+                return None if is_src else "#"
+            return val.strip()
 
-        sanitized = re.sub(
-            r'\b(href|src)(\s*=\s*)([\"\']?)([^\"\'\s>]+)',
-            _neutralize_schemes,
-            sanitized,
-            flags=re.IGNORECASE
-        )
+        class _AllowlistHTMLSanitizer(html.parser.HTMLParser):
+            def __init__(self) -> None:
+                super().__init__(convert_charrefs=True)
+                self.parts: list[str] = []
+                self._drop_stack: list[str] = []
 
-        return sanitized
+            def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+                t = tag.lower()
+                if t in drop_content_tags:
+                    self._drop_stack.append(t)
+                    return
+                if self._drop_stack or t not in allowed_tags:
+                    return
+                tag_allowed = allowed_attrs.get(t, frozenset()) | allowed_attrs["*"]
+                rendered_attrs: list[str] = []
+                for k, v in attrs:
+                    if not k:
+                        continue
+                    attr_name = k.lower()
+                    if attr_name not in tag_allowed:
+                        continue
+                    val_str = "" if v is None else str(v)
+                    if attr_name in ("href", "src"):
+                        safe_url = _clean_url_attr(val_str, is_src=(attr_name == "src"))
+                        if safe_url is None:
+                            continue
+                        val_str = safe_url
+                    rendered_attrs.append(f'{attr_name}="{html.escape(val_str, quote=True)}"')
+                attr_suffix = (" " + " ".join(rendered_attrs)) if rendered_attrs else ""
+                if t in void_tags:
+                    self.parts.append(f"<{t}{attr_suffix} />")
+                else:
+                    self.parts.append(f"<{t}{attr_suffix}>")
+
+            def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+                t = tag.lower()
+                if t in drop_content_tags or self._drop_stack or t not in allowed_tags:
+                    return
+                self.handle_starttag(tag, attrs)
+                if t not in void_tags:
+                    self.parts.append(f"</{t}>")
+
+            def handle_endtag(self, tag: str) -> None:
+                t = tag.lower()
+                if self._drop_stack:
+                    if t in self._drop_stack:
+                        while self._drop_stack:
+                            if self._drop_stack.pop() == t:
+                                break
+                    return
+                if t in allowed_tags and t not in void_tags:
+                    self.parts.append(f"</{t}>")
+
+            def handle_data(self, data: str) -> None:
+                if not self._drop_stack:
+                    self.parts.append(html.escape(data, quote=False))
+
+            def handle_comment(self, data: str) -> None:
+                pass
+
+            def handle_pi(self, data: str) -> None:
+                pass
+
+            def handle_decl(self, decl: str) -> None:
+                pass
+
+        parser = _AllowlistHTMLSanitizer()
+        parser.feed(sanitized)
+        parser.close()
+        return "".join(parser.parts)
 
     @staticmethod
     def _slugify(text: str) -> str:
@@ -3658,11 +3989,33 @@ class TwitTUIForm(toga.App):
                 src_doc = etree.fromstring(xml_bytes, parser=safe_parser)
                 result_tree = transform(src_doc)
                 html_out = str(result_tree)
-                if css_content and '<style>' in html_out and '</style>' in html_out:
-                    style_start = html_out.find('<style>') + 7
-                    style_end = html_out.find('</style>')
-                    html_out = html_out[:style_start] + "\n" + css_content + "\n" + html_out[style_end:]
-                return self.sanitize_html(html_out)
+                # Extract trusted local stylesheet and document title before sanitizing untrusted body HTML
+                # so sanitize_html() does not strip the trusted <style> block or HTML document shell.
+                title_match = re.search(r"<title\b[^>]*>(.*?)</title\s*>", html_out, flags=re.IGNORECASE | re.DOTALL)
+                doc_title = html.unescape(title_match.group(1)).strip() if title_match else "Podcast RSS Feed"
+                if css_content:
+                    trusted_css = css_content
+                else:
+                    style_match = re.search(r"<style\b[^>]*>(.*?)</style\s*>", html_out, flags=re.IGNORECASE | re.DOTALL)
+                    trusted_css = style_match.group(1) if style_match else ""
+                trusted_css = re.sub(r"</style", r"<\/style", trusted_css, flags=re.IGNORECASE)
+                body_match = re.search(r"<body\b[^>]*>(.*?)</body\s*>", html_out, flags=re.IGNORECASE | re.DOTALL)
+                body_raw = body_match.group(1) if body_match else html_out
+                safe_body = self.sanitize_html(body_raw)
+                return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{html.escape(doc_title)}</title>
+  <style>
+{trusted_css}
+  </style>
+</head>
+<body>
+{safe_body}
+</body>
+</html>"""
             except Exception as xslt_err:
                 print(f"XSLT rendering fallback ({xslt_err}), using Python RSS renderer.")
 
@@ -3807,9 +4160,10 @@ class TwitTUIForm(toga.App):
 <html><head><meta charset="utf-8"><title>RSS Feed Error</title><style>{css_content}</style></head>
 <body><div class="container"><h1>Unable to parse RSS feed</h1><p>{html.escape(str(parse_err))}</p></div></body></html>"""
 
-    def open_club_twit_url(self) -> None:
+    def open_club_twit_url(self, target_url: str | None = None) -> None:
         """Fetch and render the Club TWiT RSS feed with CSS styling and open in default web browser."""
-        target_url = self.get_full_club_twit_url()
+        if not target_url:
+            target_url = self.get_full_club_twit_url()
         try:
             resp = requests.get(target_url, headers={'User-Agent': 'Mozilla/5.0 (compatible; TwitTUI/1.0)'}, timeout=15)
             if resp.status_code == 200 and resp.content:
@@ -3826,16 +4180,12 @@ class TwitTUIForm(toga.App):
         except Exception as e:
             err_msg = f"Failed to open Club TWiT URL: {e}"
             print(f"Error: {err_msg}")
-            host_win = self._active_dialog_window()
-            if host_win:
-                try:
-                    host_win.error_dialog("Browser Error", err_msg)
-                except Exception:
-                    pass
+            self._show_dialog_threadsafe("error", "Browser Error", err_msg)
 
     def on_show_club_url_press(self, widget=None) -> None:
         """Handler for Show button press next to the Club TWiT URL field."""
-        threading.Thread(target=self.open_club_twit_url, daemon=True).start()
+        target_url = self.get_full_club_twit_url()
+        threading.Thread(target=self.open_club_twit_url, args=(target_url,), daemon=True).start()
 
     def get_destination_folder(self) -> str:
         """Get the configured download destination directory."""
@@ -3901,20 +4251,17 @@ class TwitTUIForm(toga.App):
                 return True
             except Exception as e2:
                 print(f"Fallback to browser for folder URI failed: {e2}")
-                host_win = self._active_dialog_window()
-                if host_win:
-                    try:
-                        host_win.error_dialog(
-                            "File Manager Error",
-                            f"Could not open download folder:\n{target_dir}\n\nError: {e}"
-                        )
-                    except Exception:
-                        pass
+                self._show_dialog_threadsafe(
+                    "error",
+                    "File Manager Error",
+                    f"Could not open download folder:\n{target_dir}\n\nError: {e}",
+                )
                 return False
 
     def on_open_destination_press(self, widget=None) -> None:
         """Handler for Open button press next to Download Destination."""
-        threading.Thread(target=self.open_destination_folder, daemon=True).start()
+        folder_path = self.get_destination_folder()
+        threading.Thread(target=self.open_destination_folder, args=(folder_path,), daemon=True).start()
 
     def is_show_folders_enabled(self) -> bool:
         """Check if Show Folders organization is enabled."""
@@ -4255,13 +4602,15 @@ class TwitTUIForm(toga.App):
         base_filename = os.path.basename(dest_path)
         base_stem, target_ext = os.path.splitext(base_filename)
         temp_prefix = os.path.join(dest_dir, f".twittui_yt_{base_stem}")
+        escaped_temp_prefix = glob.escape(temp_prefix)
+        escaped_dest_path = glob.escape(dest_path)
         outtmpl = f"{temp_prefix}.%(ext)s"
 
         def _cleanup_stale_parts() -> None:
             cleanup_patterns = [
-                f"{temp_prefix}*",
-                f"{dest_path}.part*",
-                f"{dest_path}*.part*",
+                f"{escaped_temp_prefix}*",
+                f"{escaped_dest_path}.part*",
+                f"{escaped_dest_path}*.part*",
             ]
             for pattern in cleanup_patterns:
                 for p in glob.glob(pattern):
@@ -4273,6 +4622,33 @@ class TwitTUIForm(toga.App):
                     except Exception:
                         pass
 
+        def _find_and_promote_output(audio_mode: bool, ffmpeg_available: bool) -> str | None:
+            candidates = glob.glob(f"{escaped_temp_prefix}.*")
+            if not candidates:
+                candidates = glob.glob(f"{escaped_temp_prefix}*")
+
+            found_file = None
+            if candidates:
+                for c in sorted(
+                    candidates,
+                    key=lambda x: (not x.endswith('.mp4'), not x.endswith('.m4a'), not x.endswith('.mp3'), len(x)),
+                ):
+                    if os.path.isfile(c) and os.path.getsize(c) > 1024:
+                        found_file = c
+                        break
+
+            final_dest = dest_path
+            if found_file and os.path.exists(found_file):
+                # When audio-only runs without ffmpeg, keep the real container extension (e.g. .m4a/.opus/.webm)
+                # instead of falsely renaming it to .mp3.
+                if audio_mode and not ffmpeg_available:
+                    actual_ext = os.path.splitext(found_file)[1].lower()
+                    if actual_ext in {'.m4a', '.webm', '.opus', '.ogg', '.aac', '.mp3', '.flac'} and actual_ext != target_ext.lower():
+                        final_dest = os.path.join(dest_dir, f"{base_stem}{actual_ext}")
+                os.replace(found_file, final_dest)
+                return final_dest
+            return None
+
         # Clean up any leftover partial pieces before starting
         _cleanup_stale_parts()
 
@@ -4280,7 +4656,8 @@ class TwitTUIForm(toga.App):
             self.reset_progress()
 
         has_ffmpeg = bool(shutil.which('ffmpeg'))
-        audio_only = self.is_audio_only()
+        snap_audio = getattr(self, '_download_audio_only', None)
+        audio_only = snap_audio if snap_audio is not None else self.is_audio_only()
 
         if ytdlp_bin:
             cmd = [
@@ -4351,34 +4728,17 @@ class TwitTUIForm(toga.App):
                     _cleanup_stale_parts()
                     return False
 
-                # Locate finalized output file
-                candidates = glob.glob(f"{temp_prefix}.*")
-                if not candidates:
-                    candidates = glob.glob(f"{temp_prefix}*")
-
-                found_file = None
-                if candidates:
-                    for c in sorted(candidates, key=lambda x: (not x.endswith('.mp4'), not x.endswith('.m4a'), not x.endswith('.mp3'), len(x))):
-                        if os.path.isfile(c) and os.path.getsize(c) > 1024:
-                            found_file = c
-                            break
-
-                if found_file and os.path.exists(found_file):
-                    if os.path.exists(dest_path):
-                        try:
-                            os.remove(dest_path)
-                        except Exception:
-                            pass
-                    os.rename(found_file, dest_path)
-
+                # Locate finalized output file safely (handling [ ] brackets) and promote atomically
+                final_dest_path = _find_and_promote_output(audio_only, has_ffmpeg) or dest_path
                 _cleanup_stale_parts()
 
-                if os.path.exists(dest_path) and self.is_valid_media_file(dest_path):
+                if os.path.exists(final_dest_path) and self.is_valid_media_file(final_dest_path):
+                    self._last_downloaded_path = final_dest_path
                     if progress_callback:
                         progress_callback(100.0, 100.0)
                     else:
                         self.update_progress(100.0, 100.0)
-                    print(f"Finished downloading YouTube video: {dest_path}")
+                    print(f"Finished downloading YouTube video: {final_dest_path}")
                     return True
                 return False
             except Exception as e:
@@ -4436,33 +4796,16 @@ class TwitTUIForm(toga.App):
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
 
-                candidates = glob.glob(f"{temp_prefix}.*")
-                if not candidates:
-                    candidates = glob.glob(f"{temp_prefix}*")
-
-                found_file = None
-                if candidates:
-                    for c in sorted(candidates, key=lambda x: (not x.endswith('.mp4'), not x.endswith('.m4a'), not x.endswith('.mp3'), len(x))):
-                        if os.path.isfile(c) and os.path.getsize(c) > 1024:
-                            found_file = c
-                            break
-
-                if found_file and os.path.exists(found_file):
-                    if os.path.exists(dest_path):
-                        try:
-                            os.remove(dest_path)
-                        except Exception:
-                            pass
-                    os.rename(found_file, dest_path)
-
+                final_dest_path = _find_and_promote_output(audio_only, has_ffmpeg) or dest_path
                 _cleanup_stale_parts()
 
-                if os.path.exists(dest_path) and self.is_valid_media_file(dest_path):
+                if os.path.exists(final_dest_path) and self.is_valid_media_file(final_dest_path):
+                    self._last_downloaded_path = final_dest_path
                     if progress_callback:
                         progress_callback(100.0, 100.0)
                     else:
                         self.update_progress(100.0, 100.0)
-                    print(f"Finished downloading YouTube video: {dest_path}")
+                    print(f"Finished downloading YouTube video: {final_dest_path}")
                     return True
                 return False
             except Exception as e:
@@ -4508,8 +4851,10 @@ class TwitTUIForm(toga.App):
                         return self.download_youtube_video(yt_matches[0], dest_path, progress_callback=progress_callback)
 
                     media_matches = re.findall(r'https?://[^\s\"\'<>]+\.(?:mp4|mp3|m4a|webm|ogg|m4v|aac)', html_content)
+                    snap_audio = getattr(self, '_download_audio_only', None)
+                    dl_audio_only = snap_audio if snap_audio is not None else self.is_audio_only()
                     for cand in media_matches:
-                        if self.is_valid_media_url(cand) and (not self.is_audio_only() or self.is_audio_url(cand)):
+                        if self.is_valid_media_url(cand) and (not dl_audio_only or self.is_audio_url(cand)):
                             return self.download_episode_file(cand, dest_path, block_size, progress_callback=progress_callback, expected_size=expected_size)
 
                     print(f"Error: URL '{url}' returned an HTML document instead of a playable media stream.")
@@ -4594,9 +4939,8 @@ class TwitTUIForm(toga.App):
                     self.reset_progress()
                 return False
 
-            if os.path.exists(dest_path):
-                os.remove(dest_path)
-            os.rename(temp_path, dest_path)
+            os.replace(temp_path, dest_path)
+            self._last_downloaded_path = dest_path
             if progress_callback:
                 progress_callback(total_bytes if total_bytes > 0 else downloaded_bytes, total_bytes)
             else:
@@ -4695,26 +5039,47 @@ class TwitTUIForm(toga.App):
         else:
             _show()
 
-    def download_episodes_batch(self, targets: list, preferred_resolution: str = None) -> None:
+    def download_episodes_batch(
+        self,
+        targets: list,
+        preferred_resolution: str = None,
+        *,
+        download_snapshot: dict | None = None,
+    ) -> None:
         """Background worker to download multiple selected episodes."""
+        download_lock = getattr(self, '_download_lock', None)
+        lock_acquired = False
+        if download_lock is not None:
+            lock_acquired = download_lock.acquire(blocking=False)
+            if not lock_acquired:
+                print("Batch download already in progress; ignoring concurrent request.")
+                return
+
         self._is_downloading = True
         self._cancel_download = False
         self.reset_progress()
-        base_dest_dir = self.get_destination_folder()
-        block_size = self.get_block_size()
+
+        # Use UI-thread snapshot values when provided so worker threads never read live GUI widgets.
+        snap = download_snapshot or {}
+        worker = snap.get('worker') or self
+        base_dest_dir = snap['base_dest_dir'] if 'base_dest_dir' in snap else self.get_destination_folder()
+        block_size = snap['block_size'] if 'block_size' in snap else self.get_block_size()
+        show_folders_enabled = snap['show_folders'] if 'show_folders' in snap else self.is_show_folders_enabled()
+        audio_only = snap['audio_only'] if 'audio_only' in snap else self.is_audio_only()
+        self._download_audio_only = audio_only
+
         downloaded_files = []
         total_targets = len(targets) if targets else 1
 
         print(f"Starting batch download for {len(targets)} episode(s) to '{base_dest_dir}' (block size: {block_size})...")
         try:
-            os.makedirs(base_dest_dir, exist_ok=True)
-        except Exception as e:
-            print(f"Error creating destination directory '{base_dest_dir}': {e}")
-            self._is_downloading = False
-            self.reset_progress()
-            return
+            try:
+                os.makedirs(base_dest_dir, exist_ok=True)
+            except Exception as e:
+                print(f"Error creating destination directory '{base_dest_dir}': {e}")
+                self.reset_progress()
+                return
 
-        try:
             for idx_0, target in enumerate(targets):
                 if getattr(self, '_cancel_download', False):
                     print("Batch download cancelled.")
@@ -4725,11 +5090,11 @@ class TwitTUIForm(toga.App):
                 if hasattr(target, 'selected_media_url') and target.selected_media_url:
                     media_url = target.selected_media_url
                 elif preferred_resolution:
-                    cand_res = self.get_available_resolutions(target)
+                    cand_res = worker.get_available_resolutions(target, audio_only=audio_only)
                     matching = next((r['url'] for r in cand_res if r.get('id') == preferred_resolution or r.get('type') == preferred_resolution), None)
-                    media_url = matching or self.resolve_target_media_url(target)
+                    media_url = matching or worker.resolve_target_media_url(target, audio_only=audio_only)
                 else:
-                    media_url = self.resolve_target_media_url(target)
+                    media_url = worker.resolve_target_media_url(target, audio_only=audio_only)
 
                 if not media_url:
                     print(f"[{idx_0 + 1}/{total_targets}] No media URL found for episode: {target_num} {target_title}")
@@ -4737,30 +5102,37 @@ class TwitTUIForm(toga.App):
                     self.update_progress(batch_pct, 100.0)
                     continue
 
-                item_dest_dir = self.get_target_destination_folder(target)
+                show_folder = worker.get_show_folder_name(target) if show_folders_enabled else ''
+                item_dest_dir = os.path.join(base_dest_dir, show_folder) if (show_folders_enabled and show_folder) else base_dest_dir
                 try:
                     os.makedirs(item_dest_dir, exist_ok=True)
                 except Exception as e:
                     print(f"Error creating destination directory '{item_dest_dir}': {e}")
                     item_dest_dir = base_dest_dir
 
-                filename = self.determine_download_filename(target, media_url)
+                filename = worker.determine_download_filename(target, media_url)
                 dest_filepath = os.path.join(item_dest_dir, filename)
 
-                # Attempt to extract known expected enclosure size
+                # Attempt to extract known expected enclosure byte size (excluding top-level 'length',
+                # which holds episode duration rather than file size).
                 expected_size = None
+                ep_source = None
                 if hasattr(target, 'episode_data') and isinstance(target.episode_data, dict):
-                    for k in ['file_size', 'enclosure_length', 'length', 'size', 'bytes', 'content_length']:
-                        v = target.episode_data.get(k)
-                        if v and str(v).isdigit() and int(v) > 1000:
-                            expected_size = int(v)
-                            break
+                    ep_source = target.episode_data
                 elif isinstance(target, dict):
-                    for k in ['file_size', 'enclosure_length', 'length', 'size', 'bytes', 'content_length']:
-                        v = target.get(k)
+                    ep_source = target
+                if isinstance(ep_source, dict):
+                    for k in ('file_size', 'fileSize', 'enclosure_length', 'size', 'bytes', 'content_length'):
+                        v = ep_source.get(k)
                         if v and str(v).isdigit() and int(v) > 1000:
                             expected_size = int(v)
                             break
+                    if expected_size is None:
+                        enc_obj = ep_source.get('enclosure')
+                        if isinstance(enc_obj, dict):
+                            v = enc_obj.get('length') or enc_obj.get('size')
+                            if v and str(v).isdigit() and int(v) > 1000:
+                                expected_size = int(v)
 
                 sanitized_log_url = re.sub(r'([?&]auth=)[^&]+', r'\1[REDACTED]', media_url)
                 print(f"[{idx_0 + 1}/{total_targets}] Downloading '{target_title}' -> {dest_filepath} from {sanitized_log_url}")
@@ -4773,19 +5145,41 @@ class TwitTUIForm(toga.App):
                     batch_pct = ((item_idx + item_frac) / total_targets) * 100.0
                     self.update_progress(batch_pct, 100.0)
 
+                self._last_downloaded_path = None
                 success = self.download_episode_file(media_url, dest_filepath, block_size, progress_callback=_item_progress, expected_size=expected_size)
                 if success:
-                    if self.is_show_folders_enabled():
-                        show_folder = self.get_show_folder_name(target)
-                        rel_path = os.path.join(show_folder, filename) if show_folder else filename
+                    actual_filename = os.path.basename(self._last_downloaded_path) if self._last_downloaded_path else filename
+                    if show_folders_enabled:
+                        rel_path = os.path.join(show_folder, actual_filename) if show_folder else actual_filename
                         downloaded_files.append(rel_path)
                     else:
-                        downloaded_files.append(filename)
+                        downloaded_files.append(actual_filename)
 
                 batch_pct = ((idx_0 + 1) / total_targets) * 100.0
                 self.update_progress(batch_pct, 100.0)
         finally:
+            if worker is not self:
+                cache_lock = getattr(self, '_cache_lock', None)
+                def _merge_worker_caches() -> None:
+                    for cache_attr in (
+                        '_memberful_feeds_cache',
+                        '_show_rss_cache',
+                        '_media_webpage_cache',
+                        '_episode_detail_cache',
+                    ):
+                        w_cache = getattr(worker, cache_attr, None)
+                        s_cache = getattr(self, cache_attr, None)
+                        if isinstance(w_cache, dict) and isinstance(s_cache, dict):
+                            s_cache.update(w_cache)
+                if cache_lock is not None:
+                    with cache_lock:
+                        _merge_worker_caches()
+                else:
+                    _merge_worker_caches()
+            self._download_audio_only = None
             self._is_downloading = False
+            if lock_acquired and download_lock is not None:
+                download_lock.release()
             if getattr(self, '_cancel_download', False):
                 self.reset_progress()
             if downloaded_files:
@@ -4795,6 +5189,13 @@ class TwitTUIForm(toga.App):
         """Process selected episodes for batch download with resolution prompt if multiple are available."""
         try:
             self._cancel_hover_timer()
+            if getattr(self, '_is_downloading', False):
+                self._show_dialog_threadsafe(
+                    "info",
+                    "Download In Progress",
+                    "A download is already in progress. Please wait for it to finish or press Cancel first.",
+                )
+                return
             selected = self.episodes_list.selection
             if not selected:
                 print("No episode selected for download")
@@ -4885,8 +5286,30 @@ class TwitTUIForm(toga.App):
                     elif len(batch_options) == 1:
                         preferred_resolution = batch_options[0].get('id')
 
+            if getattr(self, '_is_downloading', False):
+                self._show_dialog_threadsafe(
+                    "info",
+                    "Download In Progress",
+                    "A download is already in progress. Please wait for it to finish or press Cancel first.",
+                )
+                return
+
+            # Snapshot UI widget settings on the UI thread before spawning background worker
+            download_snapshot = {
+                'base_dest_dir': self.get_destination_folder(),
+                'block_size': self.get_block_size(),
+                'show_folders': self.is_show_folders_enabled(),
+                'audio_only': self.is_audio_only(),
+                'worker': self._network_snapshot(),
+            }
+
             # Start download in background thread so GUI remains responsive
-            thread = threading.Thread(target=self.download_episodes_batch, args=(targets, preferred_resolution), daemon=True)
+            thread = threading.Thread(
+                target=self.download_episodes_batch,
+                args=(targets, preferred_resolution),
+                kwargs={'download_snapshot': download_snapshot},
+                daemon=True,
+            )
             thread.start()
         except Exception as e:
             print(f"Error initiating download: {e}")
@@ -5332,30 +5755,44 @@ class TwitTUIForm(toga.App):
                                 # Add as fallback type if no other resolutions found yet
                                 _add_cand('club_twit', 'Club TWiT (No Commercials)', 'audio' if is_aud else 'video', enc, s)
 
-        # 3. Check RSS feeds for this show
-        if show_name and hasattr(self, '_show_rss_cache'):
+        # 3. Check cached RSS feeds for this show
+        if show_name and hasattr(self, '_show_rss_cache') and isinstance(self._show_rss_cache, dict):
             show_key = show_name.strip().lower()
             clean_path = ep_dict.get('cleanPath') or getattr(target, 'clean_path', '')
             ep_id = str(ep_dict.get('id') or getattr(target, 'id', ''))
 
-            # Check cached RSS feeds for matching episode
+            # Inspect the real keys written by fetch_show_rss_items() ('{show_key}_video', '{show_key}_audio')
+            # plus any legacy per-feed 'rss_{feed_file}' keys.
+            rss_cache_sources: list[tuple[str, list]] = []
+            for suffix in ('video', 'audio'):
+                key = f"{show_key}_{suffix}"
+                cached_items = self._show_rss_cache.get(key)
+                if cached_items:
+                    rss_cache_sources.append(('', cached_items))
             for feed_file in KNOWN_SHOW_FEEDS.get(show_key, []):
-                cache_key = f"rss_{feed_file}"
-                items = self._show_rss_cache.get(cache_key, [])
+                legacy_items = self._show_rss_cache.get(f"rss_{feed_file}")
+                if legacy_items:
+                    rss_cache_sources.append((feed_file, legacy_items))
+
+            for default_feed_file, items in rss_cache_sources:
                 for item in items:
                     if self._match_rss_item(item, clean_path, ep_id, target_num, target_title, show_name):
                         enc = item.get('enclosure_url')
                         s = item.get('enclosure_length')
                         if enc and self.is_valid_media_url(enc):
-                            if 'video_hd' in feed_file or '_hd' in feed_file:
+                            feed_hint = (item.get('feed_file') or default_feed_file or '').lower()
+                            enc_low = enc.lower()
+                            is_aud = self.is_audio_url(enc)
+                            if is_aud:
+                                _add_cand('rss_audio', 'Audio (MP3/M4A)', 'audio', enc, s)
+                            elif 'video_hd' in feed_hint or '_hd' in feed_hint or '1280x720' in enc_low or '1920x1080' in enc_low:
                                 _add_cand('video_hd', 'HD Video (1080p/720p)', 'video', enc, s)
-                            elif 'video_large' in feed_file or '_large' in feed_file:
+                            elif 'video_large' in feed_hint or '_large' in feed_hint or '864x480' in enc_low or '640x368' in enc_low:
                                 _add_cand('video_large', 'Large Video (540p/480p)', 'video', enc, s)
-                            elif 'video_small' in feed_file or '_small' in feed_file:
+                            elif 'video_small' in feed_hint or '_small' in feed_hint or '480x270' in enc_low:
                                 _add_cand('video_small', 'Small / Mobile Video (360p)', 'video', enc, s)
                             else:
-                                is_aud = self.is_audio_url(enc)
-                                _add_cand('rss_feed', 'Audio (MP3/M4A)' if is_aud else 'Standard Video', 'audio' if is_aud else 'video', enc, s)
+                                _add_cand('rss_feed', 'Standard Video', 'video', enc, s)
 
         # 4. Check direct media_url or resolved candidate
         for k in ['audio_url', 'audioUrl', 'media_url', 'mediaUrl', 'downloadUrl', 'streamUrl', 'fileUrl', 'enclosure_url']:
@@ -5468,24 +5905,29 @@ class TwitTUIForm(toga.App):
         self._update_episodes_selection_label()
 
     async def on_episode_activate(self, widget, row, **kwargs) -> None:
-        await self.on_stream_press(widget)
+        await self.on_stream_press(widget, target_row=row)
 
-    async def on_stream_press(self, widget=None) -> None:
-        """Process selected episode for streaming with resolution prompt if multiple are available."""
+    async def on_stream_press(self, widget=None, target_row=None) -> None:
+        """Process selected or explicitly activated episode for streaming."""
         try:
             self._cancel_hover_timer()
-            selected = self.episodes_list.selection
-            if not selected:
-                print("No episode selected for streaming")
-                return
+            if target_row is not None:
+                selected_target = target_row
+            else:
+                selected = self.episodes_list.selection
+                if not selected:
+                    print("No episode selected for streaming")
+                    return
+                selected_target = selected[0] if isinstance(selected, list) else selected
 
-            selected_target = selected[0] if isinstance(selected, list) else selected
             target = self._snapshot_episode(selected_target)
             is_audio = self.is_audio_only()
             worker = self._network_snapshot()
             token = getattr(self, '_episode_request', 0)
 
             def stale():
+                if target_row is not None:
+                    return token != getattr(self, '_episode_request', 0)
                 current = self.episodes_list.selection
                 current = current[0] if isinstance(current, list) and current else current
                 return token != getattr(self, '_episode_request', 0) or current is not selected_target
@@ -5525,7 +5967,7 @@ class TwitTUIForm(toga.App):
                 target_yt_url = resolved_media_url if self.is_youtube_url(resolved_media_url) else media_url
                 print(f"Opening YouTube video in browser: {target_yt_url}")
                 try:
-                    await asyncio.to_thread(webbrowser.open, target_yt_url)
+                    await asyncio.to_thread(self._open_browser_quietly, target_yt_url)
                 except Exception as e:
                     print(f"Error opening YouTube in browser: {e}")
                 return
@@ -5533,7 +5975,17 @@ class TwitTUIForm(toga.App):
             streamer_template = self.streamer_input.value if getattr(self, 'streamer_input', None) and self.streamer_input.value else 'env LC_ALL=C vlc %f'
             sanitized_log_url = re.sub(r'([?&]auth=)[^&]+', r'\1[REDACTED]', resolved_media_url)
             print(f"Launching stream player for: {sanitized_log_url}")
-            await asyncio.to_thread(launch_stream_safe, streamer_template, resolved_media_url)
+
+            def _launch_stream():
+                try:
+                    sig = inspect.signature(launch_stream_safe)
+                    if 'resolve' in sig.parameters:
+                        return launch_stream_safe(streamer_template, resolved_media_url, resolve=False)
+                except (TypeError, ValueError):
+                    pass
+                return launch_stream_safe(streamer_template, resolved_media_url)
+
+            await asyncio.to_thread(_launch_stream)
         except Exception as e:
             print(f"Error launching stream: {e}")
 
@@ -5875,6 +6327,7 @@ class TwitTUIForm(toga.App):
                     'app-key': app_key
                 }
 
+                sort_was_explicit = sort is not None
                 if sort is None:
                     sort = self.get_current_sort_param()
 
@@ -5883,6 +6336,12 @@ class TwitTUIForm(toga.App):
 
                 cached_list = self._episodes_cache.get(show_id_key, [])
                 cached_keys = {self._episode_cache_key(e) for e in cached_list if self._episode_cache_key(e) is not None}
+
+                # When reconciling against an existing cache without an explicit caller sort,
+                # query canonical newest-first order so UI sort changes (sorted client-side)
+                # never trigger full re-scans of older pages.
+                if page == 1 and cached_list and not sort_was_explicit:
+                    sort = '-airingDate'
 
                 if page > 1 and cached_list and getattr(self, '_episodes_all_loaded', False):
                     start_idx = (page - 1) * page_size
@@ -5914,6 +6373,8 @@ class TwitTUIForm(toga.App):
                     next_link = (data.get('_links') or {}).get('next')
 
                     if page == 1 and cached_list:
+                        fetched_pages: set[int] = {1}
+                        last_fetched_page = 1
                         hit_cache = False
                         new_items = []
                         for ep in episodes:
@@ -5929,6 +6390,8 @@ class TwitTUIForm(toga.App):
                             accumulated = list(episodes)
                             curr_page = 2
                             while next_link and not hit_cache:
+                                fetched_pages.add(curr_page)
+                                last_fetched_page = curr_page
                                 n_url = f'https://twit.tv/api/v1.0/episodes?filter[shows]={show_id}&page={curr_page}&range={page_size}'
                                 if sort:
                                     n_url += f'&sort={sort}'
@@ -5958,6 +6421,9 @@ class TwitTUIForm(toga.App):
                             for p in range(2, total_pages + 1):
                                 if len(seen_keys) >= total_count:
                                     break
+                                if p in fetched_pages:
+                                    continue
+                                fetched_pages.add(p)
                                 n_url = f'https://twit.tv/api/v1.0/episodes?filter[shows]={show_id}&page={p}&range={page_size}'
                                 if sort:
                                     n_url += f'&sort={sort}'
@@ -5975,8 +6441,12 @@ class TwitTUIForm(toga.App):
                                         if k:
                                             seen_keys.add(k)
                         elif total_count is None and next_link:
-                            curr_page = 2
+                            curr_page = max(2, last_fetched_page + 1)
                             while next_link:
+                                if curr_page in fetched_pages:
+                                    curr_page += 1
+                                    continue
+                                fetched_pages.add(curr_page)
                                 n_url = f'https://twit.tv/api/v1.0/episodes?filter[shows]={show_id}&page={curr_page}&range={page_size}'
                                 if sort:
                                     n_url += f'&sort={sort}'
@@ -5997,7 +6467,8 @@ class TwitTUIForm(toga.App):
                                 curr_page += 1
 
                         self._episodes_cache[show_id_key] = merged
-                        self._save_to_persistent_cache('episodes', show_id_key, merged)
+                        if not getattr(self, '_defer_episodes_persist', False):
+                            self._save_to_persistent_cache('episodes', show_id_key, merged)
                         self._episodes_all_loaded = (
                             len(seen_keys) >= total_count if total_count is not None
                             else not next_link
@@ -6017,7 +6488,8 @@ class TwitTUIForm(toga.App):
                                     if k:
                                         seen_keys.add(k)
 
-                        self._save_to_persistent_cache('episodes', show_id_key, self._episodes_cache[show_id_key])
+                        if not getattr(self, '_defer_episodes_persist', False):
+                            self._save_to_persistent_cache('episodes', show_id_key, self._episodes_cache[show_id_key])
                         self._episodes_all_loaded = not next_link and (
                             int(count) <= page * page_size if str(count).isdigit()
                             else len(episodes) < page_size
@@ -6543,12 +7015,7 @@ class TwitTUIForm(toga.App):
         except Exception as e:
             err_msg = f"Failed to open URL in browser: {e}"
             print(f"Error: {err_msg}")
-            host_win = self._active_dialog_window()
-            if host_win:
-                try:
-                    host_win.error_dialog("Browser Error", err_msg)
-                except Exception:
-                    pass
+            self._show_dialog_threadsafe("error", "Browser Error", err_msg)
 
     def generate_transcript_slug_candidates(self, show_name: str, ep_num: str) -> list:
         """Generate candidate transcript URL slugs for a show and episode number."""
@@ -7160,6 +7627,7 @@ class TwitTUIForm(toga.App):
 
                 # Description / Show notes
                 desc_text = meta.get('description') or ''
+                scroll_desc_callback = None
                 if desc_text:
                     content_box.add(toga.Label("Description / Show Notes:", style=Pack(font_weight='bold', margin_top=6, margin_bottom=4), tooltip='Episode description and show notes'))
                     desc_input = toga.MultilineTextInput(
@@ -7174,16 +7642,33 @@ class TwitTUIForm(toga.App):
                         f_name = getattr(match_ctx, 'field_name', '') or (match_ctx.get('field_name', '') if isinstance(match_ctx, dict) else '')
                         char_offset = getattr(match_ctx, 'char_offset', 0) or (match_ctx.get('char_offset', 0) if isinstance(match_ctx, dict) else 0)
                         if 'description' in str(f_name).lower() and char_offset > 0:
-                            try:
-                                if hasattr(desc_input, '_impl') and hasattr(desc_input._impl, 'native'):
-                                    native = desc_input._impl.native
-                                    if hasattr(native, 'get_buffer'):
-                                        buf = native.get_buffer()
-                                        iter_pos = buf.get_iter_at_offset(char_offset)
+                            def _scroll_desc_to_match(target_input=desc_input, offset=int(char_offset)) -> bool:
+                                try:
+                                    impl = getattr(target_input, '_impl', None)
+                                    if impl is None:
+                                        return False
+                                    # In toga-gtk 0.5.x, native is Gtk.ScrolledWindow and native_textview is Gtk.TextView
+                                    textview = getattr(impl, 'native_textview', None)
+                                    if textview is None:
+                                        native = getattr(impl, 'native', None)
+                                        if native is not None and hasattr(native, 'get_buffer'):
+                                            textview = native
+                                        elif native is not None and hasattr(native, 'get_child'):
+                                            child = native.get_child()
+                                            if child is not None and hasattr(child, 'get_buffer'):
+                                                textview = child
+                                    if textview is not None and hasattr(textview, 'get_buffer'):
+                                        buf = textview.get_buffer()
+                                        max_chars = buf.get_char_count() if hasattr(buf, 'get_char_count') else len(desc_text)
+                                        clamped = max(0, min(offset, int(max_chars)))
+                                        iter_pos = buf.get_iter_at_offset(clamped)
                                         buf.place_cursor(iter_pos)
-                                        native.scroll_to_iter(iter_pos, 0.1, True, 0.0, 0.2)
-                            except Exception:
-                                pass
+                                        textview.scroll_to_iter(iter_pos, 0.1, True, 0.0, 0.2)
+                                except Exception:
+                                    pass
+                                return False
+
+                            scroll_desc_callback = _scroll_desc_to_match
 
                 # Bottom Action Bar
                 btn_box = toga.Box(style=Pack(direction=ROW, margin_top=6, align_items='center'))
@@ -7196,6 +7681,12 @@ class TwitTUIForm(toga.App):
                 win.content = content_box
                 self._configure_metadata_link_rows(link_rows, content_box)
                 win.show()
+                if callable(scroll_desc_callback):
+                    try:
+                        from gi.repository import GLib
+                        GLib.idle_add(scroll_desc_callback)
+                    except Exception:
+                        scroll_desc_callback()
 
             except Exception as e:
                 print(f"Error displaying custom episode metadata window ({e}), falling back to info_dialog.")
@@ -7463,7 +7954,14 @@ class TwitTUIForm(toga.App):
                 )
                 self.update_episodes_display()
 
-        self._run_network(lambda: worker.search_episodes(query, show_id=show_id, show_name=selected_show), done)
+        def _safe_search():
+            try:
+                return worker.search_episodes(query, show_id=show_id, show_name=selected_show)
+            except Exception as e:
+                print(f"Unexpected error searching episodes: {e}")
+                return []
+
+        self._run_network(_safe_search, done)
 
     def on_clear_search_press(self, widget=None) -> None:
         """Clear search input text and restore full episode catalog for selected show."""
@@ -7500,14 +7998,35 @@ class TwitTUIForm(toga.App):
                 episodes = []
                 page = 1
                 batch = []
-                while token == self._episode_request:
-                    batch = worker.fetch_episodes(show_id, page=page)
-                    if not batch:
-                        break
-                    episodes.extend(batch)
-                    if getattr(worker, '_episodes_all_loaded', False):
-                        break
-                    page += 1
+                show_id_key = str(show_id) if show_id is not None else ''
+                # Defer per-page SQLite re-serialization inside the multi-page loop so
+                # large shows persist once instead of incurring O(N^2) write amplification.
+                worker._defer_episodes_persist = True
+                try:
+                    while token == self._episode_request:
+                        batch = worker.fetch_episodes(show_id, page=page)
+                        if not batch:
+                            break
+                        episodes.extend(batch)
+                        if getattr(worker, '_episodes_all_loaded', False):
+                            break
+                        page += 1
+                except Exception as e:
+                    print(f"Unexpected error loading episodes for show {show_id}: {e}")
+                finally:
+                    worker._defer_episodes_persist = False
+                    if (
+                        show_id_key
+                        and getattr(worker, '_episodes_from_api', False)
+                        and isinstance(getattr(worker, '_episodes_cache', None), dict)
+                        and show_id_key in worker._episodes_cache
+                    ):
+                        try:
+                            worker._save_to_persistent_cache(
+                                'episodes', show_id_key, worker._episodes_cache[show_id_key]
+                            )
+                        except Exception:
+                            pass
                 return episodes, page if batch else max(1, page - 1)
 
             def done(result):
@@ -7547,7 +8066,14 @@ class TwitTUIForm(toga.App):
                     if callable(callback):
                         callback()
 
-            self._run_network(fetch_all, done)
+            try:
+                self._run_network(fetch_all, done)
+            except Exception as e:
+                print(f"Failed to schedule episode load: {e}")
+                if held:
+                    self._set_rate_limit_wait(False)
+                if callable(callback):
+                    callback()
         else:
             self.current_episodes = []
             self.update_episodes_display()
@@ -7590,7 +8116,18 @@ class TwitTUIForm(toga.App):
             finally:
                 self._set_rate_limit_wait(False)
 
-        self._run_network(lambda: worker.fetch_episodes(show_id, page=next_page), done)
+        def _safe_fetch_next():
+            try:
+                return worker.fetch_episodes(show_id, page=next_page)
+            except Exception as e:
+                print(f"Unexpected error fetching next episode page: {e}")
+                return []
+
+        try:
+            self._run_network(_safe_fetch_next, done)
+        except Exception as e:
+            print(f"Failed to schedule next episode page load: {e}")
+            self._set_rate_limit_wait(False)
 
     def _append_episode_page(self, token, next_page, new_episodes):
         if token != self._episode_request:

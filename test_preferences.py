@@ -22,6 +22,10 @@ class TestPreferences(unittest.TestCase):
     def setUp(self) -> None:
         patch_toga_textual()
         patch_toga_tooltips()
+        self._env_backup = dict(os.environ)
+        self._tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp_dir.cleanup)
+        os.environ['SNAP_USER_DATA'] = self._tmp_dir.name
         os.environ['TWITAUDIOONLY'] = '0'
         os.environ['TWITCLUBSHOWFOLDERS'] = '0'
         self.form = TwitTUIForm(
@@ -36,6 +40,8 @@ class TestPreferences(unittest.TestCase):
         loop = getattr(self.form, 'loop', None)
         if loop and not loop.is_running() and not loop.is_closed():
             loop.close()
+        os.environ.clear()
+        os.environ.update(self._env_backup)
 
     def test_settings_are_in_preferences_not_main_window(self) -> None:
         main_children = self.form.main_window.content.children

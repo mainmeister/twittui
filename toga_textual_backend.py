@@ -20,7 +20,7 @@ from textual._context import NoActiveAppError, active_app, active_message_pump
 from textual.app import SystemCommand
 from textual.binding import Binding
 from textual.screen import ModalScreen, Screen
-from textual.containers import Vertical, Horizontal
+from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.widgets import (
     Button,
     DataTable,
@@ -725,8 +725,7 @@ class OpenFileDialog:
         self.multiple_select = multiple_select
 
     def show(self, host_window: Any, future: Any) -> None:
-        if not future.done():
-            future.set_result(None)
+        _resolve_dialog_future(future, None)
 
 
 class SaveFileDialog:
@@ -736,8 +735,7 @@ class SaveFileDialog:
         self.initial_directory = initial_directory
 
     def show(self, host_window: Any, future: Any) -> None:
-        if not future.done():
-            future.set_result(None)
+        _resolve_dialog_future(future, None)
 
 
 class DialogsFactory:
@@ -1165,37 +1163,49 @@ class TextualTable(Widget):
     def create(self) -> None:
         self._columns: list[Any] = []
         self._rows: list[Any] = []
+        self._col_keys: list[Any] = []
+        self._row_keys: list[Any] = []
         self.native = TogaDataTable(self)
+
+    def _is_native_ready(self) -> bool:
+        return bool(
+            getattr(self.native, 'is_mounted', False)
+            or getattr(self.native, 'is_attached', False)
+        )
+
+    def _format_row_values(self, row: Any) -> list[str]:
+        row_vals = []
+        for col in self.interface.columns:
+            val = getattr(row, col.accessor, '')
+            row_vals.append(str(val if val is not None else ''))
+        return row_vals
 
     def _sync_data_to_native(self, force: bool = False) -> None:
         if hasattr(self.native, '_marked_rows'):
             self.native._marked_rows = {
                 idx for idx in self.native._marked_rows if 0 <= idx < len(self._rows)
             }
-        if not force and not (
-            getattr(self.native, 'is_mounted', False)
-            or getattr(self.native, 'is_attached', False)
-        ):
+        if not force and not self._is_native_ready():
             return
         try:
             self.native.clear(columns=True)
+            self._col_keys = []
+            self._row_keys = []
             headings = [col.heading for col in self.interface.columns]
             if headings:
-                self.native.add_columns(*headings)
+                self._col_keys = list(self.native.add_columns(*headings))
             is_multi = bool(self.interface.multiple_select)
             marked = getattr(self.native, '_marked_rows', set())
             for idx, row in enumerate(self._rows):
-                row_vals = []
-                for col in self.interface.columns:
-                    val = getattr(row, col.accessor, '')
-                    row_vals.append(str(val if val is not None else ''))
+                row_vals = self._format_row_values(row)
                 if is_multi:
-                    self.native.add_row(
+                    rk = self.native.add_row(
                         *row_vals,
                         label=self.native._row_mark_label(idx in marked),
                     )
                 else:
-                    self.native.add_row(*row_vals)
+                    rk = self.native.add_row(*row_vals)
+                self._row_keys.append(rk)
             self.native.refresh_bindings()
         except Exception:
             pass
@@ -1230,11 +1240,36 @@ class TextualTable(Widget):
             self.native._marked_rows = {
                 (r + 1 if r >= index else r) for r in self.native._marked_rows
             }
+        if not self._is_native_ready():
+            return
+        # Fast O(1) incremental append when inserting at tail with initialized columns
+        if (
+            index == len(self._rows) - 1
+            and len(self._col_keys) == len(self.interface.columns)
+            and len(self._col_keys) > 0
+            and len(self._row_keys) == len(self._rows) - 1
+        ):
+            try:
+                row_vals = self._format_row_values(item)
+                if self.interface.multiple_select:
+                    marked = getattr(self.native, '_marked_rows', set())
+                    rk = self.native.add_row(
+                        *row_vals,
+                        label=self.native._row_mark_label(index in marked),
+                    )
+                else:
+                    rk = self.native.add_row(*row_vals)
+                self._row_keys.append(rk)
+                self.native.refresh_bindings()
+                return
+            except Exception:
+                pass
         self._sync_data_to_native()
 
     def source_remove(self, index: int, item: Any) -> None:
         removed_marked = False
-        if 0 <= index < len(self._rows):
+        valid_index = 0 <= index < len(self._rows)
+        if valid_index:
             del self._rows[index]
             if hasattr(self.native, '_marked_rows') and self.native._marked_rows:
                 removed_marked = index in self.native._marked_rows
@@ -1243,11 +1278,48 @@ class TextualTable(Widget):
                     for r in self.native._marked_rows
                     if r != index
                 }
-        self._sync_data_to_native()
+        if self._is_native_ready():
+            if valid_index and len(self._row_keys) == len(self._rows) + 1:
+                try:
+                    rk = self._row_keys.pop(index)
+                    self.native.remove_row(rk)
+                    if hasattr(self.native, '_refresh_marked_visuals'):
+                        self.native._refresh_marked_visuals()
+                    else:
+                        self.native.refresh_bindings()
+                except Exception:
+                    self._sync_data_to_native()
+            else:
+                self._sync_data_to_native()
         if removed_marked and self.interface.on_select:
             self.interface.on_select()
 
     def source_change(self, item: Any) -> None:
+        if not self._is_native_ready():
+            return
+        # Fast O(columns) in-place cell update for the modified row
+        row_idx = None
+        for idx, existing in enumerate(self._rows):
+            if existing is item:
+                row_idx = idx
+                break
+        if row_idx is None:
+            for idx, existing in enumerate(self._rows):
+                if existing == item:
+                    row_idx = idx
+                    break
+        if (
+            row_idx is not None
+            and 0 <= row_idx < len(self._row_keys)
+            and len(self._col_keys) == len(self.interface.columns)
+        ):
+            try:
+                rk = self._row_keys[row_idx]
+                for col_key, val_str in zip(self._col_keys, self._format_row_values(item)):
+                    self.native.update_cell(rk, col_key, val_str)
+                return
+            except Exception:
+                pass
         self._sync_data_to_native()
 
     def get_selection(self) -> list[int] | int | None:
@@ -1288,13 +1360,19 @@ class TogaProgressBar(TextualProgressBar):
         self.interface = impl.interface
         self.impl = impl
 
+    def on_mount(self, event: Any = None) -> None:
+        try:
+            self.update(total=self.impl._max, progress=self.impl._value)
+        except Exception:
+            pass
+
 
 class TextualProgressBarImpl(Widget):
     """Toga ProgressBar backend implementation for Textual."""
 
     def create(self) -> None:
-        self._max = 100.0
-        self._value = 0.0
+        self._max: float | None = 100.0
+        self._value: float = 0.0
         self._running = False
         self.native = TogaProgressBar(self)
 
@@ -1312,22 +1390,20 @@ class TextualProgressBarImpl(Widget):
 
     def set_value(self, value: float) -> None:
         self._value = value
-        if getattr(self.native, 'is_mounted', False):
-            try:
-                self.native.update(progress=value)
-            except Exception:
-                pass
+        try:
+            self.native.update(progress=value)
+        except Exception:
+            pass
 
-    def get_max(self) -> float:
+    def get_max(self) -> float | None:
         return self._max
 
-    def set_max(self, value: float) -> None:
+    def set_max(self, value: float | None) -> None:
         self._max = value
-        if getattr(self.native, 'is_mounted', False):
-            try:
-                self.native.update(total=value)
-            except Exception:
-                pass
+        try:
+            self.native.update(total=value)
+        except Exception:
+            pass
 
     def rehint(self) -> None:
         self.interface.intrinsic.width = at_least(20)
@@ -1337,19 +1413,33 @@ class TextualProgressBarImpl(Widget):
 class TextualWebView(Widget):
     """Toga WebView fallback implementation for Textual."""
 
-    def create(self) -> None:
-        self.native = Static("WebView (Documentation / Web Content)")
-        self._url = ""
-        self._content = ""
+    SUPPORTS_ON_NAVIGATION_STARTING = False
 
-    def set_content(self, root_url: str, content: str) -> None:
+    def create(self) -> None:
+        self._url: str | None = None
+        self._content: str = ""
+        self._user_agent: str = "TwitTUI"
+        self.native_static = Static(
+            "WebView (Documentation / Web Content)",
+            markup=False,
+        )
+        self.native = VerticalScroll(self.native_static)
+        self.native.can_focus = True
+
+    def get_user_agent(self) -> str:
+        return self._user_agent
+
+    def set_user_agent(self, value: str | None) -> None:
+        self._user_agent = value or "TwitTUI"
+
+    def set_content(self, root_url: str | None, content: str) -> None:
         import re as _re
         import html as _html
-        self._url = root_url or ""
+        self._url = root_url or None
         text = content or ""
         if "<" in text and ">" in text:
-            text = _re.sub(r"<style[^>]*>.*?</style>", "", text, flags=_re.S | _re.I)
-            text = _re.sub(r"<script[^>]*>.*?</script>", "", text, flags=_re.S | _re.I)
+            text = _re.sub(r"<style[^>]*>.*?</style\s*>", "", text, flags=_re.S | _re.I)
+            text = _re.sub(r"<script[^>]*>.*?</script\s*>", "", text, flags=_re.S | _re.I)
             text = _re.sub(r"<\s*br\s*/?>", "\n", text, flags=_re.I)
             text = _re.sub(r"</\s*(?:p|div|h[1-6]|li|tr)\s*>", "\n", text, flags=_re.I)
             text = _re.sub(r"<[^>]+>", "", text)
@@ -1357,19 +1447,50 @@ class TextualWebView(Widget):
             text = _re.sub(r"\n{3,}", "\n\n", text).strip()
         self._content = text
         try:
-            self.native.update(text if text else "WebView (Documentation / Web Content)")
+            display_text = text if text else "WebView (Documentation / Web Content)"
+            self.native_static.update(display_text)
         except Exception:
             pass
-
-    def set_url(self, url: str) -> None:
-        self._url = url or ""
         try:
-            self.native.update(f"Web Content: {self._url}")
+            if hasattr(self, "interface") and getattr(self.interface, "on_webview_load", None):
+                self.interface.on_webview_load()
         except Exception:
             pass
 
-    def get_url(self) -> str:
+    def set_url(self, url: str | None, future: asyncio.Future | None = None) -> None:
+        self._url = url or None
+        try:
+            label = f"Web Content: {self._url}" if self._url else "WebView (Documentation / Web Content)"
+            self.native_static.update(label)
+        except Exception:
+            pass
+        if future is not None and not future.done():
+            try:
+                future.set_result(None)
+            except Exception:
+                pass
+        if self._url:
+            try:
+                if hasattr(self, "interface") and getattr(self.interface, "on_webview_load", None):
+                    self.interface.on_webview_load()
+            except Exception:
+                pass
+
+    def get_url(self) -> str | None:
         return self._url
+
+    def get_cookies(self) -> Any:
+        from http.cookiejar import CookieJar
+        from toga.widgets.webview import CookiesResult
+        result = CookiesResult(None)
+        result.set_result(CookieJar())
+        return result
+
+    def evaluate_javascript(self, javascript: str, on_result: Any = None) -> Any:
+        from toga.widgets.webview import JavaScriptResult
+        result = JavaScriptResult(on_result)
+        result.set_result(None)
+        return result
 
     def rehint(self) -> None:
         self.interface.intrinsic.width = at_least(20)
@@ -1380,11 +1501,30 @@ class TextualDivider(Widget):
     """Toga Divider implementation for Textual."""
 
     def create(self) -> None:
-        self.native = Rule()
+        from toga.constants import Direction
+        self._direction = Direction.HORIZONTAL
+        self.native = Rule(orientation="horizontal")
+
+    def get_direction(self) -> Any:
+        return self._direction
+
+    def set_direction(self, value: Any) -> None:
+        from toga.constants import Direction
+        self._direction = value
+        orientation = "vertical" if value == Direction.VERTICAL else "horizontal"
+        try:
+            self.native.orientation = orientation
+        except Exception:
+            self.native = Rule(orientation=orientation)
 
     def rehint(self) -> None:
-        self.interface.intrinsic.width = at_least(10)
-        self.interface.intrinsic.height = 1
+        from toga.constants import Direction
+        if getattr(self, "_direction", None) == Direction.VERTICAL:
+            self.interface.intrinsic.width = 1
+            self.interface.intrinsic.height = at_least(3)
+        else:
+            self.interface.intrinsic.width = at_least(10)
+            self.interface.intrinsic.height = 1
 
 
 class TextualActivityIndicator(Widget):
@@ -1393,15 +1533,18 @@ class TextualActivityIndicator(Widget):
     def create(self) -> None:
         self._running = False
         self.native = LoadingIndicator()
+        self.native.display = False
 
     def is_running(self) -> bool:
         return self._running
 
     def start(self) -> None:
         self._running = True
+        self.native.display = True
 
     def stop(self) -> None:
         self._running = False
+        self.native.display = False
 
     def rehint(self) -> None:
         self.interface.intrinsic.width = at_least(5)
@@ -1838,7 +1981,7 @@ def patch_toga_textual() -> None:
                     current_focused = getattr(screen_obj, "focused", None)
                     if current_focused is not None and current_focused in content_native.walk_children():
                         return
-                    for candidate in content_native.query("Input, Select, DataTable, Switch, Button"):
+                    for candidate in content_native.query("Input, Select, DataTable, Switch, Button, VerticalScroll"):
                         if getattr(candidate, "can_focus", False) and not getattr(candidate, "disabled", False):
                             candidate.focus()
                             break
@@ -1972,6 +2115,13 @@ def patch_toga_textual() -> None:
                     if isinstance(stack, list) and self.native in stack and len(stack) > 1:
                         try:
                             while len(stack) > 1 and stack[-1] is not self.native:
+                                top_screen = stack[-1]
+                                pending_future = getattr(top_screen, "future", None) or getattr(top_screen, "_future", None)
+                                if pending_future is not None:
+                                    _resolve_dialog_future(
+                                        pending_future,
+                                        getattr(top_screen, "default_result", None),
+                                    )
                                 app_native.pop_screen()
                             if len(stack) > 1 and stack[-1] is self.native:
                                 app_native.pop_screen()

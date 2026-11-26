@@ -174,12 +174,14 @@ class TestTwitTUISecurity(unittest.TestCase):
 
     def test_initial_streamer_migrates_legacy_defaults(self) -> None:
         """Verify form initializes legacy defaults (e.g. vlc {url}, vlc %f) to env LC_ALL=C vlc %f."""
-        for legacy_val in ["vlc {url}", "vlc %f", "vlc", ""]:
-            os.environ['twitclubstreamer'] = legacy_val
-            form = TwitTUIForm(formal_name="TwitTUI", app_id="org.twit.test")
-            setting = form.get_initial_streamer_setting()
-            self.assertEqual(setting, "env LC_ALL=C vlc %f")
-            self.assertEqual(os.environ.get('twitclubstreamer'), "env LC_ALL=C vlc %f")
+        with tempfile.TemporaryDirectory() as tmp_dir, \
+             unittest.mock.patch.dict(os.environ, {'SNAP_USER_DATA': tmp_dir}, clear=False):
+            for legacy_val in ["vlc {url}", "vlc %f", "vlc", ""]:
+                os.environ['twitclubstreamer'] = legacy_val
+                form = TwitTUIForm(formal_name="TwitTUI", app_id="org.twit.test")
+                setting = form.get_initial_streamer_setting()
+                self.assertEqual(setting, "env LC_ALL=C vlc %f")
+                self.assertEqual(os.environ.get('twitclubstreamer'), "env LC_ALL=C vlc %f")
 
     def test_get_full_club_twit_url_enforces_https(self) -> None:
         """Verify Memberful URLs upgrade http to https."""

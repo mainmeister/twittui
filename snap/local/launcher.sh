@@ -8,10 +8,18 @@ if [ -n "$SNAP" ]; then
         mkdir -p "$SNAP_USER_DATA"
     fi
 
-    # Set up user configuration if not already present
+    # Set up user configuration if not already present (owner-only 0600 permissions)
     if [ -n "$SNAP_USER_DATA" ] && [ ! -f "$SNAP_USER_DATA/.env" ]; then
         if [ -f "$SNAP/.env.example" ]; then
             cp "$SNAP/.env.example" "$SNAP_USER_DATA/.env" 2>/dev/null || true
+            chmod 600 "$SNAP_USER_DATA/.env" 2>/dev/null || true
+        fi
+    fi
+
+    # Under strict Snap confinement, default to bundled mpv when vlc is unavailable
+    if [ -z "$TWITCLUBSTREAMER" ] && [ -z "$twitclubstreamer" ]; then
+        if ! command -v vlc >/dev/null 2>&1 && [ -x "$SNAP/usr/bin/mpv" ]; then
+            export TWITCLUBSTREAMER="mpv %f"
         fi
     fi
 
@@ -89,11 +97,9 @@ if [ -n "$SNAP" ]; then
         PYTHON_BIN="/usr/bin/python3"
     fi
 
-    # Launch application
+    # Launch application via installed Python modules in site-packages (avoiding stale venv shebangs)
     if [ -f "$SNAP/main.py" ]; then
         exec "$PYTHON_BIN" "$SNAP/main.py" "$@"
-    elif [ -x "$SNAP/bin/twittui" ]; then
-        exec "$SNAP/bin/twittui" "$@"
     else
         exec "$PYTHON_BIN" -m main "$@"
     fi

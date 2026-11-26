@@ -6,9 +6,10 @@ Matching Pipeline:
 3. Phonetic Match (Double Metaphone) - Fallback for Phonetic Outliers
 """
 
+import html
 import re
 from dataclasses import dataclass, asdict
-from typing import List, Dict, Any, Tuple, Set, Optional
+from typing import List, Dict, Any, Tuple, Optional
 
 try:
     from rapidfuzz import fuzz as rf_fuzz
@@ -182,57 +183,52 @@ def format_file_size_str(val: Any) -> str:
     return s
 
 
+def _clean_html_for_search(text: str) -> str:
+    """Strip HTML tags and unescape HTML entities matching TwitTUIForm.clean_html_text()."""
+    if not text:
+        return ""
+    s = str(text)
+    if "<" in s or "&" in s:
+        s = re.sub(r"<\s*br\s*/?>", "\n", s, flags=re.I)
+        s = re.sub(r"</\s*p\s*>", "\n\n", s, flags=re.I)
+        s = re.sub(r"</\s*li\s*>", "\n", s, flags=re.I)
+        s = re.sub(r"<[^>]+>", "", s)
+        s = html.unescape(s)
+        s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
+
 def extract_searchable_text(episode: Any) -> str:
-    """Extract and combine searchable text fields from an episode dict or object."""
+    """Extract and combine searchable text fields from an episode dict or object.
+
+    Derived directly from get_episode_fields() so filtering and match-context
+    extraction always search the exact same set of fields (title, hosts/guests,
+    topics/tags, description/teaser/show notes, episode number, length, size).
+    """
     if not episode:
         return ""
-    fields = []
-    keys = (
-        'title', 'label', 'description', 'summary', 'body', 'number',
-        'episode', 'episodeNumber', 'show_notes', 'notes',
-        'length', 'duration', 'runningTime', 'running_time',
-        'size', 'file_size', 'fileSize', 'enclosure_length', 'bytes'
-    )
 
-    if isinstance(episode, dict):
-        for key in keys:
-            val = episode.get(key)
-            if val is not None and str(val).strip():
-                fields.append(str(val).strip())
-                if key in ('length', 'duration', 'runningTime', 'running_time'):
-                    dur_fmt = format_duration_str(val)
-                    if dur_fmt and dur_fmt not in fields:
-                        fields.append(dur_fmt)
-                elif key in ('size', 'file_size', 'fileSize', 'enclosure_length', 'bytes'):
-                    sz_fmt = format_file_size_str(val)
-                    if sz_fmt and sz_fmt not in fields:
-                        fields.append(sz_fmt)
-        if '_embedded' in episode:
-            embedded = episode.get('_embedded') or {}
-            if isinstance(embedded, dict):
-                for credit in embedded.get('credits', []):
-                    if isinstance(credit, dict):
-                        fields.append(str(credit.get('label', '')))
-                        fields.append(str(credit.get('name', '')))
-        if 'episode_data' in episode and isinstance(episode['episode_data'], dict):
-            fields.append(extract_searchable_text(episode['episode_data']))
-    else:
-        for key in keys:
-            val = getattr(episode, key, None)
-            if val is not None and str(val).strip():
-                fields.append(str(val).strip())
-                if key in ('length', 'duration', 'runningTime', 'running_time'):
-                    dur_fmt = format_duration_str(val)
-                    if dur_fmt and dur_fmt not in fields:
-                        fields.append(dur_fmt)
-                elif key in ('size', 'file_size', 'fileSize', 'enclosure_length', 'bytes'):
-                    sz_fmt = format_file_size_str(val)
-                    if sz_fmt and sz_fmt not in fields:
-                        fields.append(sz_fmt)
-        if hasattr(episode, 'episode_data') and isinstance(episode.episode_data, dict):
-            fields.append(extract_searchable_text(episode.episode_data))
+    parts: List[str] = [field_text for _, field_text in get_episode_fields(episode) if field_text]
+    seen = set(parts)
 
-    return " ".join(fields)
+    # Also include any additional secondary descriptive keys (e.g. teaser/summary alongside description)
+    extra_keys = ('label', 'summary', 'body', 'show_notes', 'notes', 'teaser', 'snippet')
+    sources: List[Any] = [episode]
+    if isinstance(episode, dict) and isinstance(episode.get('episode_data'), dict):
+        sources.append(episode['episode_data'])
+    elif hasattr(episode, 'episode_data') and isinstance(getattr(episode, 'episode_data', None), dict):
+        sources.append(episode.episode_data)
+
+    for src in sources:
+        for key in extra_keys:
+            val = src.get(key) if isinstance(src, dict) else getattr(src, key, None)
+            if val is not None:
+                cleaned = _clean_html_for_search(str(val))
+                if cleaned and cleaned not in seen:
+                    seen.add(cleaned)
+                    parts.append(cleaned)
+
+    return " ".join(parts)
 
 
 def compute_match_score(
@@ -276,7 +272,7 @@ def compute_match_score(
     if not fuzzy_enabled and not phonetic_enabled:
         return 0.0
 
-    cand_words = [w for w in re.findall(r'[a-z0-9]+', t_clean) if w]
+    cand_words = [w for w in re.findall(r'[a-zçñ0-9]+', t_clean) if w]
     if not cand_words:
         return 0.0
 
@@ -378,7 +374,13 @@ def get_episode_fields(episode: Any) -> List[Tuple[str, str]]:
     else:
         if hasattr(episode, 'episode_data') and isinstance(episode.episode_data, dict):
             ep_data.update(episode.episode_data)
-        for attr in ('title', 'label', 'description', 'summary', 'body', 'number', 'episode', 'people', 'hosts', 'topics'):
+        for attr in (
+            'title', 'label', 'description', 'summary', 'body', 'show_notes', 'notes',
+            'teaser', 'snippet', 'number', 'episode', 'episodeNumber',
+            'people', 'hosts', 'guests', 'staff', 'topics', 'tags', 'categories',
+            'length', 'duration', 'runningTime', 'running_time',
+            'size', 'file_size', 'fileSize', 'enclosure_length', 'bytes',
+        ):
             if hasattr(episode, attr):
                 val = getattr(episode, attr)
                 if val:
@@ -429,10 +431,12 @@ def get_episode_fields(episode: Any) -> List[Tuple[str, str]]:
     if topics:
         fields.append(('Topics', ", ".join(topics)))
 
-    # 4. Description / Show Notes
+    # 4. Description / Show Notes (cleaned to match UI MultilineTextInput offsets)
     desc = ep_data.get('description') or ep_data.get('summary') or ep_data.get('body') or ep_data.get('show_notes') or ep_data.get('notes') or ep_data.get('teaser') or ep_data.get('snippet') or ''
     if desc:
-        fields.append(('Description / Show Notes', str(desc).strip()))
+        cleaned_desc = _clean_html_for_search(str(desc))
+        if cleaned_desc:
+            fields.append(('Description / Show Notes', cleaned_desc))
 
     # 5. Episode Number
     num = ep_data.get('number') or ep_data.get('episode') or ep_data.get('episodeNumber') or ''
@@ -518,17 +522,27 @@ def find_match_context(
                     score=100.0
                 )
 
-    # Priority 2: Fuzzy and Phonetic candidate evaluations
-    candidate_matches: List[MatchContext] = []
-    for field_label, field_text in fields:
-        word_iter = list(re.finditer(r'[A-Za-z0-9]+', field_text))
+    # Priority 2: Multi-field exact, fuzzy, and phonetic evaluations.
+    # Every query word must match at least one field (preventing partial-query false positives).
+    matches_by_word: List[List[MatchContext]] = [[] for _ in q_words]
+    field_words_cache = [
+        (field_label, field_text, list(re.finditer(r'[A-Za-zÇçÑñ0-9]+', field_text)))
+        for field_label, field_text in fields
+    ]
 
-        for qw in q_words:
-            m = re.search(r'\b' + re.escape(qw) + r'\b', field_text, re.IGNORECASE) or re.search(re.escape(qw), field_text, re.IGNORECASE)
+    for word_idx, qw in enumerate(q_words):
+        effective_threshold = min_word_threshold if len(qw) >= 4 else 80.0
+        qw_p, qw_s = double_metaphone(qw) if phonetic_enabled else ("", "")
+
+        for field_label, field_text, word_iter in field_words_cache:
+            m = (
+                re.search(r'\b' + re.escape(qw) + r'\b', field_text, re.IGNORECASE)
+                or re.search(re.escape(qw), field_text, re.IGNORECASE)
+            )
             if m:
                 matched_token = field_text[m.start():m.end()]
                 snippet = extract_snippet(field_text, m.start(), len(matched_token))
-                candidate_matches.append(MatchContext(
+                matches_by_word[word_idx].append(MatchContext(
                     field_name=field_label,
                     matched_token=matched_token,
                     query_token=qw,
@@ -539,49 +553,76 @@ def find_match_context(
                 ))
                 continue
 
-            if not word_iter:
+            if not word_iter or (not fuzzy_enabled and not phonetic_enabled):
                 continue
-
-            qw_p, qw_s = double_metaphone(qw) if phonetic_enabled else (None, None)
 
             for w_m in word_iter:
                 cw = w_m.group(0)
                 cw_lower = cw.lower()
 
-                # Tier 3: Phonetic (check if words share Double Metaphone phonetic key)
-                if phonetic_enabled and qw_p:
-                    cw_p, cw_s = double_metaphone(cw_lower)
-                    if (qw_p and (qw_p == cw_p or qw_p == cw_s)) or (qw_s and (qw_s == cw_p or qw_s == cw_s)):
-                        p_score = 95.0 if (qw_p == cw_p) else 88.0
-                        snippet = extract_snippet(field_text, w_m.start(), len(cw))
-                        candidate_matches.append(MatchContext(
-                            field_name=field_label,
-                            matched_token=cw,
-                            query_token=qw,
-                            match_tier=f'Phonetic Match ("{qw}" ≈ "{cw}")',
-                            snippet=snippet,
-                            char_offset=w_m.start(),
-                            score=p_score
-                        ))
-                        continue
-
-                # Tier 2: Fuzzy (for non-phonetic typos and subsequence alignments)
+                f_score = 0.0
                 if fuzzy_enabled:
                     r = fuzzy_ratio(qw, cw_lower)
                     sub = fzf_subsequence_score(qw, cw_lower) if (len(qw) >= 3 and len(qw) <= len(cw_lower)) else 0.0
                     f_score = max(r, sub)
-                    if f_score >= min_word_threshold:
-                        snippet = extract_snippet(field_text, w_m.start(), len(cw))
-                        candidate_matches.append(MatchContext(
-                            field_name=field_label,
-                            matched_token=cw,
-                            query_token=qw,
-                            match_tier=f"Fuzzy Match ({int(round(f_score))}% similarity)",
-                            snippet=snippet,
-                            char_offset=w_m.start(),
-                            score=min(90.0, f_score)
-                        ))
 
+                p_score = 0.0
+                if phonetic_enabled and (qw_p or qw_s):
+                    cw_p, cw_s = double_metaphone(cw_lower)
+                    if qw_p and (qw_p == cw_p or qw_p == cw_s):
+                        p_score = 80.0
+                    elif qw_s and (qw_s == cw_p or qw_s == cw_s):
+                        p_score = 72.0
+
+                fuzzy_ok = fuzzy_enabled and f_score >= effective_threshold
+                phonetic_ok = phonetic_enabled and p_score >= effective_threshold
+
+                if not fuzzy_ok and not phonetic_ok:
+                    continue
+
+                snippet = extract_snippet(field_text, w_m.start(), len(cw))
+                if phonetic_ok and (not fuzzy_ok or p_score >= 80.0):
+                    # When a non-exact token shares the same primary phonetic code, report the
+                    # phonetic equivalence while keeping score aligned with compute_match_score()
+                    # so weak secondary phonetic coincidences never outrank stronger fuzzy matches.
+                    combined_score = min(99.0, max(p_score, f_score if fuzzy_ok else p_score))
+                    matches_by_word[word_idx].append(MatchContext(
+                        field_name=field_label,
+                        matched_token=cw,
+                        query_token=qw,
+                        match_tier=f'Phonetic Match ("{qw}" ≈ "{cw}")',
+                        snippet=snippet,
+                        char_offset=w_m.start(),
+                        score=combined_score
+                    ))
+                elif fuzzy_ok:
+                    matches_by_word[word_idx].append(MatchContext(
+                        field_name=field_label,
+                        matched_token=cw,
+                        query_token=qw,
+                        match_tier=f"Fuzzy Match ({int(round(f_score))}% similarity)",
+                        snippet=snippet,
+                        char_offset=w_m.start(),
+                        score=min(99.0, f_score)
+                    ))
+                else:
+                    matches_by_word[word_idx].append(MatchContext(
+                        field_name=field_label,
+                        matched_token=cw,
+                        query_token=qw,
+                        match_tier=f'Phonetic Match ("{qw}" ≈ "{cw}")',
+                        snippet=snippet,
+                        char_offset=w_m.start(),
+                        score=p_score
+                    ))
+
+        # Every query token must match somewhere in the episode
+        if not matches_by_word[word_idx]:
+            return None
+
+    candidate_matches: List[MatchContext] = [
+        mc for word_list in matches_by_word for mc in word_list
+    ]
     if not candidate_matches:
         return None
 

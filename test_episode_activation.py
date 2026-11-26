@@ -19,4 +19,4 @@ class TestEpisodeActivation(unittest.IsolatedAsyncioTestCase):
         table.on_activate(row=row)
         await asyncio.sleep(0)
 
-        form.on_stream_press.assert_awaited_once_with(table)
+        form.on_stream_press.assert_awaited_once_with(table, target_row=row)

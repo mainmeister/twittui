@@ -334,23 +334,38 @@ class TestInstallOption(unittest.TestCase):
     def test_resolve_toga_backend_clean_flag(self) -> None:
         """Verify resolve_toga_backend intercepts --clean and executes clean_build_artifacts."""
         from main import resolve_toga_backend
-        with patch("installer.clean_build_artifacts") as mock_clean, patch("sys.exit") as mock_exit:
-            resolve_toga_backend(["--clean", "--uninstall-pyinstaller"])
+        with patch("installer.clean_build_artifacts") as mock_clean, \
+             patch("sys.exit", side_effect=SystemExit(0)) as mock_exit:
+            with self.assertRaises(SystemExit) as cm:
+                resolve_toga_backend(["--clean", "--uninstall-pyinstaller"])
+            self.assertEqual(cm.exception.code, 0)
             mock_clean.assert_called_once_with(remove_pyinstaller=True, python_executable=None)
             mock_exit.assert_called_once_with(0)
 
     def test_resolve_toga_backend_install_flag(self) -> None:
         """Verify resolve_toga_backend intercepts --install and terminates without launching UI."""
         from main import resolve_toga_backend
-        with patch("installer.install_twittui") as mock_install, patch("sys.exit") as mock_exit:
-            resolve_toga_backend(["--install", "--install-dir", "/tmp/testbin"])
+        with patch("installer.install_twittui") as mock_install, \
+             patch("sys.exit", side_effect=SystemExit(0)) as mock_exit:
+            with self.assertRaises(SystemExit) as cm:
+                resolve_toga_backend(["--install", "--install-dir", "/tmp/testbin"])
+            self.assertEqual(cm.exception.code, 0)
             mock_install.assert_called_once_with(target_dir="/tmp/testbin", python_executable=None, clean_build_artifacts=True)
             mock_exit.assert_called_once_with(0)
 
     def test_configure_gtk_environment(self) -> None:
         """Verify configure_gtk_environment configures env vars and GI namespace versions."""
         from main import configure_gtk_environment
-        with patch.dict(os.environ, {"GTK_DEBUG": "1", "GDK_BACKEND": "wayland", "GTK_MODULES": "xapp-gtk3-module"}):
+        with patch.dict(
+            os.environ,
+            {
+                "DISPLAY": ":0",
+                "GTK_DEBUG": "1",
+                "GDK_BACKEND": "wayland",
+                "GTK_MODULES": "xapp-gtk3-module",
+            },
+        ):
+            os.environ.pop("WAYLAND_DISPLAY", None)
             configure_gtk_environment()
             self.assertFalse(os.environ.get("GTK_MODULES"))
             self.assertNotIn("GTK_DEBUG", os.environ)

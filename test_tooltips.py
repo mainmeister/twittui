@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -100,6 +101,10 @@ class TestMainFormUITooltips(unittest.TestCase):
     def setUp(self) -> None:
         patch_toga_textual()
         patch_toga_tooltips()
+        self._env_backup = dict(os.environ)
+        self._tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp_dir.cleanup)
+        os.environ['SNAP_USER_DATA'] = self._tmp_dir.name
         os.environ['TWITAUDIOONLY'] = '0'
         os.environ['TWITCLUBSHOWFOLDERS'] = '0'
         self.form = TwitTUIForm(formal_name="TwitTUI", app_id="org.twit.tooltiptest", cache_db_path=":memory:")
@@ -108,6 +113,10 @@ class TestMainFormUITooltips(unittest.TestCase):
              patch.object(self.form, 'fetch_shows', return_value=['This Week in Tech']), \
              patch.object(self.form, 'fetch_episodes', return_value=[]):
             self.form.startup()
+
+    def tearDown(self) -> None:
+        os.environ.clear()
+        os.environ.update(self._env_backup)
 
     def test_all_startup_elements_have_tooltips(self) -> None:
         """Ensure every single UI component instantiated in startup has a non-empty tooltip."""

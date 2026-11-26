@@ -3,7 +3,7 @@ Based on the Double Metaphone algorithm by Lawrence Philips (2000).
 """
 
 import re
-from typing import Tuple, List, Set
+from typing import Tuple, Set
 
 
 def double_metaphone(string: str) -> Tuple[str, str]:
@@ -11,13 +11,17 @@ def double_metaphone(string: str) -> Tuple[str, str]:
     if not string:
         return ("", "")
 
-    s = string.upper().strip()
-    # Filter out non-alphabetic characters
-    s = re.sub(r'[^A-Z]', '', s)
+    # Preserve A-Z, Ç, Ñ, and internal single spaces so multi-word and accented
+    # Double Metaphone rules (e.g. 'VAN ', 'VON ', 'SAN ', 'Ç', 'Ñ') remain reachable.
+    s = re.sub(r'[^A-ZÇÑ ]', '', string.upper())
+    s = re.sub(r'\s+', ' ', s).strip()
     if not s:
         return ("", "")
 
     length = len(s)
+    # Pad at the end with spaces for boundary checks (e.g. 'IER ', trailing ' ', 'JOSE ')
+    padded = s + "      "
+    is_slavo_germanic = ('W' in s) or ('K' in s) or ('CZ' in s) or ('WITZ' in s)
     primary = []
     secondary = []
     current = 0
@@ -28,16 +32,13 @@ def double_metaphone(string: str) -> Tuple[str, str]:
         return s[idx] in 'AEIOUY'
 
     def substr(start: int, length_sub: int) -> str:
-        if start < 0 or start >= length:
+        if start < 0 or start > length:
             return ""
-        return s[start:start + length_sub]
+        return padded[start:start + length_sub]
 
     def string_at(start: int, length_sub: int, *matches: str) -> bool:
         sub = substr(start, length_sub)
         return sub in matches
-
-    # Pad at the end for boundary checks
-    padded = s + "     "
 
     # Initial letter exceptions
     if substr(0, 2) in ('GN', 'KN', 'PN', 'WR', 'PS'):
@@ -197,8 +198,8 @@ def double_metaphone(string: str) -> Tuple[str, str]:
                     current += 3
                     continue
                 else:
-                    primary.append('T')
-                    secondary.append('K')
+                    primary.extend(('T', 'K'))
+                    secondary.extend(('T', 'K'))
                     current += 2
                     continue
 
@@ -255,21 +256,21 @@ def double_metaphone(string: str) -> Tuple[str, str]:
                     continue
 
             if substr(current + 1, 1) == 'N':
-                if current == 1 and is_vowel(0) and not string_at(0, 6, "DANGER", "RANGER", "MANGER"):
-                    primary.append('K')
+                if current == 1 and is_vowel(0) and not is_slavo_germanic:
+                    primary.extend(('K', 'N'))
                     secondary.append('N')
                 else:
-                    if not string_at(current + 2, 2, "EY") and substr(current + 1, 1) != "Y" and not string_at(0, 4, "SUGN"):
+                    if not string_at(current + 2, 2, "EY") and not is_slavo_germanic:
                         primary.append('N')
-                        secondary.append('K')
+                        secondary.extend(('K', 'N'))
                     else:
-                        primary.append('K')
-                        secondary.append('K')
+                        primary.extend(('K', 'N'))
+                        secondary.extend(('K', 'N'))
                 current += 2
                 continue
 
-            if string_at(current + 1, 2, "LI") and not string_at(0, 4, "VAN ", "VON "):
-                primary.append('K')
+            if string_at(current + 1, 2, "LI") and not is_slavo_germanic:
+                primary.extend(('K', 'L'))
                 secondary.append('L')
                 current += 2
                 continue
@@ -290,7 +291,9 @@ def double_metaphone(string: str) -> Tuple[str, str]:
                 current += 2
                 continue
 
-            if string_at(current + 1, 1, "E", "I", "Y") or string_at(current - 1, 4, "GGIE", "GGI"):
+            if string_at(current + 1, 1, "E", "I", "Y") or \
+                    string_at(current - 1, 4, "AGGI", "OGGI") or \
+                    string_at(current, 3, "GGI"):
                 if string_at(0, 4, "VAN ", "VON ") or string_at(0, 3, "SCH") or \
                         string_at(current + 1, 2, "ET"):
                     primary.append('K')
@@ -481,14 +484,10 @@ def double_metaphone(string: str) -> Tuple[str, str]:
                     if string_at(current + 3, 2, "OO", "ER", "EN", "UY", "ED", "EM"):
                         if string_at(current + 3, 2, "ER", "EN"):
                             primary.append('X')
-                            secondary.append('S')
-                            primary.append('K')
-                            secondary.append('K')
+                            secondary.extend(('S', 'K'))
                         else:
-                            primary.append('S')
-                            secondary.append('K')
-                            primary.append('K')
-                            secondary.append('K')
+                            primary.extend(('S', 'K'))
+                            secondary.extend(('S', 'K'))
                         current += 3
                         continue
                     else:
@@ -525,12 +524,12 @@ def double_metaphone(string: str) -> Tuple[str, str]:
             continue
 
         elif ch == 'T':
-            if string_at(current, 4, "TION", "TIAN", "TIEN"):
+            if string_at(current, 4, "TION", "TIEN") or string_at(current, 3, "TIA", "TCH"):
                 primary.append('X')
                 secondary.append('X')
                 current += 3
                 continue
-            if string_at(current, 3, "TCH", "TH"):
+            if string_at(current, 2, "TH") or string_at(current, 3, "TTH"):
                 if string_at(current + 2, 2, "OM", "AM") or string_at(0, 4, "VAN ", "VON ") or \
                         string_at(0, 3, "SCH"):
                     primary.append('T')
@@ -579,12 +578,8 @@ def double_metaphone(string: str) -> Tuple[str, str]:
                 current += 1
                 continue
             if string_at(current, 4, "WICZ", "WITZ"):
-                primary.append('T')
-                secondary.append('T')
-                primary.append('S')
-                secondary.append('F')
-                primary.append('X')
-                secondary.append('X')
+                primary.extend(('T', 'S'))
+                secondary.extend(('F', 'X'))
                 current += 4
                 continue
             current += 1
@@ -635,7 +630,7 @@ def get_phonetic_keys(text: str) -> Set[str]:
     """Extract unique Double Metaphone codes for all words in text."""
     if not text:
         return set()
-    words = re.findall(r'[A-Za-z0-9]+', str(text))
+    words = re.findall(r'[A-Za-zÇçÑñ0-9]+', str(text))
     keys = set()
     for w in words:
         if not w:

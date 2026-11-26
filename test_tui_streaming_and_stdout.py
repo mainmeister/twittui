@@ -27,10 +27,19 @@ class TestTUIStreamingAndStdout(unittest.TestCase):
     """Verify --tui does not emit spurious stdout output and does not hang when streaming."""
 
     def setUp(self) -> None:
+        import tempfile
+        self._env_backup = dict(os.environ)
+        self._tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp_dir.cleanup)
+        os.environ["SNAP_USER_DATA"] = self._tmp_dir.name
         os.environ["TOGA_BACKEND"] = "toga_textual"
         toga.platform.get_backend.cache_clear()
         toga.platform.get_factory.cache_clear()
         patch_toga_textual()
+
+    def tearDown(self) -> None:
+        os.environ.clear()
+        os.environ.update(self._env_backup)
 
     def test_tui_multi_resolution_stream_prompts_and_completes_without_hanging(self) -> None:
         """Streaming a multi-resolution episode in --tui must open TextualChoiceDialogScreen and not hang."""
