@@ -37,12 +37,11 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -e ".[security,fast-search,dev]"
+          pip install -e ".[gtk,security,fast-search,xml,dev]"
 
       - name: Syntax check all modules
         run: |
-          python -m py_compile *.py twittui/*.py twittui/ui/*.py twittui/search/*.py
+          python -m py_compile *.py twittui/*.py twittui/resources/*.py twittui/ui/*.py twittui/search/*.py
 
       - name: Run full test suite (headless Textual + Xvfb GTK)
         env:

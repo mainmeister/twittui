@@ -8,6 +8,11 @@ import unittest
 from unittest.mock import patch
 
 try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+
+try:
     import yaml
 except ImportError:
     yaml = None
@@ -277,21 +282,31 @@ class TestSnapPackaging(unittest.TestCase):
             with open(env_file, "r", encoding="utf-8") as fh:
                 self.assertEqual(fh.read(), "TWITCLUBSTREAMER=custom-player %f\n")
 
-    def test_requirements_and_setup(self) -> None:
-        """Verify requirements.txt and setup.py/pyproject.toml exist and declare core dependencies."""
+    def test_requirements_and_pyproject(self) -> None:
+        """Verify requirements.txt and consolidated pyproject.toml exist (without redundant setup.py)."""
         req_path = os.path.join(self.project_root, "requirements.txt")
         self.assertTrue(os.path.isfile(req_path), "requirements.txt must exist")
         with open(req_path, "r", encoding="utf-8") as f:
             req_content = f.read()
-        self.assertIn("toga", req_content)
-        self.assertIn("toga-gtk", req_content)
-        self.assertIn("toga-textual", req_content)
+        requirement_lines = [
+            line.strip()
+            for line in req_content.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual(requirement_lines, ["."], "requirements.txt must use project metadata as its source")
 
         setup_path = os.path.join(self.project_root, "setup.py")
-        self.assertTrue(os.path.isfile(setup_path), "setup.py must exist")
+        self.assertFalse(os.path.exists(setup_path), "redundant setup.py should be consolidated into pyproject.toml")
 
         pyproject_path = os.path.join(self.project_root, "pyproject.toml")
         self.assertTrue(os.path.isfile(pyproject_path), "pyproject.toml must exist")
+        with open(pyproject_path, "rb") as f:
+            meta = tomllib.load(f)
+        self.assertEqual(meta["build-system"]["build-backend"], "setuptools.build_meta")
+        self.assertIn("toga-core>=0.4.0", meta["project"]["dependencies"])
+        self.assertFalse(any(d.lower().startswith("toga>=") for d in meta["project"]["dependencies"]))
+        self.assertTrue(any("toga-gtk" in d and "sys_platform" in d for d in meta["project"]["optional-dependencies"]["gtk"]))
+        self.assertIn("twittui.resources", meta["tool"]["setuptools"]["packages"])
 
     def test_snap_user_data_env_loading(self) -> None:
         """Verify load_twittui_dotenv loads configuration from SNAP_USER_DATA."""

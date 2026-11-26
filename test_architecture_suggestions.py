@@ -10,7 +10,10 @@ import pathlib
 import sqlite3
 import tempfile
 import time
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
@@ -111,10 +114,13 @@ class TestArchitectureSuggestions(unittest.TestCase):
             self.assertTrue(issubclass(TwitTUIForm, mixin), f"TwitTUIForm missing mixin {mixin.__name__}")
 
     def test_package_runtime_resources_and_icon_fallback(self) -> None:
-        """Bundled help, feed styles, and icons remain available outside the source tree."""
+        """Bundled help, feed styles, and icons load cleanly via importlib.resources outside the source tree."""
+        from importlib import resources as importlib_resources
+        from twittui.resources import read_resource_bytes, read_resource_text
         from twittui.ui.form import resolve_app_icon
 
         package_resources = pathlib.Path(PACKAGE_ROOT) / "resources"
+        res_root = importlib_resources.files("twittui.resources")
         for filename in (
             "README.md",
             "twittv.apib",
@@ -125,12 +131,46 @@ class TestArchitectureSuggestions(unittest.TestCase):
         ):
             with self.subTest(filename=filename):
                 self.assertTrue((package_resources / filename).is_file())
+                self.assertTrue(res_root.joinpath(filename).is_file())
+
+        self.assertIn("--primary:", read_resource_text("feed-style.css") or "")
+        self.assertGreater(len(read_resource_bytes("twittui.png") or b""), 0)
 
         with tempfile.TemporaryDirectory() as empty_root:
             with patch("twittui.ui.form.PROJECT_ROOT", empty_root), \
                  patch("twittui.ui.form.os.getcwd", return_value=empty_root), \
+                 patch("twittui.viewer.PROJECT_ROOT", empty_root), \
+                 patch("twittui.viewer.os.getcwd", return_value=empty_root), \
                  patch.dict(os.environ, {"SNAP": ""}):
                 self.assertEqual(resolve_app_icon(), str(package_resources / "twittui"))
+                form = TwitTUIForm("ResApp", "org.twit.test")
+                rss_xml = b'<?xml version="1.0"?><rss><channel><title>TWiT</title><item><title>Ep 1</title></item></channel></rss>'
+                rendered = form.render_rss_feed_to_html(rss_xml)
+                self.assertIn("--primary:", rendered)
+
+    def test_archive_backed_icon_resource_path_remains_valid(self) -> None:
+        """Icon paths extracted from archive-backed packages remain available after lookup."""
+        import zipfile
+        import twittui.resources as packaged_resources
+        from twittui.resources import locate_resource_file
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = os.path.join(temp_dir, "resources.zip")
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("twittui.png", b"archive-icon")
+
+            try:
+                with zipfile.ZipFile(archive_path) as archive:
+                    resource_root = zipfile.Path(archive)
+                    with patch.object(packaged_resources.importlib_resources, "files", return_value=resource_root):
+                        self.assertIsNone(locate_resource_file("twittui.png"))
+                        icon_path = locate_resource_file("twittui.png", keep_alive=True)
+                        self.assertIsNotNone(icon_path)
+                        self.assertEqual(pathlib.Path(icon_path).read_bytes(), b"archive-icon")
+                self.assertTrue(os.path.isfile(icon_path))
+                self.assertEqual(pathlib.Path(icon_path).read_bytes(), b"archive-icon")
+            finally:
+                packaged_resources._cleanup_materialized_resources()
 
     def test_unified_show_registry_completeness_and_derivation(self) -> None:
         """All 4 derived show lookup tables come from SHOW_REGISTRY and include previously missing shows."""
@@ -716,26 +756,39 @@ class TestArchitectureSuggestions(unittest.TestCase):
             self.assertIn("Error testing TWiT API credentials: boom", content)
 
     def test_packaging_hygiene_and_ci_workflow(self) -> None:
-        """Verify unified pyproject.toml, setup.py, .gitignore, installer.py, and CI workflow."""
+        """Verify consolidated pyproject.toml (no setup.py), headless-safe deps, .gitignore, installer, and CI."""
+        self.assertFalse(
+            (PROJECT_ROOT / "setup.py").exists(),
+            "Redundant setup.py must be deleted; pyproject.toml is the single source of truth.",
+        )
+
         pyproject_data = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         deps = pyproject_data["project"]["dependencies"]
         self.assertTrue(any("yt-dlp" in d for d in deps))
-        self.assertTrue(any("toga-gtk" in d and "sys_platform" in d for d in deps))
-
-        opt_deps = pyproject_data["project"]["optional-dependencies"]
-        for extra in ("gtk", "textual", "youtube", "security", "fast-search", "dev"):
-            self.assertIn(extra, opt_deps)
-        for pkg_name in ("twittui", "twittui.search", "twittui.ui"):
-            self.assertIn(pkg_name, pyproject_data["tool"]["setuptools"]["packages"])
-        self.assertEqual(
-            pyproject_data["tool"]["setuptools"]["package-data"]["twittui"],
-            ["resources/*"],
+        self.assertIn("toga-core>=0.4.0", deps)
+        self.assertFalse(any(d.lower().startswith("toga>=") for d in deps))
+        # Core dependencies must stay headless-Linux/macOS/Windows safe (toga-gtk belongs in [gtk] extra)
+        self.assertFalse(
+            any("toga-gtk" in d for d in deps),
+            f"toga-gtk must be optional under [project.optional-dependencies].gtk, found in core: {deps}",
         )
 
-        setup_text = (PROJECT_ROOT / "setup.py").read_text(encoding="utf-8")
-        self.assertIn('packages=["twittui", "twittui.search", "twittui.ui"]', setup_text)
-        self.assertIn('"twittui": ["resources/*"]', setup_text)
-        self.assertIn("with open(readme_path", setup_text)
+        opt_deps = pyproject_data["project"]["optional-dependencies"]
+        for extra in ("gtk", "textual", "youtube", "security", "fast-search", "xml", "dev", "all"):
+            self.assertIn(extra, opt_deps)
+        self.assertTrue(any("toga-gtk" in d and "sys_platform" in d for d in opt_deps["gtk"]))
+        self.assertTrue(any("tomli" in d and "python_version < '3.11'" in d for d in opt_deps["dev"]))
+        requirements = [
+            line.strip()
+            for line in (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual(requirements, ["."], "requirements.txt must delegate to pyproject.toml metadata")
+        for pkg_name in ("twittui", "twittui.resources", "twittui.search", "twittui.ui"):
+            self.assertIn(pkg_name, pyproject_data["tool"]["setuptools"]["packages"])
+        res_globs = pyproject_data["tool"]["setuptools"]["package-data"]["twittui.resources"]
+        for pattern in ("*.md", "*.apib", "*.css", "*.xsl", "*.png", "*.ico"):
+            self.assertIn(pattern, res_globs)
 
         installer_text = (PROJECT_ROOT / "installer.py").read_text(encoding="utf-8")
         self.assertIn('"twittui"', installer_text)
@@ -750,7 +803,91 @@ class TestArchitectureSuggestions(unittest.TestCase):
         self.assertIn("xvfb-run", ci_text)
         self.assertIn("SNAP_USER_DATA", ci_text)
         self.assertIn("unittest discover", ci_text)
+        self.assertIn('pip install -e ".[gtk,security,fast-search,xml,dev]"', ci_text)
         self.assertNotIn("TWITTUI_CACHE_DB", ci_text)
+
+    def test_pep517_wheel_build_bundles_resources_and_excludes_tests(self) -> None:
+        """Building a PEP 517 wheel solely from pyproject.toml bundles package resources and excludes tests/secrets."""
+        import contextlib
+        import io
+        import shutil
+        import zipfile
+        import setuptools.build_meta
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            src_dir = pathlib.Path(tmp_root) / "src"
+            out_dir = pathlib.Path(tmp_root) / "dist"
+            src_dir.mkdir()
+            out_dir.mkdir()
+
+            # Stage only the distribution sources so PROJECT_ROOT remains untouched
+            shutil.copy2(PROJECT_ROOT / "pyproject.toml", src_dir / "pyproject.toml")
+            shutil.copy2(PROJECT_ROOT / "README.md", src_dir / "README.md")
+            for py_mod in (
+                "main.py",
+                "installer.py",
+                "twittui_form.py",
+                "toga_textual_backend.py",
+                "generate_icon.py",
+                "tiered_search.py",
+                "double_metaphone.py",
+            ):
+                shutil.copy2(PROJECT_ROOT / py_mod, src_dir / py_mod)
+            shutil.copytree(
+                PROJECT_ROOT / "twittui",
+                src_dir / "twittui",
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+
+            prev_cwd = os.getcwd()
+            try:
+                os.chdir(src_dir)
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    wheel_name = setuptools.build_meta.build_wheel(str(out_dir))
+            finally:
+                os.chdir(prev_cwd)
+
+            wheel_path = out_dir / wheel_name
+            self.assertTrue(wheel_path.is_file())
+            with zipfile.ZipFile(wheel_path, "r") as zf:
+                names = set(zf.namelist())
+                for expected in (
+                    "twittui/__init__.py",
+                    "twittui/resources/__init__.py",
+                    "twittui/resources/README.md",
+                    "twittui/resources/twittv.apib",
+                    "twittui/resources/feed-style.css",
+                    "twittui/resources/feed-style.xsl",
+                    "twittui/resources/twittui.png",
+                    "twittui/resources/twittui.ico",
+                    "twittui/search/tiered_search.py",
+                    "twittui/ui/form.py",
+                    "main.py",
+                    "twittui_form.py",
+                ):
+                    self.assertIn(expected, names, f"Wheel missing expected member: {expected}")
+
+                self.assertFalse(any(os.path.basename(n).startswith("test_") for n in names))
+                self.assertFalse(any(os.path.basename(n) == ".env" for n in names))
+                self.assertFalse(any(os.path.basename(n) == "setup.py" for n in names))
+
+                meta_names = [n for n in names if n.endswith(".dist-info/METADATA")]
+                self.assertEqual(len(meta_names), 1)
+                metadata = zf.read(meta_names[0]).decode("utf-8")
+                self.assertIn("Provides-Extra: gtk", metadata)
+                self.assertIn("Provides-Extra: security", metadata)
+                self.assertIn("Provides-Extra: fast-search", metadata)
+                self.assertIn("Provides-Extra: xml", metadata)
+                self.assertIn("Provides-Extra: dev", metadata)
+                # Ensure toga-gtk only appears as an optional extra requirement, never unconditional
+                req_lines = [line for line in metadata.splitlines() if line.startswith("Requires-Dist:")]
+                gtk_lines = [line for line in req_lines if "toga-gtk" in line]
+                self.assertTrue(gtk_lines)
+                for line in gtk_lines:
+                    self.assertIn("extra == 'gtk'", line.replace('"', "'"))
+                    self.assertIn("sys_platform == 'linux'", line.replace('"', "'"))
+                self.assertTrue(any(line.startswith("Requires-Dist: toga-core") for line in req_lines))
+                self.assertFalse(any(line.startswith("Requires-Dist: toga ") for line in req_lines))
 
 
 if __name__ == "__main__":

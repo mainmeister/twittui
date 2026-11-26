@@ -10,8 +10,7 @@ authors = [{ name = "TWiT Community" }]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "toga>=0.4.0",
-    "toga-gtk>=0.4.0; sys_platform == 'linux'",
+    "toga-core>=0.4.0",
     "toga-textual>=0.4.0",
     "textual>=0.40.0",
     "requests>=2.28.0",
@@ -21,9 +20,9 @@ dependencies = [
 
 [project.optional-dependencies]
 gtk = [
-    "toga-gtk>=0.4.0",
-    "PyGObject>=3.42.0",
-    "pycairo>=1.20.0",
+    "toga-gtk>=0.4.0; sys_platform == 'linux'",
+    "PyGObject>=3.42.0; sys_platform == 'linux'",
+    "pycairo>=1.20.0; sys_platform == 'linux'",
 ]
 textual = [
     "toga-textual>=0.4.0",
@@ -46,13 +45,17 @@ dev = [
     "PyYAML>=6.0",
     "ruff>=0.4.0",
     "mypy>=1.8.0",
+    "tomli>=2.0; python_version < '3.11'",
+]
+all = [
+    "twittui[gtk,textual,youtube,security,fast-search,xml]",
 ]
 
 [project.scripts]
 twittui = "main:main"
 
 [tool.setuptools]
-packages = ["twittui", "twittui.search", "twittui.ui"]
+packages = ["twittui", "twittui.resources", "twittui.search", "twittui.ui"]
 py-modules = [
     "main",
     "installer",
@@ -65,4 +68,4 @@ py-modules = [
 include-package-data = true
 
 [tool.setuptools.package-data]
-twittui = ["resources/*"]
+"twittui.resources" = ["*.md", "*.apib", "*.css", "*.xsl", "*.png", "*.ico", "*.svg"]

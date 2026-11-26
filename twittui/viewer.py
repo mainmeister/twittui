@@ -23,7 +23,6 @@ import toga
 from toga.style import Pack
 
 from twittui._compat import (
-    PACKAGE_ROOT,
     PROJECT_ROOT,
     _is_textual_tui_running,
     compat_attr,
@@ -31,6 +30,11 @@ from twittui._compat import (
 from twittui.config import TWIT_API_KEY_URL, TWITTUI_HOMEPAGE_URL
 from twittui.logging_config import get_logger, safe_url_for_log
 from twittui.media import is_safe_http_url, safe_xml_fromstring
+from twittui.resources import (
+    locate_resource_file,
+    read_resource_bytes,
+    read_resource_text,
+)
 
 _logger = get_logger("viewer")
 
@@ -611,7 +615,6 @@ class ViewerMixin:
         candidate_paths = [
             os.path.join(os.environ["SNAP"], filename) if os.environ.get("SNAP") else None,
             os.path.join(PROJECT_ROOT, filename),
-            os.path.join(PACKAGE_ROOT, "resources", filename),
             os.path.join(os.getcwd(), filename),
             os.path.abspath(filename)
         ]
@@ -623,21 +626,26 @@ class ViewerMixin:
                 doc_path = path
                 break
 
-        if not doc_path:
+        md_text: str | None = None
+        if doc_path:
+            try:
+                with open(doc_path, "r", encoding="utf-8", errors="replace") as f:
+                    md_text = f.read()
+            except Exception as e:
+                err_msg = f"Failed to read {filename}: {e}"
+                _logger.warning(f"Error: {err_msg}")
+                if hasattr(self, 'main_window') and self.main_window:
+                    self._show_dialog_threadsafe("error", "Read Error", err_msg, host_win=self.main_window)
+                return
+        else:
+            md_text = read_resource_text(filename)
+            doc_path = locate_resource_file(filename)
+
+        if md_text is None:
             err_msg = f"Could not locate {filename} file in the application directory."
             _logger.warning(f"Error: {err_msg}")
             if hasattr(self, 'main_window') and self.main_window:
                 self._show_dialog_threadsafe("error", "Documentation Not Found", err_msg, host_win=self.main_window)
-            return
-
-        try:
-            with open(doc_path, "r", encoding="utf-8", errors="replace") as f:
-                md_text = f.read()
-        except Exception as e:
-            err_msg = f"Failed to read {filename}: {e}"
-            _logger.warning(f"Error: {err_msg}")
-            if hasattr(self, 'main_window') and self.main_window:
-                self._show_dialog_threadsafe("error", "Read Error", err_msg, host_win=self.main_window)
             return
 
         styled_html = self.render_markdown_to_html(md_text, title=doc_title)
@@ -646,7 +654,8 @@ class ViewerMixin:
         try:
             help_window = toga.Window(title=doc_title, size=(900, 700))
             web_view = toga.WebView(style=Pack(flex=1))
-            web_view.set_content(f"file://{doc_path}", styled_html)
+            base_url = f"file://{doc_path}" if doc_path else "about:blank"
+            web_view.set_content(base_url, styled_html)
             help_window.content = web_view
             help_window.show()
             return
@@ -725,12 +734,11 @@ class ViewerMixin:
         else:
             xml_bytes = xml_content
 
-        # Load CSS file if available
+        # Load CSS file if available (filesystem overrides first, then importlib.resources package data)
         css_content = ""
         candidate_css_paths = [
             os.path.join(os.environ["SNAP"], "feed-style.css") if os.environ.get("SNAP") else None,
             os.path.join(PROJECT_ROOT, "feed-style.css"),
-            os.path.join(PACKAGE_ROOT, "resources", "feed-style.css"),
             os.path.join(os.getcwd(), "feed-style.css"),
             os.path.abspath("feed-style.css")
         ]
@@ -743,23 +751,30 @@ class ViewerMixin:
                         break
                 except Exception:
                     _logger.debug("Ignored exception in %s", 'TwitTUIForm.render_rss_feed_to_html', exc_info=True)
+        if not css_content:
+            css_content = read_resource_text("feed-style.css") or ""
 
         # If lxml and feed-style.xsl are available, attempt XSLT transformation with hardened parser
         candidate_xsl_paths = [
             os.path.join(os.environ["SNAP"], "feed-style.xsl") if os.environ.get("SNAP") else None,
             os.path.join(PROJECT_ROOT, "feed-style.xsl"),
-            os.path.join(PACKAGE_ROOT, "resources", "feed-style.xsl"),
             os.path.join(os.getcwd(), "feed-style.xsl"),
             os.path.abspath("feed-style.xsl")
         ]
         candidate_xsl_paths = [p for p in candidate_xsl_paths if p]
-        xsl_path = None
+        xsl_bytes: bytes | None = None
         for xpath in candidate_xsl_paths:
             if os.path.isfile(xpath):
-                xsl_path = xpath
-                break
+                try:
+                    with open(xpath, "rb") as xf:
+                        xsl_bytes = xf.read()
+                    break
+                except OSError:
+                    _logger.debug("Could not read XSL override at %s", xpath, exc_info=True)
+        if xsl_bytes is None:
+            xsl_bytes = read_resource_bytes("feed-style.xsl")
 
-        if xsl_path:
+        if xsl_bytes:
             try:
                 import lxml.etree as etree
                 safe_parser = etree.XMLParser(
@@ -768,8 +783,7 @@ class ViewerMixin:
                     dtd_validation=False,
                     load_dtd=False
                 )
-                with open(xsl_path, "rb") as xf:
-                    xslt_doc = etree.XML(xf.read(), parser=safe_parser)
+                xslt_doc = etree.XML(xsl_bytes, parser=safe_parser)
                 transform = etree.XSLT(xslt_doc)
                 src_doc = etree.fromstring(xml_bytes, parser=safe_parser)
                 result_tree = transform(src_doc)

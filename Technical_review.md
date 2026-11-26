@@ -566,11 +566,11 @@ TwitTUI centralizes configuration inside `.env` files and manages live state upd
 
 ## 12. Packaging, CI & Sandboxing Infrastructure
 
-### 12.1 Unified Python Packaging (`pyproject.toml`, `setup.py`, `requirements.txt`)
-Packaging metadata is synchronized across `pyproject.toml`, `setup.py`, and `requirements.txt`:
-- Distributes the `twittui`, `twittui.search`, and `twittui.ui` packages, top-level compatibility modules (`py_modules`), and package-local runtime resources in `twittui/resources/`.
-- Conditions `toga-gtk` and `PyGObject`/`pycairo` on `sys_platform == "linux"` so macOS, Windows, and headless Linux environments install cleanly.
-- Declares `yt-dlp` and structured `[project.optional-dependencies]` / `extras_require` groups (`gtk`, `textual`, `youtube`, `security` [`defusedxml`, `nh3`], `fast-search` [`rapidfuzz`], `xml` [`lxml`], `dev` [`PyYAML`, `ruff`, `mypy`]).
+### 12.1 Unified Python Packaging (`pyproject.toml`, `requirements.txt`, `uv.lock`)
+`pyproject.toml` is the authoritative PEP 621 / PEP 517 package manifest; `requirements.txt` contains only `.` so pip resolves runtime dependencies from that metadata rather than maintaining a second list, and `uv.lock` records the resolved graph for reproducible `uv` installs:
+- Distributes the `twittui`, `twittui.resources`, `twittui.search`, and `twittui.ui` packages, top-level compatibility modules (`py-modules`), and package-local runtime resources in `twittui/resources/`.
+- Uses `toga-core` and `toga-textual` as headless-safe core dependencies; GTK (`toga-gtk`, `PyGObject`, and `pycairo`) is an optional Linux-gated `gtk` extra.
+- Declares `yt-dlp` in core metadata and groups optional dependencies into `gtk`, `textual`, `youtube`, `security` (`defusedxml`, `nh3`), `fast-search` (`rapidfuzz`), `xml` (`lxml`), and `dev` (`PyYAML`, `ruff`, `mypy`, plus `tomli` on Python < 3.11 for TOML-based tests).
 
 ### 12.2 Standalone Binary Packaging Engine (`installer.py`)
 `installer.py` compiles standalone, self-contained binaries using PyInstaller:
@@ -581,7 +581,7 @@ Packaging metadata is synchronized across `pyproject.toml`, `setup.py`, and `req
 
 ### 12.3 Ubuntu Core 24 Snap Packaging (`snap/`)
 TwitTUI includes production Snap packaging configurations supporting cross-distribution deployment:
-- **`snap/snapcraft.yaml`**: Built on Ubuntu Core 24 (`core24`) with strict confinement (`confinement: strict`). Installs the Python package cleanly into site-packages via `pip install .`, stages `shared-mime-info` (running `update-mime-database`), `mpv`, `ffmpeg`, and `.env.example` (never copying developer `.env` or test files). Declares desktop plugs (`desktop`, `desktop-legacy`, `wayland`, `x11`, `opengl`, `audio-playback`, `network`, `network-bind`, `home`, `removable-media`).
+- **`snap/snapcraft.yaml`**: Built on Ubuntu Core 24 (`core24`) with strict confinement (`confinement: strict`). Installs the separately pinned runtime set from `requirements-snap.txt`, then installs the project into site-packages with `pip install --no-deps .`; stages `shared-mime-info` (running `update-mime-database`), `mpv`, `ffmpeg`, and `.env.example` (never copying developer `.env` or test files). Declares desktop plugs (`desktop`, `desktop-legacy`, `wayland`, `x11`, `opengl`, `audio-playback`, `network`, `network-bind`, `home`, `removable-media`).
 - **Dual Snap Entry Points**:
   - `twittui`: Launches GTK graphical desktop UI (`bin/twittui-launcher --gtk`).
   - `twittui.tui`: Launches Textual terminal interface (`bin/twittui-launcher --textual`).
@@ -600,12 +600,12 @@ GitHub Actions runs on pushes and pull requests across Python 3.11 and 3.12 on `
 
 ## 13. Quality Assurance & Automated Test Suite
 
-TwitTUI maintains an automated test suite comprising **332 unit and integration tests across 25 test modules**, running cleanly on both headless terminals and graphical sessions without hanging on interactive TTYs or mutating `.env`.
+TwitTUI maintains an automated test suite comprising **334 unit and integration tests across 25 test modules**, running cleanly on both headless terminals and graphical sessions without hanging on interactive TTYs or mutating `.env`.
 
 ```
 test_*.py Test Coverage Matrix:
 ├── test_api_rate_limiter.py          # Sliding window rate limiting, 5 req/min cap, 403/500 retry logic
-├── test_architecture_suggestions.py  # twittui/ package, SHOW_REGISTRY, normalized WAL cache & 24h TTL, bounded concurrency, logging, CI
+├── test_architecture_suggestions.py  # twittui/ package, resources, dependency metadata, SHOW_REGISTRY, normalized WAL cache, logging, CI
 ├── test_backend_factory.py           # Backend detection, CLI switches (--gtk, --textual), fallback recovery
 ├── test_caching.py                   # Persistent SQLite caching, incremental episode merge, gap recovery, clear cache
 ├── test_critical_fixes.py            # Credential hashing, HTML/XSLT XSS hardening, lazy cache completeness, worker error cleanup, WebView/Divider
@@ -635,4 +635,4 @@ The test suite runs directly with Python's standard `unittest` runner:
 ```bash
 python -m unittest discover -s . -p "test_*.py" -v
 ```
-All 332 tests execute reliably without interactive TTY prompts or developer `.env` modifications, confirming regression-free operation across the entire codebase.
+All 334 tests execute reliably without interactive TTY prompts or developer `.env` modifications, confirming regression-free operation across the entire codebase.

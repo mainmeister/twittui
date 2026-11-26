@@ -77,9 +77,9 @@ This document serves two primary audiences:
 
 - **Python**: Version 3.10, 3.11, or 3.12+
 - **Media Player**: [VLC Media Player](https://www.videolan.org/vlc/) (default) or any player that accepts stream URLs via CLI (such as `mpv` or `ffplay`).
-- **Operating System**: Linux is the primary target. Native macOS and Windows support is not guaranteed; the supplied requirements include Linux GTK dependencies.
-- **Linux prerequisites**: Install GTK 3 and its introspection typelibs, GObject introspection development headers, Cairo development headers, Python development headers, `pkg-config`, and a C compiler. Package names vary by distribution and PyGObject version (for example, Debian/Ubuntu packages include `gir1.2-gtk-3.0`, `libgirepository1.0-dev`, `libcairo2-dev`, `python3-dev`, and `pkg-config`).
-- **YouTube downloads**: `yt-dlp` or `youtube-dl` is required; `requirements.txt` includes `yt-dlp`. Optional `ffmpeg` enables merging video/audio and audio conversion.
+- **Operating System**: Linux is the primary target. Native macOS and Windows support is not guaranteed; the core install is headless-safe, while GTK is available as an optional Linux extra.
+- **Linux GTK prerequisites**: To install the optional GTK desktop backend, install GTK 3 and its introspection typelibs, GObject introspection development headers, Cairo development headers, Python development headers, `pkg-config`, and a C compiler. Package names vary by distribution and PyGObject version (for example, Debian/Ubuntu packages include `gir1.2-gtk-3.0`, `libgirepository1.0-dev`, `libcairo2-dev`, `python3-dev`, and `pkg-config`).
+- **YouTube downloads**: `yt-dlp` is included in the core package metadata. Optional `ffmpeg` enables merging video/audio and audio conversion.
 
 ### Installation
 
@@ -99,7 +99,7 @@ This document serves two primary audiences:
    ```bash
    pip install -r requirements.txt
    ```
-   This installs both backends and dependencies including `yt-dlp`, PyGObject, and pycairo; their native prerequisites must be installed separately.
+   This installs the core dependencies from `pyproject.toml`, including `toga-core`, the Textual backend, and `yt-dlp`. To add the GTK desktop backend on Linux, also run `pip install '.[gtk]'`; that extra requires the native GTK/GObject/Cairo prerequisites described above.
 
 4. **Launch the application**:
    ```bash
@@ -450,7 +450,6 @@ twittui/
 ├── test_splash_screen.py    # Startup/shutdown splash screens and terminal banner tests
 ├── test_tooltips.py         # UI widget tooltip bindings and accessibility tests
 ├── test_youtube_download.py # YouTube video stream resolution and download tests
-├── setup.py                 # Standard Python package setup and metadata definition
 ├── pyproject.toml           # Modern Python build-system configuration
 ├── twittv.apib              # Full API Blueprint documentation for TWiT.tv REST API v1.0
 ├── Layout_spec_for_AI.txt   # UI specification and control layout blueprint
@@ -601,7 +600,7 @@ TwitTUI's Snap package provides containerized, cross-distribution deployment on 
   Bundles native shared libraries and typelib introspections: `gir1.2-gtk-3.0`, `gir1.2-pango-1.0`, `gir1.2-glib-2.0`, `gir1.2-gdkpixbuf-2.0`, `libgtk-3-0`, `libgdk-pixbuf-2.0-0`, `librsvg2-common`, `shared-mime-info`, `libgirepository-1.0-1`, `libpulse0`.
 - **Custom Build Lifecycle (`override-build`)**:
   - Initializes a standalone Python virtual environment inside `$CRAFT_PART_INSTALL`.
-  - Upgrades `pip` and installs dependencies from `requirements.txt` and `setup.py`.
+  - Upgrades `pip`, installs pinned runtime dependencies from `requirements-snap.txt`, and installs the project from `pyproject.toml` with `pip install --no-deps .`.
   - Compiles GLib schemas via `glib-compile-schemas` and generates MIME type index via `update-mime-database`.
   - Copies launcher script (`launcher.sh` -> `bin/twittui-launcher`), desktop entry, application icons, stylesheets, and API blueprint assets.
 

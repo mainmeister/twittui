@@ -253,6 +253,8 @@ def patch_toga_gtk_app() -> None:
 
 def resolve_app_icon() -> str | None:
     """Find and return the base path or file path of the application icon."""
+    from twittui.resources import resolve_icon_base
+
     candidate_bases = []
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         candidate_bases.append(getattr(sys, "_MEIPASS"))
@@ -260,7 +262,6 @@ def resolve_app_icon() -> str | None:
         candidate_bases.append(os.environ["SNAP"])
     candidate_bases.extend([
         PROJECT_ROOT,
-        PACKAGE_ROOT,
         os.getcwd(),
     ])
     for base in candidate_bases:
@@ -268,7 +269,7 @@ def resolve_app_icon() -> str | None:
             target = os.path.join(base, "resources", fname)
             if os.path.isfile(target) or os.path.isfile(f"{target}.png"):
                 return os.path.join(base, "resources", "twittui")
-    return None
+    return resolve_icon_base()
 
 
 class TwitTUIForm(

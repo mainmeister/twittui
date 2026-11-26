@@ -560,15 +560,23 @@ class TestInstallOption(unittest.TestCase):
             self.assertIn("PYTHON_CONFIGURE_OPTS", str(ctx.exception))
 
 
-    def test_setup_py_modules_includes_all_source_modules(self) -> None:
-        """Verify setup.py includes all necessary Python modules including tiered_search and double_metaphone."""
-        setup_path = os.path.join(os.path.dirname(__file__), "setup.py")
-        with open(setup_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        self.assertIn('"tiered_search"', content)
-        self.assertIn('"double_metaphone"', content)
-        self.assertIn('"twittui_form"', content)
-        self.assertIn('"toga_textual_backend"', content)
+    def test_pyproject_includes_all_source_modules(self) -> None:
+        """Verify pyproject.toml includes all source packages and compatibility modules."""
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            import tomli as tomllib
+
+        pyproject_path = os.path.join(os.path.dirname(__file__), "pyproject.toml")
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+        setuptools_cfg = data["tool"]["setuptools"]
+        py_modules = setuptools_cfg.get("py-modules", [])
+        packages = setuptools_cfg.get("packages", [])
+        for mod in ("tiered_search", "double_metaphone", "twittui_form", "toga_textual_backend"):
+            self.assertIn(mod, py_modules)
+        for pkg in ("twittui", "twittui.resources", "twittui.search", "twittui.ui"):
+            self.assertIn(pkg, packages)
 
 
 if __name__ == "__main__":
