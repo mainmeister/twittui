@@ -775,8 +775,12 @@ class CatalogMixin:
             slug_candidates.add(re.sub(r'[^a-z0-9]+', '-', show_clean).strip('-'))
             slug_candidates.add(re.sub(r'[^a-z0-9]+', '', show_clean))
             # Known abbreviations and aliases (derived from unified SHOW_REGISTRY)
-            if show_clean in SHOW_SEARCH_SLUGS:
-                slug_candidates.update(SHOW_SEARCH_SLUGS[show_clean])
+            show_entry = get_show_entry(selected_show)
+            canonical_key = show_entry.key if show_entry is not None else show_clean
+            if canonical_key in SHOW_SEARCH_SLUGS:
+                slug_candidates.update(SHOW_SEARCH_SLUGS[canonical_key])
+            elif show_entry is not None and show_entry.search_slugs:
+                slug_candidates.update(show_entry.search_slugs)
 
         def show_matches_cleanpath(cp: str, body: str = '') -> bool:
             if is_all_shows:

@@ -18,7 +18,7 @@ import asyncio
 import toga
 from toga.style import Pack
 from toga.style.pack import COLUMN
-from twittui.shows import KNOWN_SHOW_FEEDS, MEMBERFUL_HOST_FEEDS, MEMBERFUL_SHOW_FEEDS
+from twittui.shows import KNOWN_SHOW_FEEDS, MEMBERFUL_HOST_FEEDS, MEMBERFUL_SHOW_FEEDS, get_show_entry
 
 try:
     import defusedxml.ElementTree as DefusedET
@@ -956,7 +956,9 @@ class MediaMixin:
                     cached_items = self._show_rss_cache.get(f"{show_key}_{suffix}")
                     if cached_items:
                         rss_cache_sources.append(('', list(cached_items)))
-                for feed_file in KNOWN_SHOW_FEEDS.get(show_key, []):
+                show_entry = get_show_entry(show_name)
+                canonical_show_key = show_entry.key if show_entry is not None else show_key
+                for feed_file in KNOWN_SHOW_FEEDS.get(canonical_show_key, []):
                     legacy_items = self._show_rss_cache.get(f"rss_{feed_file}")
                     if legacy_items:
                         rss_cache_sources.append((feed_file, list(legacy_items)))

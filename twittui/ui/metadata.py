@@ -14,9 +14,15 @@ from toga.style.pack import COLUMN, ROW
 
 from tiered_search import find_match_context
 from twittui.logging_config import get_logger
-from twittui.shows import TRANSCRIPT_SLUG_MAP
+from twittui.shows import SHOW_ABBREVIATIONS, TRANSCRIPT_SLUG_MAP, get_show_entry
 
 _logger = get_logger("ui.metadata")
+
+_EPISODE_NUMBER_PREFIXES = ("episode", "ep", *SHOW_ABBREVIATIONS)
+_EPISODE_NUMBER_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(p) for p in _EPISODE_NUMBER_PREFIXES) + r")?\s*#?\s*(\d{1,5})\b",
+    re.IGNORECASE,
+)
 
 
 class MetadataMixin:
@@ -52,9 +58,13 @@ class MetadataMixin:
         if s_clean.startswith('the '):
             show_variants.append(s_clean[4:].replace(' ', '-'))
 
-        for k, v in TRANSCRIPT_SLUG_MAP.items():
-            if k in s_clean:
-                show_variants = list(v) + show_variants
+        entry = get_show_entry(show_name)
+        if entry is not None and entry.transcript_slugs:
+            show_variants = list(entry.transcript_slugs) + show_variants
+        else:
+            for k, v in TRANSCRIPT_SLUG_MAP.items():
+                if k in s_clean:
+                    show_variants = list(v) + show_variants
 
         seen = set()
         unique_variants = []
@@ -94,7 +104,7 @@ class MetadataMixin:
         ep_title = getattr(target, 'title', '') or ep_data.get('title') or ep_data.get('label') or ''
         ep_num = getattr(target, 'episode', '') or getattr(target, 'number', '') or ep_data.get('episode') or ep_data.get('number') or ep_data.get('episodeNumber') or ep_data.get('episode_number') or ''
         if not ep_num and ep_title:
-            m_num = re.search(r'\b(?:episode|ep|twis|twit|twig|tnw|mbw|sn|ww|uls|iost)?\s*#?\s*(\d{1,5})\b', ep_title, re.IGNORECASE)
+            m_num = _EPISODE_NUMBER_RE.search(ep_title)
             if m_num:
                 ep_num = m_num.group(1)
         if not ep_num and (ep_data.get('link') or ep_data.get('cleanPath')):
@@ -190,7 +200,7 @@ class MetadataMixin:
         # Collect episode number
         ep_num = getattr(target, 'episode', '') or getattr(target, 'number', '') or ep_data.get('episode') or ep_data.get('number') or ep_data.get('episodeNumber') or ep_data.get('episode_number') or ''
         if not ep_num and ep_title:
-            m_num = re.search(r'\b(?:episode|ep|twis|twit|twig|tnw|mbw|sn|ww|uls|iost)?\s*#?\s*(\d{1,5})\b', ep_title, re.IGNORECASE)
+            m_num = _EPISODE_NUMBER_RE.search(ep_title)
             if m_num:
                 ep_num = m_num.group(1)
         if not ep_num and (ep_data.get('link') or ep_data.get('cleanPath')):

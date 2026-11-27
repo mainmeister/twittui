@@ -1,13 +1,15 @@
 """Unified TWiT.tv show registry (single source of truth).
 
-Consolidates public RSS feeds, Memberful / Club TWiT feed IDs, search path
-slug aliases, transcript URL slug candidates, and default fallback show IDs
-into one ``SHOW_REGISTRY`` mapping so every subsystem stays consistent.
+Consolidates public RSS feeds, Memberful / Club TWiT feed IDs, host discovery
+feeds, search path slug aliases, transcript URL slug candidates, episode title
+abbreviations, and default fallback show IDs into one ``SHOW_REGISTRY`` mapping
+so every subsystem stays consistent with zero hand-maintained duplicate tables.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,9 @@ class ShowEntry:
     memberful_feeds: tuple[int, ...] = ()
     search_slugs: tuple[str, ...] = ()
     transcript_slugs: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    include_in_default_shows: bool = False
+    is_host_feed: bool = False
 
 
 _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
@@ -30,6 +35,8 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         default_show_id="65161",
         public_feeds=("twit_video_hd.xml", "twit.xml"),
         memberful_feeds=(9041, 9040),
+        aliases=("all shows",),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="this week in tech",
@@ -39,6 +46,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         memberful_feeds=(9067, 9066),
         search_slugs=("twit", "this-week-in-tech"),
         transcript_slugs=("twit", "week-tech", "this-week-in-tech"),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="security now",
@@ -48,6 +56,8 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         memberful_feeds=(9055, 9054),
         search_slugs=("sn", "security-now"),
         transcript_slugs=("security-now", "sn"),
+        aliases=("security now!",),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="macbreak weekly",
@@ -57,6 +67,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         memberful_feeds=(9051, 9050),
         search_slugs=("mbw", "macbreak-weekly"),
         transcript_slugs=("macbreak-weekly", "mbw"),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="windows weekly",
@@ -66,6 +77,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         memberful_feeds=(9079, 9078),
         search_slugs=("ww", "windows-weekly"),
         transcript_slugs=("windows-weekly", "ww"),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="tech news weekly",
@@ -75,6 +87,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         memberful_feeds=(9059, 9058),
         search_slugs=("tnw", "tech-news-weekly"),
         transcript_slugs=("tech-news-weekly", "tnw"),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="hands-on tech",
@@ -84,6 +97,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         memberful_feeds=(9047, 9046),
         search_slugs=("hot", "hands-on-tech"),
         transcript_slugs=("hands-on-tech", "hot"),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="hands-on ai",
@@ -92,6 +106,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         public_feeds=("hoa_video_hd.xml", "hoa.xml"),
         search_slugs=("hoa", "hands-on-ai"),
         transcript_slugs=("hands-on-ai", "hoa"),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="hands-on mac",
@@ -107,10 +122,12 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         public_feeds=("how_video_hd.xml", "how.xml"),
         search_slugs=("how", "hands-on-windows"),
         transcript_slugs=("hands-on-windows", "how"),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="hands-on photography",
         display_name="Hands-On Photography",
+        default_show_id="804881",
         public_feeds=("hop_video_hd.xml", "hop.xml"),
         memberful_feeds=(9045, 9044),
         search_slugs=("hop", "hands-on-photography"),
@@ -123,6 +140,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         public_feeds=("twis_video_hd.xml", "twis.xml"),
         search_slugs=("twis", "this-week-in-space"),
         transcript_slugs=("week-space", "twis", "this-week-in-space"),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="this week in google",
@@ -134,6 +152,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
     ShowEntry(
         key="this week in enterprise tech",
         display_name="This Week in Enterprise Tech",
+        default_show_id="1675",
         public_feeds=("twiet_video_hd.xml", "twiet.xml"),
         memberful_feeds=(9063, 9062),
         search_slugs=("twiet", "this-week-in-enterprise-tech"),
@@ -146,6 +165,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         public_feeds=("uls_video_hd.xml", "uls.xml"),
         search_slugs=("uls", "untitled-linux-show"),
         transcript_slugs=("untitled-linux-show", "uls"),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="ios today",
@@ -155,6 +175,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         memberful_feeds=(9049, 9048),
         search_slugs=("iost", "ios-today"),
         transcript_slugs=("ios-today", "iost"),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="intelligent machines",
@@ -164,6 +185,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         memberful_feeds=(9065, 9064),
         search_slugs=("im", "intelligent-machines"),
         transcript_slugs=("intelligent-machines", "im"),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="ask the tech guys",
@@ -173,6 +195,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         memberful_feeds=(9061, 9060),
         search_slugs=("attg", "ask-the-tech-guys", "ask-the-tech-guy"),
         transcript_slugs=("ask-tech-guys", "tech-guy", "atg", "attg"),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="ask the tech guy",
@@ -182,6 +205,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         memberful_feeds=(9061, 9060),
         search_slugs=("attg", "ask-the-tech-guys", "ask-the-tech-guy"),
         transcript_slugs=("ask-tech-guys", "tech-guy", "atg", "attg"),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="the tech guy",
@@ -193,6 +217,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
     ShowEntry(
         key="floss weekly",
         display_name="FLOSS Weekly",
+        default_show_id="1639",
         public_feeds=("floss_video_hd.xml", "floss.xml"),
         memberful_feeds=(9043, 9042),
         search_slugs=("floss", "floss-weekly"),
@@ -206,6 +231,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         memberful_feeds=(9039, 9038),
         search_slugs=("aaa", "all-about-android"),
         transcript_slugs=("all-about-android", "aaa"),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="home theater geeks",
@@ -214,10 +240,12 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         public_feeds=("htg_video_hd.xml", "htg.xml"),
         search_slugs=("htg", "home-theater-geeks"),
         transcript_slugs=("home-theater-geeks", "htg"),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="smart tech today",
         display_name="Smart Tech Today",
+        default_show_id="804321",
         public_feeds=("stt_video_hd.xml", "stt.xml"),
         memberful_feeds=(9057, 9056),
         search_slugs=("stt", "smart-tech-today"),
@@ -230,6 +258,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         public_feeds=("tri_video_hd.xml", "tri.xml"),
         search_slugs=("tri", "triangulation"),
         transcript_slugs=("triangulation", "tri"),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="know how",
@@ -237,10 +266,12 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         public_feeds=("kh_video_hd.xml", "kh.xml"),
         search_slugs=("kh", "know-how"),
         transcript_slugs=("know-how", "kh"),
+        aliases=("know how...",),
     ),
     ShowEntry(
         key="twit news",
         display_name="TWiT News",
+        default_show_id="1658",
         memberful_feeds=(9077, 9076),
         search_slugs=("twit-news",),
         transcript_slugs=("twit-news",),
@@ -252,19 +283,14 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         memberful_feeds=(9077, 9076),
         search_slugs=("twit-news", "twit-plus-news", "twit_news"),
         transcript_slugs=("twit-news",),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="twit events",
         display_name="TWiT Events",
+        default_show_id="809048",
         memberful_feeds=(9037, 9036),
         search_slugs=("twit-events",),
-    ),
-    ShowEntry(
-        key="twit+ clips",
-        display_name="TWiT+ Clips",
-        default_show_id="825225",
-        memberful_feeds=(9162, 9161),
-        search_slugs=("twit-clips",),
     ),
     ShowEntry(
         key="twit+ club shows",
@@ -272,6 +298,7 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         default_show_id="856957",
         memberful_feeds=(9162, 9161, 9073, 9072, 9053, 9052, 9075, 9074, 9069, 9068),
         search_slugs=("twit-club-shows",),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="ai inside",
@@ -280,12 +307,15 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         memberful_feeds=(9073, 9072),
         search_slugs=("ai-inside",),
         transcript_slugs=("ai-inside",),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="total jason",
         display_name="Total Jason",
+        default_show_id="813333",
         memberful_feeds=(9073, 9072),
         search_slugs=("total-jason",),
+        is_host_feed=True,
     ),
     ShowEntry(
         key="total leo",
@@ -293,6 +323,8 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         default_show_id="1647",
         memberful_feeds=(9053, 9052),
         search_slugs=("total-leo",),
+        include_in_default_shows=True,
+        is_host_feed=True,
     ),
     ShowEntry(
         key="total mikah",
@@ -300,30 +332,45 @@ _REGISTRY_ENTRIES: tuple[ShowEntry, ...] = (
         default_show_id="813334",
         memberful_feeds=(9075, 9074),
         search_slugs=("total-mikah",),
+        include_in_default_shows=True,
+        is_host_feed=True,
     ),
     ShowEntry(
         key="total ant",
         display_name="Total Ant",
+        default_show_id="813332",
         memberful_feeds=(9069, 9068),
         search_slugs=("total-ant",),
+        is_host_feed=True,
+    ),
+    ShowEntry(
+        key="twit+ clips",
+        display_name="TWiT+ Clips",
+        default_show_id="825225",
+        memberful_feeds=(9162, 9161),
+        search_slugs=("twit-clips",),
+        include_in_default_shows=True,
+        is_host_feed=True,
     ),
     ShowEntry(
         key="abby's road",
         display_name="Abby's Road",
         default_show_id="1652",
         search_slugs=("abbys-road",),
+        include_in_default_shows=True,
     ),
     ShowEntry(
         key="android app arena",
         display_name="Android App Arena",
         default_show_id="1684",
         search_slugs=("android-app-arena",),
+        include_in_default_shows=True,
     ),
 )
 
 SHOW_REGISTRY: dict[str, ShowEntry] = {entry.key: entry for entry in _REGISTRY_ENTRIES}
 
-# Derived backward-compatible lookup tables (all computed from SHOW_REGISTRY)
+# Derived backward-compatible lookup tables (all computed strictly from SHOW_REGISTRY)
 KNOWN_SHOW_FEEDS: dict[str, list[str]] = {
     key: list(entry.public_feeds)
     for key, entry in SHOW_REGISTRY.items()
@@ -336,10 +383,22 @@ MEMBERFUL_SHOW_FEEDS: dict[str, list[int]] = {
     if entry.memberful_feeds
 }
 
-# Host and network-wide Club TWiT feeds for deeper episode discovery
-MEMBERFUL_HOST_FEEDS: list[int] = [
-    9073, 9072, 9053, 9052, 9075, 9074, 9069, 9068, 9162, 9161
-]
+
+def _derive_memberful_host_feeds() -> list[int]:
+    """Derive deduplicated host and network-wide Club TWiT feeds from SHOW_REGISTRY."""
+    feeds: list[int] = []
+    seen: set[int] = set()
+    for entry in _REGISTRY_ENTRIES:
+        if entry.is_host_feed:
+            for fid in entry.memberful_feeds:
+                if fid not in seen:
+                    seen.add(fid)
+                    feeds.append(fid)
+    return feeds
+
+
+# Host and network-wide Club TWiT feeds for deeper episode discovery (derived from SHOW_REGISTRY)
+MEMBERFUL_HOST_FEEDS: list[int] = _derive_memberful_host_feeds()
 
 SHOW_SEARCH_SLUGS: dict[str, list[str]] = {
     key: list(entry.search_slugs)
@@ -353,38 +412,90 @@ TRANSCRIPT_SLUG_MAP: dict[str, list[str]] = {
     if entry.transcript_slugs
 }
 
-DEFAULT_SHOWS: list[tuple[str, str | None]] = [
-    ("AI Inside", "846616"),
-    ("Abby's Road", "1652"),
-    ("All About Android", "1665"),
-    ("All TWiT.tv Shows", "65161"),
-    ("Android App Arena", "1684"),
-    ("Ask The Tech Guy", "791331"),
-    ("Ask The Tech Guys", "1642"),
-    ("Hands-On AI", "862716"),
-    ("Hands-On Tech", "726171"),
-    ("Hands-On Windows", "837161"),
-    ("Home Theater Geeks", "1657"),
-    ("Intelligent Machines", "1653"),
-    ("MacBreak Weekly", "1643"),
-    ("Security Now", "1636"),
-    ("TWiT+ Clips", "825225"),
-    ("TWiT+ Club Shows", "856957"),
-    ("TWiT+ News", "856956"),
-    ("Tech News Weekly", "540261"),
-    ("This Week in Space", "832621"),
-    ("This Week in Tech", "1635"),
-    ("Total Leo", "1647"),
-    ("Total Mikah", "813334"),
-    ("Triangulation", None),
-    ("Untitled Linux Show", "832795"),
-    ("Windows Weekly", "1645"),
-    ("iOS Today", "1660"),
-]
+# Short alphanumeric show abbreviations derived from SHOW_REGISTRY (sorted longest-first for regex use)
+SHOW_ABBREVIATIONS: tuple[str, ...] = tuple(
+    sorted(
+        {
+            slug.lower()
+            for entry in _REGISTRY_ENTRIES
+            for slug in (*entry.search_slugs, *entry.transcript_slugs)
+            if slug.isalnum() and len(slug) <= 6
+        },
+        key=lambda token: (-len(token), token),
+    )
+)
+
+# Default fallback show catalog derived strictly from SHOW_REGISTRY
+DEFAULT_SHOWS: list[tuple[str, str | None]] = sorted(
+    [
+        (entry.display_name, entry.default_show_id)
+        for entry in _REGISTRY_ENTRIES
+        if entry.include_in_default_shows
+    ],
+    key=lambda pair: pair[0],
+)
+
+
+def _normalize_show_lookup_key(show_name: str) -> str:
+    """Normalize a show label for punctuation- and hyphen-tolerant lookup."""
+    lowered = show_name.strip().lower()
+    # Replace hyphens/underscores/punctuation with spaces and collapse whitespace
+    normalized = re.sub(r"[^a-z0-9+]+", " ", lowered)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _build_show_alias_index() -> dict[str, ShowEntry]:
+    """Build normalized and unambiguous-slug lookup table derived from SHOW_REGISTRY."""
+    index: dict[str, ShowEntry] = {}
+
+    # 1. Exact canonical keys and normalized keys (highest priority)
+    for entry in _REGISTRY_ENTRIES:
+        index[entry.key] = entry
+        norm_key = _normalize_show_lookup_key(entry.key)
+        if norm_key and norm_key not in index:
+            index[norm_key] = entry
+        norm_display = _normalize_show_lookup_key(entry.display_name)
+        if norm_display and norm_display not in index:
+            index[norm_display] = entry
+
+    # 2. Explicit aliases
+    for entry in _REGISTRY_ENTRIES:
+        for alias in entry.aliases:
+            raw_alias = alias.strip().lower()
+            if raw_alias and raw_alias not in index:
+                index[raw_alias] = entry
+            norm_alias = _normalize_show_lookup_key(alias)
+            if norm_alias and norm_alias not in index:
+                index[norm_alias] = entry
+
+    # 3. Unambiguous search slugs / abbreviations (only when unique across registry entries)
+    slug_owners: dict[str, list[ShowEntry]] = {}
+    for entry in _REGISTRY_ENTRIES:
+        for slug in entry.search_slugs:
+            slug_key = slug.strip().lower()
+            if slug_key:
+                slug_owners.setdefault(slug_key, []).append(entry)
+    for slug_key, owners in slug_owners.items():
+        if len(owners) == 1 and slug_key not in index:
+            index[slug_key] = owners[0]
+
+    return index
+
+
+_SHOW_ALIAS_INDEX: dict[str, ShowEntry] = _build_show_alias_index()
 
 
 def get_show_entry(show_name: str) -> ShowEntry | None:
-    """Look up a ``ShowEntry`` case-insensitively by normalized show name."""
-    if not show_name:
+    """Look up a ``ShowEntry`` case-insensitively by canonical name, normalized punctuation, alias, or unique slug."""
+    if not show_name or not isinstance(show_name, str):
         return None
-    return SHOW_REGISTRY.get(show_name.strip().lower())
+    raw = show_name.strip().lower()
+    if not raw:
+        return None
+    direct = SHOW_REGISTRY.get(raw)
+    if direct is not None:
+        return direct
+    aliased = _SHOW_ALIAS_INDEX.get(raw)
+    if aliased is not None:
+        return aliased
+    return _SHOW_ALIAS_INDEX.get(_normalize_show_lookup_key(raw))

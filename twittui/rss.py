@@ -12,7 +12,7 @@ import requests
 
 from twittui.logging_config import get_logger, safe_url_for_log
 from twittui.media import is_safe_http_url, safe_xml_fromstring
-from twittui.shows import KNOWN_SHOW_FEEDS, MEMBERFUL_HOST_FEEDS, MEMBERFUL_SHOW_FEEDS
+from twittui.shows import KNOWN_SHOW_FEEDS, MEMBERFUL_HOST_FEEDS, MEMBERFUL_SHOW_FEEDS, get_show_entry
 
 _logger = get_logger("rss")
 
@@ -127,8 +127,15 @@ class RssMixin:
         feed_ids_to_fetch = []
         if show_name:
             show_key = show_name.lower().strip()
-            if show_key in MEMBERFUL_SHOW_FEEDS:
-                show_fids = list(MEMBERFUL_SHOW_FEEDS[show_key])
+            entry = get_show_entry(show_name)
+            canonical_key = entry.key if entry is not None else show_key
+            if canonical_key in MEMBERFUL_SHOW_FEEDS:
+                show_fids = list(MEMBERFUL_SHOW_FEEDS[canonical_key])
+                if audio_only:
+                    show_fids.reverse()
+                feed_ids_to_fetch.extend(show_fids)
+            elif entry is not None and entry.memberful_feeds:
+                show_fids = list(entry.memberful_feeds)
                 if audio_only:
                     show_fids.reverse()
                 feed_ids_to_fetch.extend(show_fids)
@@ -178,7 +185,9 @@ class RssMixin:
         elif cache_key in self._show_rss_cache:
             return self._show_rss_cache[cache_key]
 
-        feed_files = list(KNOWN_SHOW_FEEDS.get(show_key, []))
+        entry = get_show_entry(show_name)
+        canonical_key = entry.key if entry is not None else show_key
+        feed_files = list(KNOWN_SHOW_FEEDS.get(canonical_key) or (entry.public_feeds if entry is not None else ()))
         if not feed_files:
             slug = re.sub(r'[^a-zA-Z0-9]+', '', show_key)
             feed_files = [f"{slug}.xml", f"{slug}_video_hd.xml"] if audio_only else [f"{slug}_video_hd.xml", f"{slug}.xml"]

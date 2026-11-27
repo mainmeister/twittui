@@ -27,8 +27,11 @@ from twittui._compat import PACKAGE_ROOT
 from twittui.cache import SHOW_DATE_BOUNDS_TTL_SECONDS
 from twittui.logging_config import configure_logging, get_logger, reset_logging, safe_url_for_log
 from twittui.shows import (
+    DEFAULT_SHOWS,
     KNOWN_SHOW_FEEDS,
+    MEMBERFUL_HOST_FEEDS,
     MEMBERFUL_SHOW_FEEDS,
+    SHOW_ABBREVIATIONS,
     SHOW_REGISTRY,
     SHOW_SEARCH_SLUGS,
     TRANSCRIPT_SLUG_MAP,
@@ -173,7 +176,7 @@ class TestArchitectureSuggestions(unittest.TestCase):
                 packaged_resources._cleanup_materialized_resources()
 
     def test_unified_show_registry_completeness_and_derivation(self) -> None:
-        """All 4 derived show lookup tables come from SHOW_REGISTRY and include previously missing shows."""
+        """All derived show lookup tables (feeds, host feeds, slugs, abbreviations, defaults) come from SHOW_REGISTRY."""
         for key, entry in SHOW_REGISTRY.items():
             self.assertIsInstance(entry, ShowEntry)
             self.assertEqual(entry.key, key)
@@ -186,23 +189,50 @@ class TestArchitectureSuggestions(unittest.TestCase):
             if entry.transcript_slugs:
                 self.assertEqual(TRANSCRIPT_SLUG_MAP[key], list(entry.transcript_slugs))
 
-        # Previously diverging shows are now unified across feeds, search slugs, and transcript slugs
-        for show_key in (
-            "floss weekly",
-            "hands-on photography",
-            "this week in enterprise tech",
-            "this week in google",
-            "all about android",
-            "intelligent machines",
+        # DEFAULT_SHOWS and MEMBERFUL_HOST_FEEDS are strictly derived from SHOW_REGISTRY (no duplicate lists)
+        expected_defaults = sorted(
+            [
+                (entry.display_name, entry.default_show_id)
+                for entry in SHOW_REGISTRY.values()
+                if entry.include_in_default_shows
+            ],
+            key=lambda pair: pair[0],
+        )
+        self.assertEqual(DEFAULT_SHOWS, expected_defaults)
+        self.assertEqual(len(DEFAULT_SHOWS), 26)
+
+        expected_host_feeds: list[int] = []
+        for entry in SHOW_REGISTRY.values():
+            if entry.is_host_feed:
+                for fid in entry.memberful_feeds:
+                    if fid not in expected_host_feeds:
+                        expected_host_feeds.append(fid)
+        self.assertEqual(MEMBERFUL_HOST_FEEDS, expected_host_feeds)
+        self.assertEqual(
+            MEMBERFUL_HOST_FEEDS,
+            [9073, 9072, 9053, 9052, 9075, 9074, 9069, 9068, 9162, 9161],
+        )
+
+        # Previously diverging shows are now unified across feeds, search slugs, transcript slugs, and abbreviations
+        for show_key, abbrev in (
+            ("floss weekly", "floss"),
+            ("hands-on photography", "hop"),
+            ("this week in enterprise tech", "twiet"),
+            ("this week in google", "twig"),
+            ("all about android", "aaa"),
+            ("intelligent machines", "im"),
+            ("smart tech today", "stt"),
+            ("know how", "kh"),
         ):
             entry = get_show_entry(show_key)
             self.assertIsNotNone(entry, f"Missing ShowEntry for {show_key}")
             self.assertIn(show_key, KNOWN_SHOW_FEEDS)
             self.assertIn(show_key, SHOW_SEARCH_SLUGS)
             self.assertIn(show_key, TRANSCRIPT_SLUG_MAP)
+            self.assertIn(abbrev, SHOW_ABBREVIATIONS)
 
     def test_transcript_slug_candidates_cover_newly_unified_shows(self) -> None:
-        """generate_transcript_slug_candidates uses unified TRANSCRIPT_SLUG_MAP for all shows."""
+        """generate_transcript_slug_candidates uses unified SHOW_REGISTRY without substring collisions."""
         form = TwitTUIForm("SlugApp", "org.twit.test")
         im_cands = form.generate_transcript_slug_candidates("Intelligent Machines", "800")
         self.assertTrue(any("/im-800-transcript" in c for c in im_cands))
@@ -210,6 +240,42 @@ class TestArchitectureSuggestions(unittest.TestCase):
         self.assertTrue(any("/aaa-650-transcript" in c for c in aaa_cands))
         hop_cands = form.generate_transcript_slug_candidates("Hands-On Photography", "200")
         self.assertTrue(any("/hop-200-transcript" in c for c in hop_cands))
+
+        # Exact registry lookup prevents "the tech guy" substring from clobbering "Ask The Tech Guy"
+        attg_cands = form.generate_transcript_slug_candidates("Ask The Tech Guy", "1050")
+        self.assertTrue(attg_cands[0].endswith("/ask-tech-guys-1050-transcript"))
+        self.assertFalse(any("/ttg-1050" in c for c in attg_cands))
+
+    def test_show_registry_alias_lookup_and_no_inline_diverging_maps(self) -> None:
+        """get_show_entry resolves aliases/punctuation, metadata parses registry abbreviations, and no inline maps remain."""
+        self.assertEqual(get_show_entry("Security Now!").key, "security now")
+        self.assertEqual(get_show_entry("Know How...").key, "know how")
+        self.assertEqual(get_show_entry("Hands On Tech").key, "hands-on tech")
+        self.assertEqual(get_show_entry("twiet").key, "this week in enterprise tech")
+        self.assertEqual(get_show_entry("floss").key, "floss weekly")
+        self.assertEqual(get_show_entry("hop").key, "hands-on photography")
+        self.assertEqual(get_show_entry("aaa").key, "all about android")
+        self.assertEqual(get_show_entry("im").key, "intelligent machines")
+
+        # Metadata episode number extraction recognizes abbreviations derived from SHOW_REGISTRY
+        form = TwitTUIForm("AbbrevMeta", "org.twit.test")
+        for title, expected_num in (
+            ("FLOSS 750: Open Source Hardware", "750"),
+            ("TWIET 550: Zero Trust", "550"),
+            ("HOP 200: Studio Lighting", "200"),
+            ("AAA 650: Android 16", "650"),
+        ):
+            meta = form.extract_episode_metadata_fields({"title": title}, show_name="FLOSS Weekly")
+            self.assertEqual(meta["episode"], expected_num)
+
+        # AST guard: legacy inline abbrevs / short_map dictionaries must never reappear in catalog or metadata
+        for rel_path in ("twittui/catalog.py", "twittui/ui/metadata.py"):
+            tree = ast.parse((PROJECT_ROOT / rel_path).read_text(encoding="utf-8"), rel_path)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name) and target.id in ("abbrevs", "short_map"):
+                            self.fail(f"Found legacy inline show map '{target.id}' in {rel_path}:{node.lineno}")
 
     def test_normalized_episodes_table_wal_mode_and_roundtrip(self) -> None:
         """Episodes persist into normalized twittui_episodes rows with WAL mode and lazy loading."""
