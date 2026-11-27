@@ -21,13 +21,7 @@ from twittui.config import load_twittui_dotenv
 from twittui.logging_config import get_logger
 from twittui.shows import (
     DEFAULT_SHOWS,
-    KNOWN_SHOW_FEEDS,
-    MEMBERFUL_HOST_FEEDS,
-    MEMBERFUL_SHOW_FEEDS,
-    SHOW_REGISTRY,
     SHOW_SEARCH_SLUGS,
-    TRANSCRIPT_SLUG_MAP,
-    ShowEntry,
     get_show_entry,
 )
 
@@ -733,8 +727,6 @@ class CatalogMixin:
             return []
 
         query_str = query.strip()
-        query_lower = query_str.lower()
-        query_words = [w for w in re.split(r'\s+', query_lower) if w]
 
         selected_show = show_name or self._selected_show_name()
         if not selected_show and hasattr(self, 'show_ids') and show_id:

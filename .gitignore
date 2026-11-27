@@ -24,8 +24,12 @@ venv/
 dist/
 build/
 *.spec
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
 
 # Snapcraft build artifacts
+overlay/
 parts/
 prime/
 stage/

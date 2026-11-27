@@ -18,7 +18,7 @@ import asyncio
 import toga
 from toga.style import Pack
 from toga.style.pack import COLUMN
-from twittui.shows import KNOWN_SHOW_FEEDS, MEMBERFUL_HOST_FEEDS, MEMBERFUL_SHOW_FEEDS, get_show_entry
+from twittui.shows import KNOWN_SHOW_FEEDS, MEMBERFUL_HOST_FEEDS, get_show_entry
 
 try:
     import defusedxml.ElementTree as DefusedET

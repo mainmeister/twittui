@@ -8,7 +8,6 @@ import copy
 import inspect
 import json
 import os
-import re
 import sqlite3
 import sys
 import threading
@@ -21,12 +20,10 @@ import toga
 from toga.style import Pack
 from toga.style.pack import COLUMN, ROW
 
-from tiered_search import compute_match_score, rank_and_filter_episodes
+from tiered_search import rank_and_filter_episodes
 from twittui._compat import (
-    PACKAGE_ROOT,
     PROJECT_ROOT,
     _is_textual_environment,
-    _is_textual_tui_running,
     api_rate_limiter,
     compat_attr,
     launch_stream_safe,
@@ -388,7 +385,7 @@ class TwitTUIForm(
                 kwargs["icon"] = resolved_icon
         try:
             super().__init__(formal_name=formal_name, app_id=app_id, **kwargs)
-        except Exception as e:
+        except Exception:
             # If icon creation triggered a backend error or recursion, retry without explicit icon
             if "icon" in kwargs:
                 kwargs.pop("icon", None)

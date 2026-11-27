@@ -6,7 +6,6 @@ import html
 import os
 import re
 import threading
-import time
 
 import toga
 from toga.style import Pack

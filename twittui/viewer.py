@@ -268,7 +268,7 @@ def sanitize_html_content(html_str: str) -> str:
                 "blockquote", "strong", "em", "a", "hr", "br", "span", "div", "img",
             },
             attributes={
-                "a": {"href", "title", "id", "name", "target", "rel"},
+                "a": {"href", "title", "id", "name", "target"},
                 "img": {"src", "alt", "title", "width", "height"},
                 "th": {"align"},
                 "td": {"align"},

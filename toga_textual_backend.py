@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager, redirect_stdout
-import io
 import logging
 import os
 from pathlib import Path
@@ -2047,8 +2046,6 @@ def patch_toga_textual() -> None:
 
             toga_textual.app.App.set_current_window = safe_set_current_window
 
-            orig_create = toga_textual.app.App.create
-
             def safe_create(self: Any) -> None:
                 self.interface._startup()
                 main_win = getattr(self.interface, "main_window", None)
@@ -2462,5 +2459,5 @@ def patch_toga_textual() -> None:
                     setattr(f, dialog_name, getattr(DialogsFactory, dialog_name))
         except Exception:
             _logger.debug("Ignored exception in %s", 'patch_toga_textual', exc_info=True)
-    except Exception as e:
+    except Exception:
         _logger.debug("Ignored exception in %s", 'patch_toga_textual', exc_info=True)

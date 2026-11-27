@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install system GTK and Xvfb dependencies
+      - name: Install system GTK, Xvfb, and Openbox dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -32,21 +32,39 @@ jobs:
             libcairo2-dev \
             pkg-config \
             shared-mime-info \
-            xvfb
+            xvfb \
+            openbox
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[gtk,security,fast-search,xml,dev]"
 
+      - name: Lint with ruff
+        run: |
+          ruff check twittui main.py twittui_form.py toga_textual_backend.py tiered_search.py double_metaphone.py installer.py generate_icon.py
+
+      - name: Type-check core modules with mypy
+        run: |
+          mypy twittui/shows.py twittui/cache.py twittui/logging_config.py twittui/rate_limiter.py twittui/resources/__init__.py twittui/cli.py twittui/_compat.py main.py tiered_search.py double_metaphone.py installer.py
+
       - name: Syntax check all modules
         run: |
           python -m py_compile *.py twittui/*.py twittui/resources/*.py twittui/ui/*.py twittui/search/*.py
 
-      - name: Run full test suite (headless Textual + Xvfb GTK)
+      - name: Run headless Textual smoke suite (no DISPLAY)
+        env:
+          DISPLAY: ""
+          TOGA_BACKEND: toga_textual
+          SNAP_USER_DATA: ${{ runner.temp }}/twittui_snap_data_textual
+        run: |
+          mkdir -p "$SNAP_USER_DATA"
+          python -W always::ResourceWarning -m unittest test_tui_streaming_and_stdout test_tui_multiselect test_episode_activation test_splash_screen test_architecture_suggestions test_snap -v
+
+      - name: Run full test suite (headless Textual + Xvfb GTK/Openbox)
         env:
           TOGA_BACKEND: toga_textual
           SNAP_USER_DATA: ${{ runner.temp }}/twittui_snap_data
         run: |
           mkdir -p "$SNAP_USER_DATA"
-          xvfb-run -a python -m unittest discover -s . -p "test_*.py" -v
+          xvfb-run -a python -W always::ResourceWarning -m unittest discover -s . -p "test_*.py" -v

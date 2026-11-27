@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import email.utils
-import html
 import os
 import re
-import urllib.parse
 
 import requests
 
 from twittui.logging_config import get_logger, safe_url_for_log
-from twittui.media import is_safe_http_url, safe_xml_fromstring
-from twittui.shows import KNOWN_SHOW_FEEDS, MEMBERFUL_HOST_FEEDS, MEMBERFUL_SHOW_FEEDS, get_show_entry
+from twittui.media import safe_xml_fromstring
+from twittui.shows import KNOWN_SHOW_FEEDS, MEMBERFUL_SHOW_FEEDS, get_show_entry
 
 _logger = get_logger("rss")
 

@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import os
-from dotenv import find_dotenv, load_dotenv
-import shutil
+from dotenv import find_dotenv, load_dotenv, set_key
 import tempfile
 import threading
-from typing import Any
 import urllib.parse
-from dotenv import set_key
 
 from twittui._compat import PROJECT_ROOT, compat_attr
 

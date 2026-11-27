@@ -12,10 +12,13 @@ import re
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any, Tuple, Optional
 
+rf_fuzz: Optional[Any] = None
 try:
-    from rapidfuzz import fuzz as rf_fuzz
+    from rapidfuzz import fuzz as _rf_fuzz
 except ImportError:
-    rf_fuzz = None
+    pass
+else:
+    rf_fuzz = _rf_fuzz
 
 from double_metaphone import double_metaphone, get_phonetic_keys
 
@@ -91,7 +94,6 @@ def fzf_subsequence_score(query: str, target: str) -> float:
 
     q_idx = 0
     q_len = len(q)
-    t_len = len(t)
     last_match = -1
     consecutive = 0
     score = 0.0
@@ -142,18 +144,18 @@ def format_duration_str(val: Any) -> str:
             except (ValueError, TypeError):
                 _logger.debug("Invalid structured duration dict: %r", val)
         return ''
-    s = str(val).strip()
-    if not s:
+    s_val = str(val).strip()
+    if not s_val:
         return ''
-    if s.isdigit():
-        total = int(s)
+    if s_val.isdigit():
+        total = int(s_val)
         h = total // 3600
         m = (total % 3600) // 60
         sec = total % 60
         if h > 0:
             return f"{h:02d}:{m:02d}:{sec:02d}"
         return f"{m:02d}:{sec:02d}"
-    return s
+    return s_val
 
 
 def format_file_size_str(val: Any) -> str:

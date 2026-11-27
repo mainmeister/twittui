@@ -77,7 +77,7 @@ def is_pyinstaller_installed(python_executable: str | None = None) -> bool:
         _logger.debug("PyInstaller subprocess probe failed for %s", py_exec, exc_info=True)
     if python_executable is None or python_executable == sys.executable:
         try:
-            import PyInstaller  # type: ignore # noqa: F401
+            import PyInstaller  # noqa: F401
             return True
         except ImportError:
             pass
@@ -482,13 +482,17 @@ def install_twittui(
     ensure_pyinstaller_installed(python_executable=python_executable)
 
     # 2. Build non-debug executable
-    build_kwargs: dict[str, object] = {
-        "project_root": root,
-        "python_executable": python_executable,
-    }
     if strip_binary:
-        build_kwargs["strip_binary"] = True
-    built_exe = build_executable(**build_kwargs)
+        built_exe = build_executable(
+            project_root=root,
+            python_executable=python_executable,
+            strip_binary=True,
+        )
+    else:
+        built_exe = build_executable(
+            project_root=root,
+            python_executable=python_executable,
+        )
 
     # 3. Determine local executable search PATH directory
     install_dir = find_local_executable_path(target_dir=target_dir)

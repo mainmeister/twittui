@@ -859,13 +859,46 @@ class TestArchitectureSuggestions(unittest.TestCase):
         installer_text = (PROJECT_ROOT / "installer.py").read_text(encoding="utf-8")
         self.assertIn('"twittui"', installer_text)
 
+        self.assertIn("ruff", pyproject_data["tool"])
+        self.assertIn("mypy", pyproject_data["tool"])
+
         gitignore_text = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
-        for pat in ("*.egg-info/", "*.log", "*.spec"):
+        for pat in ("*.egg-info/", "*.log", "*.spec", ".ruff_cache/", ".mypy_cache/", "overlay/"):
             self.assertIn(pat, gitignore_text)
+
+        # Verify scratch build logs are removed and static API captures are relocated out of repo root
+        for stale_root_file in (
+            "build.log",
+            "build_verbose.log",
+            "shows.json",
+            "shows_2.json",
+            "shows_3.json",
+            "shows_4.json",
+            "sn_ballecer.txt",
+            "scenarios.jsonl",
+        ):
+            self.assertFalse(
+                (PROJECT_ROOT / stale_root_file).exists(),
+                f"Scratch/capture artifact must not sit in repo root: {stale_root_file}",
+            )
+        fixtures_dir = PROJECT_ROOT / "docs" / "fixtures"
+        for fixture_name in (
+            "shows.json",
+            "shows_2.json",
+            "shows_3.json",
+            "shows_4.json",
+            "sn_ballecer.txt",
+            "scenarios.jsonl",
+        ):
+            self.assertTrue((fixtures_dir / fixture_name).is_file(), f"Missing relocated fixture: {fixture_name}")
 
         ci_path = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
         self.assertTrue(ci_path.is_file(), ".github/workflows/ci.yml must exist")
         ci_text = ci_path.read_text(encoding="utf-8")
+        self.assertIn("openbox", ci_text)
+        self.assertIn("ruff check", ci_text)
+        self.assertIn("mypy ", ci_text)
+        self.assertIn('DISPLAY: ""', ci_text)
         self.assertIn("xvfb-run", ci_text)
         self.assertIn("SNAP_USER_DATA", ci_text)
         self.assertIn("unittest discover", ci_text)

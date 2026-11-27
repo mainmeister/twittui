@@ -219,14 +219,19 @@ def resolve_toga_backend(argv: list[str] | None = None, prompt_interactive: bool
 
     if args.install:
         from installer import clean_build_artifacts, install_twittui
-        install_kwargs: dict[str, object] = {
-            "target_dir": args.install_dir,
-            "python_executable": getattr(args, 'python_executable', None),
-            "clean_build_artifacts": not getattr(args, 'no_clean', False),
-        }
         if getattr(args, 'strip', False):
-            install_kwargs["strip_binary"] = True
-        install_twittui(**install_kwargs)
+            install_twittui(
+                target_dir=args.install_dir,
+                python_executable=getattr(args, 'python_executable', None),
+                clean_build_artifacts=not getattr(args, 'no_clean', False),
+                strip_binary=True,
+            )
+        else:
+            install_twittui(
+                target_dir=args.install_dir,
+                python_executable=getattr(args, 'python_executable', None),
+                clean_build_artifacts=not getattr(args, 'no_clean', False),
+            )
         if getattr(args, 'uninstall_pyinstaller', False):
             clean_build_artifacts(
                 remove_dist=False,
