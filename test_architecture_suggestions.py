@@ -988,6 +988,51 @@ class TestArchitectureSuggestions(unittest.TestCase):
                 self.assertTrue(any(line.startswith("Requires-Dist: toga-core") for line in req_lines))
                 self.assertFalse(any(line.startswith("Requires-Dist: toga ") for line in req_lines))
 
+    def test_technical_review_matches_codebase_reality(self) -> None:
+        """Guard against documentation drift in Technical_review.md across architecture, search, cache, GTK, and CI."""
+        doc = (PROJECT_ROOT / "Technical_review.md").read_text(encoding="utf-8")
+
+        # 1. Historical drifted claims must remain absent
+        forbidden_drifted_claims = (
+            "Unified Python Packaging (`pyproject.toml`, `setup.py`",
+            "?token=<token>",
+            "native.scroll_to_iter(",
+            "(If Score < 75.0)",
+            "headings=['Episode'",
+            "toga_textual_backend.py (2,122 lines)",
+            "re-entrant lock",
+            "set_default_icon_from_file",
+            "visual countdown",
+        )
+        for stale in forbidden_drifted_claims:
+            self.assertNotIn(stale, doc, f"Found stale/drifted claim in Technical_review.md: {stale!r}")
+
+        # 2. Current post-remediation architecture and behavior must be accurately documented
+        required_current_facts = (
+            "twittui/ui/form.py",
+            "twittui/resources/__init__.py",
+            "importlib.resources",
+            "twittui_episodes_fts",
+            "SHOW_ABBREVIATIONS",
+            "get_show_entry()",
+            "native_textview",
+            "GLib.idle_add",
+            "scroll_to_mark",
+            "(If Word Score < 80.0)",
+            "Summary / Teaser",
+            "columns=['Episode', 'Title', 'Date', 'Length', 'Size']",
+            "safe_url_for_log()",
+            "os.replace()",
+            "docs/fixtures/",
+            "ruff check",
+            "mypy",
+            "openbox",
+            "25 test modules",
+            "336 unit and integration tests",
+        )
+        for fact in required_current_facts:
+            self.assertIn(fact, doc, f"Technical_review.md missing verified codebase fact: {fact!r}")
+
 
 if __name__ == "__main__":
     unittest.main()
